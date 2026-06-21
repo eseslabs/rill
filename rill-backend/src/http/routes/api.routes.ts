@@ -192,7 +192,7 @@ apiRouter.get('/audit/:blobId', async (c) => {
 apiRouter.get('/mcp/:skillId', (c) => {
   const skill = skillsStore.get(c.req.param('skillId'));
   if (!skill) return c.text('Skill not found', 404);
-  return c.html(buildMcpLandingHtml(skill));
+  return c.body(buildMcpLandingHtml(skill), 200, { 'Content-Type': 'text/html; charset=utf-8' });
 });
 
 apiRouter.post('/mcp/:skillId', async (c) => {
