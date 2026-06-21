@@ -46,14 +46,35 @@ Plus \`sender\` — your Sui address. The PTB is built for this address (tx send
 
 ## Run it — pick one
 
-### Option A · MCP (Claude Code, OpenCode, Cursor, any MCP agent)
-Add this MCP server, then call tool \`${toolName}\`:
+### Option A · MCP (Streamable HTTP) — connect your agent to this server
+MCP endpoint (paste into your agent, then call tool \`${toolName}\`):
 
 \`\`\`
 ${mcpUrl}
 \`\`\`
 
-Pass the parameters above plus \`sender\`. The tool returns \`unsignedPtb\` (base64) + a simulation preview. Sign + submit it locally (see **Signing**).
+**Claude Code**
+\`\`\`bash
+claude mcp add --transport http rill ${mcpUrl}
+\`\`\`
+
+**OpenCode** — add to \`opencode.json\`:
+\`\`\`json
+{
+  "mcp": {
+    "rill": { "type": "remote", "url": "${mcpUrl}", "enabled": true }
+  }
+}
+\`\`\`
+
+**Thiny** — \`@thiny/mcp\`:
+\`\`\`ts
+import { mcpHttpPlugin } from '@thiny/mcp';
+const rill = await mcpHttpPlugin({ url: '${mcpUrl}', name: 'rill' });
+// add \`rill\` (+ suiPlugin for signing) to createAgent({ plugins: [...] })
+\`\`\`
+
+Then call \`${toolName}\` with the parameters above plus \`sender\`. It returns \`unsignedPtb\` (base64) + a simulation preview — sign + submit it locally (see **Signing**).
 
 ### Option B · REST (any agent / script)
 \`\`\`bash
@@ -100,5 +121,8 @@ if (import.meta.main) {
   });
   if (!doc.includes('`amount_in`')) throw new Error('skill-doc: required param not rendered');
   if (!doc.includes('/api/mcp/skill_demo')) throw new Error('skill-doc: mcp url missing');
+  if (!doc.includes('claude mcp add --transport http')) throw new Error('skill-doc: Claude Code setup missing');
+  if (!doc.includes('"type": "remote"')) throw new Error('skill-doc: OpenCode setup missing');
+  if (!doc.includes('mcpHttpPlugin')) throw new Error('skill-doc: Thiny setup missing');
   console.log('skill-doc self-check ok');
 }

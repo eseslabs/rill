@@ -12,10 +12,17 @@ services:
       - "traefik.http.routers.rill-backend.entrypoints=websecure"
       - "traefik.http.routers.rill-backend.tls.certresolver=letsencrypt"
       - "traefik.http.services.rill-backend.loadbalancer.server.port=3002"
+      # Edge rate limiting (per source IP) — the right layer for a public API; protects the Sui RPC calls.
+      - "traefik.http.middlewares.rill-ratelimit.ratelimit.average=30"
+      - "traefik.http.middlewares.rill-ratelimit.ratelimit.burst=60"
+      - "traefik.http.routers.rill-backend.middlewares=rill-ratelimit"
     env_file:
       - ./rill-backend/.env
     environment:
       PUBLIC_BASE_URL: https://api.rill.naisu.one
+      SKILLS_STORE_PATH: /app/data/skills.json
+    volumes:
+      - rill-data:/app/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3002/health"]
       interval: 15s
@@ -29,6 +36,10 @@ services:
     networks:
       - rill-internal
       - traefik-public
+
+volumes:
+  rill-data:
+    name: rill-data
 
 networks:
   rill-internal:

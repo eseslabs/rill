@@ -187,16 +187,31 @@ apiRouter.get('/audit/:blobId', async (c) => {
   }
 });
 
-/** MCP JSON-RPC endpoint (tools/list, tools/call). GET redirects to SKILL.md. */
+/**
+ * MCP endpoint (Streamable HTTP transport) — works with Thiny (mcpHttpPlugin), Claude Code
+ * (`claude mcp add --transport http`), and OpenCode (remote MCP). POST carries JSON-RPC; a GET with
+ * an event-stream Accept is the client probing for a server push stream (we don't push → 405, which
+ * the MCP SDK handles), while a browser GET is redirected to the human-readable SKILL.md.
+ */
 apiRouter.get('/mcp/:skillId', (c) => {
   const skillId = c.req.param('skillId');
   if (!skillsStore.get(skillId)) return c.text('Skill not found', 404);
+  if ((c.req.header('Accept') || '').includes('text/event-stream')) {
+    return c.text('This MCP server does not support a GET event stream.', 405);
+  }
   return c.redirect(`${config.publicBaseUrl}/api/skills/${skillId}/skill.md`, 302);
 });
 
 apiRouter.post('/mcp/:skillId', async (c) => {
   const skillId = c.req.param('skillId');
-  const body = await c.req.json();
+  let body: Record<string, unknown>;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }, 400);
+  }
   const response = await handleMcpJsonRpc(skillId, body);
+  // Notifications/responses get no body — reply 202 Accepted per the Streamable HTTP spec.
+  if (response === null) return c.body(null, 202);
   return c.json(response);
 });
