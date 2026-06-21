@@ -88,7 +88,7 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
         selected ? "ring-2 ring-primary/60" : ""
       }`}
     >
-      {!ports && <Handle type="target" position={Position.Left} />}
+      {!ports && !isCetusSwap && !isHaedalStake && <Handle type="target" position={Position.Left} />}
       <div className={`px-3 py-2 rounded-t-2xl ${c.bg} ${c.text} flex items-center justify-between gap-2`}>
         <div className="flex items-center gap-2 min-w-0">
           <span className={`inline-block h-2 w-2 rounded-full ${c.dot} opacity-70`} />
@@ -107,7 +107,7 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
         <div className="text-sm font-semibold text-foreground">{data.action}</div>
         <div className="mt-0.5 text-xs text-muted-foreground leading-snug">{data.description}</div>
 
-        {ports ? (
+        {ports && (
           <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
             <div className="space-y-1">
               {ports.inputs.map((p, idx) => (
@@ -142,7 +142,9 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
               ))}
             </div>
           </div>
-        ) : isCetusSwap ? (
+        )}
+
+        {isCetusSwap ? (
           <div className="mt-3 space-y-2">
             <label className="block">
               <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Token in</span>
@@ -224,7 +226,7 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
           )
         )}
       </div>
-      {!ports && <Handle type="source" position={Position.Right} />}
+      {!ports && !isCetusSwap && !isHaedalStake && <Handle type="source" position={Position.Right} />}
     </motion.div>
   );
 }

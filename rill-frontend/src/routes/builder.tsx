@@ -43,6 +43,7 @@ import { DiscoverDialog } from "@/components/flow/discover-dialog";
 import { SimulateDialog, DEFAULT_GUARDRAILS, type Guardrail } from "@/components/flow/simulate-dialog";
 import { buildFlowGraph } from "@/lib/flow-mapper";
 import { applyProtocolRegistry, defaultActionConfig } from "@/lib/action-config";
+import { getActionPorts } from "@/lib/action-ports";
 import { rillApi, type PublishResult } from "@/lib/rill-api";
 import type { DiscoveredFunction, IntrospectionResult } from "@/lib/introspect";
 
@@ -129,6 +130,7 @@ function Builder() {
     color: p.color,
     inputs: action.inputs,
     config: defaultActionConfig(p.id, action.id),
+    ports: getActionPorts(p.id, action.id),
   });
 
   const addAction = useCallback(
@@ -239,7 +241,7 @@ function Builder() {
             <p className="mt-2 text-[11px] text-muted-foreground leading-relaxed">
               1. Drag node → set <strong>token & amount</strong> on canvas
               <br />
-              2. Wire nodes (optional): swap output → stake input
+              2. Wire <strong>coin_out → sui_coin</strong> (swap must output SUI for stake)
               <br />
               3. <strong>Simulate</strong> → then <strong>Compile & export</strong> for MCP URL
             </p>

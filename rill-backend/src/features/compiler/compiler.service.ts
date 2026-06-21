@@ -1,8 +1,7 @@
 import { Transaction } from '@mysten/sui/transactions';
 import type { AgentWalletBinding } from '../../core/agent-wallet';
 import { SUI_COIN_TYPE } from '../../core/agent-wallet';
-import { SUI_COIN_TYPE } from '../../core/agent-wallet';
-import { SUI_CLOCK_ID } from '../../core/protocols';
+import { DEFAULT_SIMULATE_SENDER, SUI_CLOCK_ID } from '../../core/protocols';
 import { resolveCetusSwapConfig, resolveHaedalStakeConfig } from '../../core/node-config';
 import { pickSwapFunction, resolvePoolTypeArgs } from './pool-resolver';
 
@@ -75,7 +74,6 @@ export class CompilerService {
         warnings.push(...cfgWarnings);
 
         const amountIn = BigInt(swapCfg.amount_in);
-        const minAmountOut = BigInt(swapCfg.min_amount_out);
         const poolId = swapCfg.pool;
         const inputCoinType = swapCfg.inputCoinType;
 
@@ -90,64 +88,70 @@ export class CompilerService {
 
         if (coinInputEdge) {
           coinInputArg = nodeOutputs[coinInputEdge.source];
+          if (coinInputArg === undefined) {
+            throw new Error(
+              `Node ${node.id}: upstream coin from ${coinInputEdge.source} is missing — ensure swap uses router::swap (wire coin_out → sui_coin).`,
+            );
+          }
+        } else if (inputCoinType !== SUI_COIN_TYPE) {
+          throw new Error(
+            `Node ${node.id}: non-SUI input (${inputCoinType}) requires an upstream coin edge. Use Token in = SUI for standalone swap.`,
+          );
         } else {
           coinInputArg = this.fundSuiCoin(tx, amountIn, budgetCoin, options.agentWallet);
         }
 
-        if (hasDownstream) {
-          const zeroA = tx.moveCall({
-            target: '0x2::coin::zero',
-            typeArguments: [poolTypes.coinTypeA],
-            arguments: [],
-          });
-          const zeroB = tx.moveCall({
-            target: '0x2::coin::zero',
-            typeArguments: [poolTypes.coinTypeB],
-            arguments: [],
-          });
-
-          const [coinAIn, coinBIn] = swap.a2b
-            ? [coinInputArg, zeroB]
-            : [zeroA, coinInputArg];
-
-          const [outA, outB] = tx.moveCall({
-            target: `${swapCfg.integratePackageId}::router::swap`,
-            typeArguments: swap.typeArguments,
-            arguments: [
-              tx.object(swapCfg.globalConfigId),
-              tx.object(poolId),
-              coinAIn,
-              coinBIn,
-              tx.pure.bool(swap.a2b),
-              tx.pure.bool(swapCfg.by_amount_in ?? true),
-              tx.pure.u64(amountIn),
-              tx.pure.u128(BigInt(swapCfg.sqrt_price_limit ?? swap.sqrtPriceLimit)),
-              tx.pure.bool(false),
-              tx.object(SUI_CLOCK_ID),
-            ],
-          });
-
-          nodeOutputs[node.id] = swap.a2b ? outB : outA;
-        } else {
-          const coinVec = tx.makeMoveVec({ elements: [coinInputArg] });
-          tx.moveCall({
-            target: `${swapCfg.integratePackageId}::pool_script::${swap.a2b ? 'swap_a2b' : 'swap_b2a'}`,
-            typeArguments: swap.typeArguments,
-            arguments: [
-              tx.object(swapCfg.globalConfigId),
-              tx.object(poolId),
-              coinVec,
-              tx.pure.bool(swapCfg.by_amount_in ?? true),
-              tx.pure.u64(amountIn),
-              tx.pure.u64(minAmountOut),
-              tx.pure.u128(BigInt(swapCfg.sqrt_price_limit ?? swap.sqrtPriceLimit)),
-              tx.object(SUI_CLOCK_ID),
-            ],
-          });
-
-          warnings.push(
-            'Cetus pool_script swap returns void — wire an edge to the next node to use router::swap with coin output.',
+        const feedsHaedal = flow.edges.some(
+          (e) =>
+            e.source === node.id &&
+            flow.nodes.some((n) => n.id === e.target && n.type === 'haedal_stake'),
+        );
+        if (feedsHaedal && swap.outputCoinType !== SUI_COIN_TYPE) {
+          throw new Error(
+            `Node ${node.id}: swap wired to Haedal stake must output SUI (set Token out = SUI / Token in = USDC).`,
           );
+        }
+
+        const zeroA = tx.moveCall({
+          target: '0x2::coin::zero',
+          typeArguments: [poolTypes.coinTypeA],
+          arguments: [],
+        });
+        const zeroB = tx.moveCall({
+          target: '0x2::coin::zero',
+          typeArguments: [poolTypes.coinTypeB],
+          arguments: [],
+        });
+
+        const [coinAIn, coinBIn] = swap.a2b ? [coinInputArg, zeroB] : [zeroA, coinInputArg];
+
+        const [outA, outB] = tx.moveCall({
+          target: `${swapCfg.integratePackageId}::router::swap`,
+          typeArguments: swap.typeArguments,
+          arguments: [
+            tx.object(swapCfg.globalConfigId),
+            tx.object(poolId),
+            coinAIn,
+            coinBIn,
+            tx.pure.bool(swap.a2b),
+            tx.pure.bool(swapCfg.by_amount_in ?? true),
+            tx.pure.u64(amountIn),
+            tx.pure.u128(BigInt(swapCfg.sqrt_price_limit ?? swap.sqrtPriceLimit)),
+            tx.pure.bool(false),
+            tx.object(SUI_CLOCK_ID),
+          ],
+        });
+
+        const outputCoin = swap.a2b ? outB : outA;
+        nodeOutputs[node.id] = outputCoin;
+
+        if (!hasDownstream) {
+          if (swap.outputCoinType === SUI_COIN_TYPE) {
+            tx.mergeCoins(tx.gas, [outputCoin]);
+          } else {
+            const recipient = options.sender ?? DEFAULT_SIMULATE_SENDER;
+            tx.transferObjects([outputCoin], recipient);
+          }
         }
       } else if (node.type === 'haedal_stake') {
         const { config: stakeCfg, warnings: cfgWarnings } = resolveHaedalStakeConfig(node);
@@ -169,6 +173,11 @@ export class CompilerService {
 
         if (coinInputEdge) {
           coinInputArg = nodeOutputs[coinInputEdge.source];
+          if (coinInputArg === undefined) {
+            throw new Error(
+              `Node ${node.id}: missing SUI coin from ${coinInputEdge.source} — wire swap coin_out → sui_coin.`,
+            );
+          }
         } else {
           coinInputArg = this.fundSuiCoin(tx, amount, budgetCoin, options.agentWallet);
         }
