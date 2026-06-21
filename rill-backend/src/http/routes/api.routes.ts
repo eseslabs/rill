@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { config } from '../../core/config';
+import { getProtocolRegistry } from '../../core/protocols';
 import { introspectService } from '../../features/introspect/introspect.service';
 import { resolverService } from '../../features/introspect/resolver.service';
 import { compilerService } from '../../features/compiler/compiler.service';
@@ -34,6 +35,10 @@ function resolveAgentWallet(body: { agentWallet?: { packageId: string; walletId:
   }
   return config.agentWallet;
 }
+
+apiRouter.get('/protocols', (c) => {
+  return c.json({ success: true, data: getProtocolRegistry(config.network) });
+});
 
 apiRouter.post('/introspect', zValidator('json', IntrospectSchema), async (c) => {
   const { packageId } = c.req.valid('json');

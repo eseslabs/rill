@@ -61,3 +61,32 @@ export const SUI_NETWORK = network;
 export const DEFAULT_SIMULATE_SENDER =
   process.env.SIMULATE_SENDER ||
   '0x8d0a6aff4a9240af7b7e378ccfacd1cc94c107fc1745a1afcb9b529bef7b61c4';
+
+/** Network defaults exposed to clients — FE should pass these in flow node config at compile time. */
+export function getProtocolRegistry(net: 'mainnet' | 'testnet' = SUI_NETWORK) {
+  const cetus = net === 'testnet' ? TESTNET.cetus : MAINNET.cetus;
+  const haedal = net === 'testnet' ? TESTNET.haedal : MAINNET.haedal;
+  return {
+    network: net,
+    cetus_swap: {
+      integratePackageId: cetus.integratePackageId,
+      globalConfigId: cetus.globalConfigId,
+      defaultPoolId: cetus.defaultPoolId,
+      defaultInputCoinType: cetus.defaultInputCoinType,
+      tokens: [
+        { symbol: 'SUI', coinType: cetus.defaultCoinTypeB },
+        { symbol: 'USDC', coinType: cetus.defaultCoinTypeA },
+      ],
+      minSqrtPrice: cetus.minSqrtPrice,
+      maxSqrtPrice: cetus.maxSqrtPrice,
+    },
+    haedal_stake: {
+      packageId: haedal.packageId,
+      stakeTarget: `${haedal.packageId}::interface::request_stake`,
+      suiSystemStateId: haedal.suiSystemStateId,
+      stakingObjectId: haedal.stakingObjectId,
+      minStakeMist: '1000000000',
+      coinType: '0x2::sui::SUI',
+    },
+  };
+}

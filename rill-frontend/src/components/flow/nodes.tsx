@@ -1,17 +1,27 @@
-import { memo } from "react";
-import { Handle, Position, type NodeProps } from "reactflow";
+import { memo, useCallback } from "react";
+import { Handle, Position, type NodeProps, useReactFlow } from "reactflow";
 import { motion } from "framer-motion";
 import { Shield, Layers, Sparkles } from "lucide-react";
 import type { Port } from "@/lib/introspect";
+import {
+  SWAP_TOKENS,
+  defaultActionConfig,
+  otherSwapToken,
+  type ActionConfig,
+  type SwapTokenSymbol,
+} from "@/lib/action-config";
 
 export type ActionNodeData = {
   protocol: string;
   protocolId: string;
+  actionId?: string;
   action: string;
   description: string;
   color: "mint" | "peach" | "sky" | "lilac";
   /** Legacy field — kept for backwards compatibility with the older library nodes. */
   inputs: { key: string; label: string; type: string }[];
+  /** User-editable values passed to the backend compiler. */
+  config?: ActionConfig;
   /** New: typed/labeled ports surfaced by introspection. When present, the node
    * renders one handle per input on the left and one per output on the right. */
   ports?: { inputs: Port[]; outputs: Port[] };
@@ -37,11 +47,38 @@ const roleBadge: Partial<Record<NonNullable<Port["role"]>, string>> = {
   id: "bg-muted text-muted-foreground",
 };
 
-function ActionNodeImpl({ data, selected }: NodeProps<ActionNodeData>) {
+function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
   const c = colorMap[data.color] ?? colorMap.mint;
   const ports = data.ports;
+  const { setNodes } = useReactFlow();
   const rowHeight = 22;
   const headerOffset = 64; // approximate px offset to first port row
+
+  const patchConfig = useCallback(
+    (patch: ActionConfig) => {
+      setNodes((nodes) =>
+        nodes.map((n) =>
+          n.id === id
+            ? { ...n, data: { ...(n.data as ActionNodeData), config: { ...(data.config ?? {}), ...patch } } }
+            : n,
+        ),
+      );
+    },
+    [id, data.config, setNodes],
+  );
+
+  const isCetusSwap = data.protocolId === "cetus" && data.action.toLowerCase().includes("swap");
+  const isHaedalStake = data.protocolId === "haedal" && data.action.toLowerCase().includes("stake");
+  const cfg: ActionConfig = {
+    ...defaultActionConfig(
+      data.protocolId,
+      data.actionId ?? (isCetusSwap ? "swap" : isHaedalStake ? "stake" : ""),
+    ),
+    ...data.config,
+  };
+
+  const fieldCls =
+    "nodrag nowheel w-full rounded-md border border-border bg-background px-2 py-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-primary/40";
   return (
     <motion.div
       initial={{ opacity: 0, y: 6, scale: 0.98 }}
@@ -104,6 +141,75 @@ function ActionNodeImpl({ data, selected }: NodeProps<ActionNodeData>) {
                 </div>
               ))}
             </div>
+          </div>
+        ) : isCetusSwap ? (
+          <div className="mt-3 space-y-2">
+            <label className="block">
+              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Token in</span>
+              <select
+                className={`${fieldCls} mt-0.5`}
+                value={cfg.tokenIn ?? "SUI"}
+                onChange={(e) => {
+                  const tokenIn = e.target.value as SwapTokenSymbol;
+                  patchConfig({ tokenIn, tokenOut: otherSwapToken(tokenIn) });
+                }}
+              >
+                {SWAP_TOKENS.map((t) => (
+                  <option key={t.symbol} value={t.symbol}>
+                    {t.symbol}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="block">
+              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Token out</span>
+              <select
+                className={`${fieldCls} mt-0.5`}
+                value={cfg.tokenOut ?? "USDC"}
+                onChange={(e) => {
+                  const tokenOut = e.target.value as SwapTokenSymbol;
+                  patchConfig({ tokenOut, tokenIn: otherSwapToken(tokenOut) });
+                }}
+              >
+                {SWAP_TOKENS.map((t) => (
+                  <option key={t.symbol} value={t.symbol}>
+                    {t.symbol}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="block">
+              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Amount</span>
+              <div className="mt-0.5 flex items-center gap-1.5">
+                <input
+                  type="number"
+                  min="0.000000001"
+                  step="any"
+                  className={fieldCls}
+                  value={cfg.amount ?? "0.1"}
+                  onChange={(e) => patchConfig({ amount: e.target.value })}
+                />
+                <span className="text-[10px] font-mono text-muted-foreground shrink-0">{cfg.tokenIn ?? "SUI"}</span>
+              </div>
+            </label>
+          </div>
+        ) : isHaedalStake ? (
+          <div className="mt-3">
+            <label className="block">
+              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Stake amount</span>
+              <div className="mt-0.5 flex items-center gap-1.5">
+                <input
+                  type="number"
+                  min="1"
+                  step="any"
+                  className={fieldCls}
+                  value={cfg.amount ?? "1"}
+                  onChange={(e) => patchConfig({ amount: e.target.value })}
+                />
+                <span className="text-[10px] font-mono text-muted-foreground shrink-0">SUI</span>
+              </div>
+              <p className="mt-1 text-[10px] text-muted-foreground">Minimum 1 SUI on testnet</p>
+            </label>
           </div>
         ) : (
           data.inputs.length > 0 && (

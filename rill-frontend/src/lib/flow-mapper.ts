@@ -1,11 +1,7 @@
 import type { Edge, Node } from "reactflow";
 import type { ActionNodeData } from "@/components/flow/nodes";
 import type { FlowEdge, FlowGraph, FlowNode } from "@/lib/rill-api";
-
-const DEFAULTS = {
-  cetus_swap: { amount_in: "100000000", min_amount_out: "1" },
-  haedal_stake: { amount: "1000000000" },
-} as const;
+import { buildCetusSwapFlowConfig, buildHaedalStakeFlowConfig } from "@/lib/action-config";
 
 /** Protocol actions the live Rill backend can compile today. */
 export function isBackendSupported(data: ActionNodeData): boolean {
@@ -15,11 +11,13 @@ export function isBackendSupported(data: ActionNodeData): boolean {
 }
 
 function mapActionNode(id: string, data: ActionNodeData): FlowNode | null {
+  const cfg = data.config ?? {};
+
   if (data.protocolId === "cetus" && data.action.toLowerCase().includes("swap")) {
-    return { id, type: "cetus_swap", config: { ...DEFAULTS.cetus_swap } };
+    return { id, type: "cetus_swap", config: buildCetusSwapFlowConfig(cfg) };
   }
   if (data.protocolId === "haedal" && data.action.toLowerCase().includes("stake")) {
-    return { id, type: "haedal_stake", config: { ...DEFAULTS.haedal_stake } };
+    return { id, type: "haedal_stake", config: buildHaedalStakeFlowConfig(cfg) };
   }
   return null;
 }

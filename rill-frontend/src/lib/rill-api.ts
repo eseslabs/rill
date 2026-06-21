@@ -50,6 +50,27 @@ export type PublishResult = {
   warnings: string[];
 };
 
+export type ProtocolRegistry = {
+  network: string;
+  cetus_swap: {
+    integratePackageId: string;
+    globalConfigId: string;
+    defaultPoolId: string;
+    defaultInputCoinType: string;
+    tokens: { symbol: string; coinType: string }[];
+    minSqrtPrice: string;
+    maxSqrtPrice: string;
+  };
+  haedal_stake: {
+    packageId: string;
+    stakeTarget: string;
+    suiSystemStateId: string;
+    stakingObjectId: string;
+    minStakeMist: string;
+    coinType: string;
+  };
+};
+
 export type BackendFunction = {
   packageId?: string;
   module: string;
@@ -82,6 +103,16 @@ export const rillApi = {
   health() {
     const root = API_BASE.replace(/\/api$/, "");
     return fetch(root).then((r) => r.json());
+  },
+
+  protocols() {
+    return fetch(`${API_BASE}/protocols`).then(async (r) => {
+      const json = (await r.json()) as { success: boolean; data?: ProtocolRegistry; error?: string };
+      if (!r.ok || !json.success || !json.data) {
+        throw new Error(json.error ?? `API error ${r.status}`);
+      }
+      return json.data;
+    });
   },
 
   introspect(packageId: string) {

@@ -34,13 +34,18 @@ export interface SwapPlan {
 }
 
 /** swap_a2b = T0→T1, swap_b2a = T1→T0 */
-export function pickSwapFunction(inputCoinType: string, pool: PoolTypeArgs): SwapPlan {
+export function pickSwapFunction(
+  inputCoinType: string,
+  pool: PoolTypeArgs,
+  minSqrtPrice: string,
+  maxSqrtPrice: string,
+): SwapPlan {
   const a2b = inputCoinType === pool.coinTypeA;
   return {
     module: 'router',
     function: 'swap',
     typeArguments: [pool.coinTypeA, pool.coinTypeB],
-    sqrtPriceLimit: a2b ? CETUS.minSqrtPrice : CETUS.maxSqrtPrice,
+    sqrtPriceLimit: a2b ? minSqrtPrice : maxSqrtPrice,
     a2b,
     outputCoinType: a2b ? pool.coinTypeB : pool.coinTypeA,
   };

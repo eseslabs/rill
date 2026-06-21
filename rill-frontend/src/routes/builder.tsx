@@ -42,6 +42,7 @@ import { PROTOCOLS, BACKEND_PROTOCOL_IDS, type Protocol } from "@/lib/protocols"
 import { DiscoverDialog } from "@/components/flow/discover-dialog";
 import { SimulateDialog, DEFAULT_GUARDRAILS, type Guardrail } from "@/components/flow/simulate-dialog";
 import { buildFlowGraph } from "@/lib/flow-mapper";
+import { applyProtocolRegistry, defaultActionConfig } from "@/lib/action-config";
 import { rillApi, type PublishResult } from "@/lib/rill-api";
 import type { DiscoveredFunction, IntrospectionResult } from "@/lib/introspect";
 
@@ -82,6 +83,12 @@ function Builder() {
   const idRef = useRef(1);
   const { screenToFlowPosition } = useReactFlow();
 
+  useEffect(() => {
+    rillApi.protocols().then(applyProtocolRegistry).catch(() => {
+      /* bundled TESTNET_MANIFEST is fallback */
+    });
+  }, []);
+
   const onConnect = useCallback(
     (c: Connection) => setEdges((es) => addEdge({ ...c, animated: true }, es)),
     [setEdges],
@@ -113,19 +120,23 @@ function Builder() {
       .filter((p) => p.actions.length > 0);
   }, [search]);
 
+  const buildActionData = (p: Protocol, action: (typeof p.actions)[number]): ActionNodeData => ({
+    protocol: p.name,
+    protocolId: p.id,
+    actionId: action.id,
+    action: action.name,
+    description: action.description,
+    color: p.color,
+    inputs: action.inputs,
+    config: defaultActionConfig(p.id, action.id),
+  });
+
   const addAction = useCallback(
     (p: Protocol, actionId: string) => {
       const action = p.actions.find((a) => a.id === actionId);
       if (!action) return;
       const id = `n_${idRef.current++}`;
-      const data: ActionNodeData = {
-        protocol: p.name,
-        protocolId: p.id,
-        action: action.name,
-        description: action.description,
-        color: p.color,
-        inputs: action.inputs,
-      };
+      const data = buildActionData(p, action);
       const pos = screenToFlowPosition({ x: 280 + Math.random() * 60, y: 120 + Math.random() * 120 });
       setNodes((nds) => nds.concat({ id, type: "action", position: pos, data } as Node));
     },
@@ -178,14 +189,7 @@ function Builder() {
       if (!action) return;
       const pos = screenToFlowPosition({ x: e.clientX, y: e.clientY });
       const id = `n_${idRef.current++}`;
-      const data: ActionNodeData = {
-        protocol: p.name,
-        protocolId: p.id,
-        action: action.name,
-        description: action.description,
-        color: p.color,
-        inputs: action.inputs,
-      };
+      const data = buildActionData(p, action);
       setNodes((nds) => nds.concat({ id, type: "action", position: pos, data } as Node));
     },
     [screenToFlowPosition, setNodes],
@@ -233,7 +237,7 @@ function Builder() {
             <div className="text-xs uppercase tracking-widest text-muted-foreground">Library</div>
             <h2 className="mt-1 font-display text-2xl tracking-tight">Live on testnet</h2>
             <p className="mt-2 text-[11px] text-muted-foreground leading-relaxed">
-              1. Drag <strong>Cetus swap</strong> or <strong>Haedal stake</strong> to canvas
+              1. Drag node → set <strong>token & amount</strong> on canvas
               <br />
               2. Wire nodes (optional): swap output → stake input
               <br />

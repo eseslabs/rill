@@ -1,7 +1,9 @@
 import { Transaction } from '@mysten/sui/transactions';
 import type { AgentWalletBinding } from '../../core/agent-wallet';
 import { SUI_COIN_TYPE } from '../../core/agent-wallet';
-import { CETUS, HAEDAL, SUI_CLOCK_ID } from '../../core/protocols';
+import { SUI_COIN_TYPE } from '../../core/agent-wallet';
+import { SUI_CLOCK_ID } from '../../core/protocols';
+import { resolveCetusSwapConfig, resolveHaedalStakeConfig } from '../../core/node-config';
 import { pickSwapFunction, resolvePoolTypeArgs } from './pool-resolver';
 
 export interface FlowNode {
@@ -69,13 +71,16 @@ export class CompilerService {
 
     for (const node of orderedNodes) {
       if (node.type === 'cetus_swap') {
-        const amountIn = BigInt(node.inputs?.amount_in ?? node.config?.amount_in ?? 0);
-        const minAmountOut = BigInt(node.inputs?.min_amount_out ?? node.config?.min_amount_out ?? 0);
-        const poolId = node.inputs?.pool ?? node.config?.pool ?? CETUS.defaultPoolId;
-        const inputCoinType = node.config?.inputCoinType ?? node.inputs?.inputCoinType ?? CETUS.defaultInputCoinType;
+        const { config: swapCfg, warnings: cfgWarnings } = resolveCetusSwapConfig(node);
+        warnings.push(...cfgWarnings);
+
+        const amountIn = BigInt(swapCfg.amount_in);
+        const minAmountOut = BigInt(swapCfg.min_amount_out);
+        const poolId = swapCfg.pool;
+        const inputCoinType = swapCfg.inputCoinType;
 
         const poolTypes = await resolvePoolTypeArgs(poolId);
-        const swap = pickSwapFunction(inputCoinType, poolTypes);
+        const swap = pickSwapFunction(inputCoinType, poolTypes, swapCfg.minSqrtPrice, swapCfg.maxSqrtPrice);
         const hasDownstream = flow.edges.some((e) => e.source === node.id);
 
         const coinInputEdge = flow.edges.find(
@@ -106,17 +111,17 @@ export class CompilerService {
             : [zeroA, coinInputArg];
 
           const [outA, outB] = tx.moveCall({
-            target: `${CETUS.integratePackageId}::router::swap`,
+            target: `${swapCfg.integratePackageId}::router::swap`,
             typeArguments: swap.typeArguments,
             arguments: [
-              tx.object(CETUS.globalConfigId),
+              tx.object(swapCfg.globalConfigId),
               tx.object(poolId),
               coinAIn,
               coinBIn,
               tx.pure.bool(swap.a2b),
-              tx.pure.bool(node.config?.by_amount_in ?? true),
+              tx.pure.bool(swapCfg.by_amount_in ?? true),
               tx.pure.u64(amountIn),
-              tx.pure.u128(BigInt(node.config?.sqrt_price_limit ?? swap.sqrtPriceLimit)),
+              tx.pure.u128(BigInt(swapCfg.sqrt_price_limit ?? swap.sqrtPriceLimit)),
               tx.pure.bool(false),
               tx.object(SUI_CLOCK_ID),
             ],
@@ -126,16 +131,16 @@ export class CompilerService {
         } else {
           const coinVec = tx.makeMoveVec({ elements: [coinInputArg] });
           tx.moveCall({
-            target: `${CETUS.integratePackageId}::pool_script::${swap.a2b ? 'swap_a2b' : 'swap_b2a'}`,
+            target: `${swapCfg.integratePackageId}::pool_script::${swap.a2b ? 'swap_a2b' : 'swap_b2a'}`,
             typeArguments: swap.typeArguments,
             arguments: [
-              tx.object(CETUS.globalConfigId),
+              tx.object(swapCfg.globalConfigId),
               tx.object(poolId),
               coinVec,
-              tx.pure.bool(node.config?.by_amount_in ?? true),
+              tx.pure.bool(swapCfg.by_amount_in ?? true),
               tx.pure.u64(amountIn),
               tx.pure.u64(minAmountOut),
-              tx.pure.u128(BigInt(node.config?.sqrt_price_limit ?? swap.sqrtPriceLimit)),
+              tx.pure.u128(BigInt(swapCfg.sqrt_price_limit ?? swap.sqrtPriceLimit)),
               tx.object(SUI_CLOCK_ID),
             ],
           });
@@ -145,11 +150,15 @@ export class CompilerService {
           );
         }
       } else if (node.type === 'haedal_stake') {
-        const amount = BigInt(node.inputs?.amount ?? node.config?.amount ?? 0);
+        const { config: stakeCfg, warnings: cfgWarnings } = resolveHaedalStakeConfig(node);
+        warnings.push(...cfgWarnings);
 
-        if (amount < HAEDAL.minStakeMist) {
+        const amount = BigInt(stakeCfg.amount);
+        const minStake = BigInt(stakeCfg.minStakeMist);
+
+        if (amount < minStake) {
           throw new Error(
-            `Haedal minimum stake is ${HAEDAL.minStakeMist} mist (1 SUI). Got ${amount}.`,
+            `Haedal minimum stake is ${minStake} mist. Got ${amount}.`,
           );
         }
 
@@ -165,13 +174,13 @@ export class CompilerService {
         }
 
         tx.moveCall({
-          target: HAEDAL.stakeTarget,
+          target: stakeCfg.stakeTarget,
           typeArguments: [],
           arguments: [
-            tx.object(HAEDAL.suiSystemStateId),
-            tx.object(HAEDAL.stakingObjectId),
+            tx.object(stakeCfg.suiSystemStateId),
+            tx.object(stakeCfg.stakingObjectId),
             coinInputArg,
-            tx.pure.address(node.config?.validator ?? '0x0'),
+            tx.pure.address(stakeCfg.validator ?? '0x0'),
           ],
         });
       } else {
@@ -213,11 +222,12 @@ export class CompilerService {
 
       let amount = 0n;
       if (node.type === 'cetus_swap') {
-        const inputType = node.config?.inputCoinType ?? node.inputs?.inputCoinType ?? CETUS.defaultInputCoinType;
-        if (inputType !== SUI_COIN_TYPE) continue;
-        amount = BigInt(node.inputs?.amount_in ?? node.config?.amount_in ?? 0);
+        const { config: swapCfg } = resolveCetusSwapConfig(node);
+        if (swapCfg.inputCoinType !== SUI_COIN_TYPE) continue;
+        amount = BigInt(swapCfg.amount_in);
       } else if (node.type === 'haedal_stake') {
-        amount = BigInt(node.inputs?.amount ?? node.config?.amount ?? 0);
+        const { config: stakeCfg } = resolveHaedalStakeConfig(node);
+        amount = BigInt(stakeCfg.amount);
       }
 
       if (amount > 0n) {
