@@ -28,20 +28,17 @@ export class NotFoundError extends AppError {
  * Global Hono error handler.
  */
 export const errorHandler = (err: Error, c: Context) => {
-  console.error(`[Error] ${err.name}: ${err.message}`);
-  
+  // Log the full error server-side (with stack) for diagnosis.
+  console.error(`[Error] ${err.name}: ${err.message}`, err.stack);
+
+  // AppError messages are intentional + safe to surface to the client.
   if (err instanceof AppError) {
-    return c.json({
-      success: false,
-      error: err.message,
-      type: err.name
-    }, err.status as any);
+    return c.json({ success: false, error: err.message, type: err.name }, err.status as never);
   }
 
-  // Fallback for unexpected system errors
-  return c.json({
-    success: false,
-    error: err.message || 'An unexpected server error occurred',
-    type: 'InternalServerError'
-  }, 500);
+  // Unexpected errors: never leak internal messages/stack to clients — return a generic 500.
+  return c.json(
+    { success: false, error: 'An unexpected server error occurred.', type: 'InternalServerError' },
+    500,
+  );
 };

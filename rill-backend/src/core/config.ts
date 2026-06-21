@@ -7,6 +7,12 @@ dotenv.config();
 const network = (process.env.SUI_NETWORK || 'mainnet') as 'mainnet' | 'testnet';
 const DEFAULT_RPC = getJsonRpcFullnodeUrl(network);
 
+// Rill's own deployed contracts, keyed by network (like an SDK ships known addresses). Env overrides.
+// Mainnet intentionally has no default — deploy + set RILL_GUARD_PACKAGE_ID before going live there.
+const KNOWN_GUARD_PACKAGE: Partial<Record<string, string>> = {
+  testnet: '0xadec99557cf7771bce94737fdd3ea0bcc989d81e0860f3e69af55433dae8c034',
+};
+
 export const config = {
   port: parseInt(process.env.PORT || '3000', 10),
   network,
@@ -17,7 +23,9 @@ export const config = {
   devSignEnabled: (process.env.DEV_SIGN_ENABLED || 'false').toLowerCase() === 'true',
   agentWallet: loadAgentWalletFromEnv(),
   /** Published rill_guard package — the on-chain slippage chokepoint (assert_min_value). */
-  guardPackageId: process.env.RILL_GUARD_PACKAGE_ID,
+  guardPackageId: process.env.RILL_GUARD_PACKAGE_ID || KNOWN_GUARD_PACKAGE[network],
+  /** Where published skills persist across restarts (file-backed store). */
+  skillsStorePath: process.env.SKILLS_STORE_PATH || './data/skills.json',
   walrusEnabled: (process.env.WALRUS_ENABLED || 'false').toLowerCase() === 'true',
   walrusUploadRelay:
     process.env.WALRUS_UPLOAD_RELAY || 'https://upload-relay.testnet.walrus.space',

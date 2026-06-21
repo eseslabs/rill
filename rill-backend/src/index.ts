@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { swaggerUI } from '@hono/swagger-ui';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
+import { bodyLimit } from 'hono/body-limit';
 import { config } from './core/config';
 import { errorHandler } from './core/errors';
 import { apiRouter } from './http/routes/api.routes';
@@ -11,14 +12,16 @@ const app = new Hono();
 
 // Global Middlewares
 app.use('*', logger());
+// Public, keyless API consumed by agents/MCP clients from anywhere → wildcard origin, NO credentials
+// (wildcard + credentials is invalid per the CORS spec and rejected by browsers).
 app.use('*', cors({
   origin: '*',
-  allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowHeaders: ['Content-Type', 'Authorization'],
-  exposeHeaders: ['Content-Length'],
+  allowMethods: ['GET', 'POST', 'OPTIONS'],
+  allowHeaders: ['Content-Type'],
   maxAge: 600,
-  credentials: true,
 }));
+// Cap request bodies — flows/PTBs are small; reject oversized payloads early (DoS guard).
+app.use('*', bodyLimit({ maxSize: 512 * 1024, onError: (c) => c.json({ success: false, error: 'Request body too large (max 512KB).' }, 413) }));
 
 const swagger = swaggerUI({ url: '/api/openapi.json' });
 

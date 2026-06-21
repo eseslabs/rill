@@ -16,6 +16,9 @@ services:
       - ./rill-backend/.env
     environment:
       PUBLIC_BASE_URL: https://api.rill.naisu.one
+      SKILLS_STORE_PATH: /app/data/skills.json
+    volumes:
+      - rill-data:/app/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3002/health"]
       interval: 15s
@@ -29,6 +32,10 @@ services:
     networks:
       - rill-internal
       - traefik-public
+
+volumes:
+  rill-data:
+    name: rill-data
 
 networks:
   rill-internal:

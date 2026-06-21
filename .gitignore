@@ -7,3 +7,6 @@ dist/
 
 # Move build artifacts
 move/**/build/
+
+# Persistent skills store (file-backed)
+rill-backend/data/
