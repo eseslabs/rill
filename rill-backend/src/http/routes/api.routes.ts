@@ -12,7 +12,6 @@ import { skillsStore } from '../../features/mcp/skills.store';
 import { skillRunnerService } from '../../features/mcp/skill-runner.service';
 import { buildToolDefs } from '../../features/mcp/tool-schema';
 import { buildSkillDoc } from '../../features/mcp/skill-doc';
-import { buildMcpLandingHtml } from '../../features/mcp/mcp-landing';
 import { handleMcpJsonRpc } from '../../features/mcp/mcp.service';
 import { walrusAuditService } from '../../features/walrus/audit.service';
 import {
@@ -188,11 +187,11 @@ apiRouter.get('/audit/:blobId', async (c) => {
   }
 });
 
-/** MCP JSON-RPC endpoint (tools/list, tools/call) */
+/** MCP JSON-RPC endpoint (tools/list, tools/call). GET redirects to SKILL.md. */
 apiRouter.get('/mcp/:skillId', (c) => {
-  const skill = skillsStore.get(c.req.param('skillId'));
-  if (!skill) return c.text('Skill not found', 404);
-  return c.body(buildMcpLandingHtml(skill), 200, { 'Content-Type': 'text/html; charset=utf-8' });
+  const skillId = c.req.param('skillId');
+  if (!skillsStore.get(skillId)) return c.text('Skill not found', 404);
+  return c.redirect(`${config.publicBaseUrl}/api/skills/${skillId}/skill.md`, 302);
 });
 
 apiRouter.post('/mcp/:skillId', async (c) => {

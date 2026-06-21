@@ -13,6 +13,7 @@ export type Protocol = {
   tagline: string;
   category: ProtocolCategory;
   color: "mint" | "peach" | "sky" | "lilac";
+  logoUrl?: string;
   actions: ActionDef[];
 };
 
@@ -23,6 +24,8 @@ export const PROTOCOLS: Protocol[] = [
     tagline: "Concentrated-liquidity DEX on Sui",
     category: "DEX",
     color: "mint",
+    logoUrl:
+      "https://camo.githubusercontent.com/0a4950f46878c9f295174757bcffbd129ce234beec47cebb8c975af86328b9dc/68747470733a2f2f617263686976652e63657475732e7a6f6e652f6173736574732f696d6167652f6c6f676f2e706e67",
     actions: [
       { id: "swap", name: "Swap tokens", description: "Swap one token for another via Cetus pools.", inputs: [
         { key: "tokenIn", label: "Token In", type: "token" },
@@ -80,6 +83,7 @@ export const PROTOCOLS: Protocol[] = [
     tagline: "Liquid staking for SUI",
     category: "Staking",
     color: "lilac",
+    logoUrl: "https://images.cryptorank.io/coins/150x150.haedal1705486502241.png",
     actions: [
       { id: "stake", name: "Stake SUI", description: "Stake SUI and mint haSUI.", inputs: [
         { key: "amount", label: "Amount of SUI", type: "number" },
@@ -153,6 +157,8 @@ export const PROTOCOLS: Protocol[] = [
     tagline: "On-chain central limit order book",
     category: "DEX",
     color: "sky",
+    logoUrl:
+      "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcSHPQ4VZxqTG1rkMr4buTO8Y0ZsGX87X8r2iWeSdHQ7OQ&s=10",
     actions: [
       { id: "limit_order", name: "Place limit order", description: "Place a limit order on a DeepBook pool (needs a funded BalanceManager).", inputs: [
         { key: "poolKey", label: "Pool", type: "string" },

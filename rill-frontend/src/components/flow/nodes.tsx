@@ -1,8 +1,10 @@
-import { memo, useCallback } from "react";
+import { memo, useCallback, useRef } from "react";
 import { Handle, Position, type NodeProps, useReactFlow } from "reactflow";
 import { motion } from "framer-motion";
 import { Shield, Layers, Sparkles } from "lucide-react";
 import type { Port } from "@/lib/rill-types";
+import { AlignedHandle, WireRow } from "@/components/flow/aligned-handle";
+import { ProtocolLogo } from "@/components/flow/protocol-logo";
 import {
   SWAP_TOKENS,
   defaultActionConfig,
@@ -51,8 +53,11 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
   const c = colorMap[data.color] ?? colorMap.mint;
   const ports = data.ports;
   const { setNodes } = useReactFlow();
-  const rowHeight = 22;
-  const headerOffset = 64; // approximate px offset to first port row
+  const cetusFlowInRef = useRef<HTMLDivElement>(null);
+  const cetusOutRef = useRef<HTMLDivElement>(null);
+  const cetusFlowOutRef = useRef<HTMLDivElement>(null);
+  const haedalInRef = useRef<HTMLDivElement>(null);
+  const haedalFlowOutRef = useRef<HTMLDivElement>(null);
 
   const patchConfig = useCallback(
     (patch: ActionConfig) => {
@@ -69,6 +74,7 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
 
   const isCetusSwap = data.protocolId === "cetus" && data.action.toLowerCase().includes("swap");
   const isHaedalStake = data.protocolId === "haedal" && data.action.toLowerCase().includes("stake");
+  const showPortGrid = ports && !isCetusSwap && !isHaedalStake;
   const cfg: ActionConfig = {
     ...defaultActionConfig(
       data.protocolId,
@@ -81,17 +87,19 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
     "nodrag nowheel w-full rounded-md border border-border bg-background px-2 py-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-primary/40";
   return (
     <motion.div
-      initial={{ opacity: 0, y: 6, scale: 0.98 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      transition={{ duration: 0.25, ease: "easeOut" }}
-      className={`min-w-[260px] rounded-2xl bg-card border border-border/70 shadow-[var(--shadow-soft)] relative ${
+      initial={{ opacity: 0, y: 4 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.2, ease: "easeOut" }}
+      className={`relative min-w-[260px] rounded-2xl bg-card border border-border/70 shadow-[var(--shadow-soft)] ${
         selected ? "ring-2 ring-primary/60" : ""
       }`}
     >
-      {!ports && !isCetusSwap && !isHaedalStake && <Handle type="target" position={Position.Left} />}
+      {!ports && !isCetusSwap && !isHaedalStake && (
+        <Handle type="target" position={Position.Left} className="flow-handle" />
+      )}
       <div className={`px-3 py-2 rounded-t-2xl ${c.bg} ${c.text} flex items-center justify-between gap-2`}>
         <div className="flex items-center gap-2 min-w-0">
-          <span className={`inline-block h-2 w-2 rounded-full ${c.dot} opacity-70`} />
+          <ProtocolLogo protocolId={data.protocolId} name={data.protocol} className="h-5 w-5 ring-background/40" />
           <span className="text-[11px] font-semibold uppercase tracking-wider truncate">{data.protocol}</span>
           {data.module && (
             <span className="text-[10px] font-mono opacity-70 truncate">::{data.module}</span>
@@ -107,38 +115,16 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
         <div className="text-sm font-semibold text-foreground">{data.action}</div>
         <div className="mt-0.5 text-xs text-muted-foreground leading-snug">{data.description}</div>
 
-        {ports && (
+        {showPortGrid && ports && (
           <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
             <div className="space-y-1">
-              {ports.inputs.map((p, idx) => (
-                <div key={p.key} className="relative flex items-center gap-1.5" style={{ height: rowHeight }}>
-                  <Handle
-                    id={`in:${p.key}`}
-                    type="target"
-                    position={Position.Left}
-                    style={{ top: headerOffset + idx * rowHeight + 11, left: -6 }}
-                  />
-                  <span className={`truncate font-medium ${roleBadge[p.role ?? "id"] ? "px-1.5 py-0.5 rounded " + roleBadge[p.role!] : "text-foreground/80"}`}>
-                    {p.label}
-                  </span>
-                  <span className="ml-auto font-mono text-[10px] text-muted-foreground">{p.type}</span>
-                </div>
+              {ports.inputs.map((p) => (
+                <PortInputRow key={p.key} nodeId={id} port={p} />
               ))}
             </div>
             <div className="space-y-1">
-              {ports.outputs.map((p, idx) => (
-                <div key={p.key} className="relative flex items-center gap-1.5 justify-end" style={{ height: rowHeight }}>
-                  <span className="font-mono text-[10px] text-muted-foreground">{p.type}</span>
-                  <span className={`truncate font-medium ${roleBadge[p.role ?? "id"] ? "px-1.5 py-0.5 rounded " + roleBadge[p.role!] : "text-foreground/80"}`}>
-                    {p.label}
-                  </span>
-                  <Handle
-                    id={`out:${p.key}`}
-                    type="source"
-                    position={Position.Right}
-                    style={{ top: headerOffset + idx * rowHeight + 11, right: -6 }}
-                  />
-                </div>
+              {ports.outputs.map((p) => (
+                <PortOutputRow key={p.key} nodeId={id} port={p} />
               ))}
             </div>
           </div>
@@ -146,6 +132,19 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
 
         {isCetusSwap ? (
           <div className="mt-3 space-y-2">
+            <div
+              ref={cetusFlowInRef}
+              className="flex items-center gap-2 rounded-lg border border-dashed border-foreground/15 bg-muted/40 px-2.5 py-1.5"
+            >
+              <span className="text-[10px] text-muted-foreground">← Connect from Trigger</span>
+            </div>
+            <AlignedHandle
+              id="in:flow"
+              nodeId={id}
+              type="target"
+              position={Position.Left}
+              alignRef={cetusFlowInRef}
+            />
             <label className="block">
               <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Token in</span>
               <select
@@ -194,9 +193,49 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
                 <span className="text-[10px] font-mono text-muted-foreground shrink-0">{cfg.tokenIn ?? "SUI"}</span>
               </div>
             </label>
+            <WireRow
+              nodeId={id}
+              handleId="out:coin_out"
+              handleType="source"
+              handlePosition={Position.Right}
+              className="border-peach/50 bg-peach/10 justify-between"
+            >
+              <span className="text-[10px] text-muted-foreground">Coin → Haedal stake</span>
+              <span className="text-[10px] font-mono font-medium bg-peach/60 text-peach-foreground px-1.5 py-0.5 rounded">
+                coin_out
+              </span>
+            </WireRow>
+            <div
+              ref={cetusFlowOutRef}
+              className="flex items-center justify-end gap-2 rounded-lg border border-dashed border-foreground/15 bg-muted/40 px-2.5 py-1.5"
+            >
+              <span className="text-[10px] text-muted-foreground">Flow → MCP output</span>
+              <span className="text-[10px] font-mono text-muted-foreground">→</span>
+            </div>
+            <AlignedHandle
+              id="out:flow"
+              nodeId={id}
+              type="source"
+              position={Position.Right}
+              alignRef={cetusFlowOutRef}
+            />
           </div>
         ) : isHaedalStake ? (
-          <div className="mt-3">
+          <div className="mt-3 space-y-2">
+            <WireRow
+              nodeId={id}
+              handleId="in:sui_coin"
+              handleType="target"
+              handlePosition={Position.Left}
+              className="border-mint/50 bg-mint/10"
+            >
+              <span className="text-[10px] text-muted-foreground">
+                ← <span className="font-mono font-medium text-foreground">coin_out</span> from Cetus
+              </span>
+              <span className="ml-auto text-[10px] font-mono font-medium bg-mint/60 text-mint-foreground px-1.5 py-0.5 rounded">
+                sui_coin
+              </span>
+            </WireRow>
             <label className="block">
               <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Stake amount</span>
               <div className="mt-0.5 flex items-center gap-1.5">
@@ -212,6 +251,20 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
               </div>
               <p className="mt-1 text-[10px] text-muted-foreground">Minimum 1 SUI on testnet</p>
             </label>
+            <div
+              ref={haedalFlowOutRef}
+              className="flex items-center justify-end gap-2 rounded-lg border border-dashed border-foreground/15 bg-muted/40 px-2.5 py-1.5"
+            >
+              <span className="text-[10px] text-muted-foreground">Flow → MCP output</span>
+              <span className="text-[10px] font-mono text-muted-foreground">→</span>
+            </div>
+            <AlignedHandle
+              id="out:flow"
+              nodeId={id}
+              type="source"
+              position={Position.Right}
+              alignRef={haedalFlowOutRef}
+            />
           </div>
         ) : (
           data.inputs.length > 0 && (
@@ -226,8 +279,52 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
           )
         )}
       </div>
-      {!ports && !isCetusSwap && !isHaedalStake && <Handle type="source" position={Position.Right} />}
+      {!ports && !isCetusSwap && !isHaedalStake && (
+        <Handle type="source" position={Position.Right} className="flow-handle" />
+      )}
     </motion.div>
+  );
+}
+
+function PortInputRow({ nodeId, port }: { nodeId: string; port: Port }) {
+  const rowRef = useRef<HTMLDivElement>(null);
+  return (
+    <div ref={rowRef} className="relative flex h-[22px] items-center gap-1.5">
+      <AlignedHandle
+        id={`in:${port.key}`}
+        nodeId={nodeId}
+        type="target"
+        position={Position.Left}
+        alignRef={rowRef}
+      />
+      <span
+        className={`truncate font-medium ${roleBadge[port.role ?? "id"] ? "px-1.5 py-0.5 rounded " + roleBadge[port.role!] : "text-foreground/80"}`}
+      >
+        {port.label}
+      </span>
+      <span className="ml-auto font-mono text-[10px] text-muted-foreground">{port.type}</span>
+    </div>
+  );
+}
+
+function PortOutputRow({ nodeId, port }: { nodeId: string; port: Port }) {
+  const rowRef = useRef<HTMLDivElement>(null);
+  return (
+    <div ref={rowRef} className="relative flex h-[22px] items-center justify-end gap-1.5">
+      <span className="font-mono text-[10px] text-muted-foreground">{port.type}</span>
+      <span
+        className={`truncate font-medium ${roleBadge[port.role ?? "id"] ? "px-1.5 py-0.5 rounded " + roleBadge[port.role!] : "text-foreground/80"}`}
+      >
+        {port.label}
+      </span>
+      <AlignedHandle
+        id={`out:${port.key}`}
+        nodeId={nodeId}
+        type="source"
+        position={Position.Right}
+        alignRef={rowRef}
+      />
+    </div>
   );
 }
 
@@ -236,14 +333,15 @@ export const ActionNode = memo(ActionNodeImpl);
 function TriggerNodeImpl({ data }: NodeProps<{ label: string; sub: string }>) {
   return (
     <motion.div
-      initial={{ opacity: 0, scale: 0.95 }}
-      animate={{ opacity: 1, scale: 1 }}
-      className="rounded-2xl bg-foreground text-background px-4 py-3 shadow-[var(--shadow-float)] min-w-[200px]"
+      initial={{ opacity: 0, y: 4 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.2 }}
+      className="relative rounded-2xl bg-foreground text-background px-4 py-3 shadow-[var(--shadow-float)] min-w-[200px]"
     >
       <div className="text-[11px] uppercase tracking-widest opacity-60">Trigger</div>
       <div className="mt-0.5 text-sm font-semibold">{data.label}</div>
       <div className="text-xs opacity-70">{data.sub}</div>
-      <Handle type="source" position={Position.Right} />
+      <Handle id="out:flow" type="source" position={Position.Right} className="flow-handle" />
     </motion.div>
   );
 }
@@ -252,14 +350,15 @@ export const TriggerNode = memo(TriggerNodeImpl);
 function OutputNodeImpl({ data }: NodeProps<{ label: string; sub: string }>) {
   return (
     <motion.div
-      initial={{ opacity: 0, scale: 0.95 }}
-      animate={{ opacity: 1, scale: 1 }}
-      className="rounded-2xl bg-primary text-primary-foreground px-4 py-3 shadow-[var(--shadow-float)] min-w-[200px]"
+      initial={{ opacity: 0, y: 4 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.2 }}
+      className="relative rounded-2xl bg-primary text-primary-foreground px-4 py-3 shadow-[var(--shadow-float)] min-w-[200px]"
     >
-      <Handle type="target" position={Position.Left} />
       <div className="text-[11px] uppercase tracking-widest opacity-70">Output</div>
       <div className="mt-0.5 text-sm font-semibold">{data.label}</div>
       <div className="text-xs opacity-80">{data.sub}</div>
+      <Handle id="in:flow" type="target" position={Position.Left} className="flow-handle" />
     </motion.div>
   );
 }
@@ -271,9 +370,8 @@ function PtbNodeImpl({ data }: NodeProps<PtbNodeData>) {
     <motion.div
       initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
-      className="rounded-2xl bg-card border border-dashed border-primary/60 px-3.5 py-3 min-w-[220px] shadow-[var(--shadow-soft)]"
+      className="relative rounded-2xl bg-card border border-dashed border-primary/60 px-3.5 py-3 min-w-[220px] shadow-[var(--shadow-soft)]"
     >
-      <Handle type="target" position={Position.Left} />
       <div className="flex items-center gap-2">
         <span className="inline-flex h-6 w-6 items-center justify-center rounded-md bg-primary/15 text-primary">
           <Layers className="h-3.5 w-3.5" />
@@ -286,7 +384,8 @@ function PtbNodeImpl({ data }: NodeProps<PtbNodeData>) {
       <div className="mt-2 text-[11px] text-muted-foreground">
         Batched into one transaction · <span className="font-mono">{data.steps}</span> moves
       </div>
-      <Handle type="source" position={Position.Right} />
+      <Handle type="target" position={Position.Left} className="flow-handle" />
+      <Handle type="source" position={Position.Right} className="flow-handle" />
     </motion.div>
   );
 }
@@ -298,9 +397,8 @@ function GuardrailNodeImpl({ data }: NodeProps<GuardrailNodeData>) {
     <motion.div
       initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
-      className="rounded-2xl bg-card border border-border/70 px-3.5 py-3 min-w-[220px] shadow-[var(--shadow-soft)]"
+      className="relative rounded-2xl bg-card border border-border/70 px-3.5 py-3 min-w-[220px] shadow-[var(--shadow-soft)]"
     >
-      <Handle type="target" position={Position.Left} />
       <div className="flex items-center gap-2">
         <span className="inline-flex h-6 w-6 items-center justify-center rounded-md bg-peach text-peach-foreground">
           <Shield className="h-3.5 w-3.5" />
@@ -317,7 +415,8 @@ function GuardrailNodeImpl({ data }: NodeProps<GuardrailNodeData>) {
           </li>
         ))}
       </ul>
-      <Handle type="source" position={Position.Right} />
+      <Handle type="target" position={Position.Left} className="flow-handle" />
+      <Handle type="source" position={Position.Right} className="flow-handle" />
     </motion.div>
   );
 }

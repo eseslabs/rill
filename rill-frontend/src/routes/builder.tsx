@@ -15,19 +15,18 @@ import ReactFlow, {
   useReactFlow,
 } from "reactflow";
 import { motion, AnimatePresence } from "framer-motion";
+import gsap from "gsap";
 import {
   Search,
   Download,
   Play,
-  Box,
   ChevronRight,
   X,
-  Bot,
-  Code2,
-  Terminal,
   Sparkles,
   Shield,
   Layers,
+  Check,
+  Loader2,
 } from "lucide-react";
 import { SiteHeader } from "@/components/site-chrome";
 import {
@@ -40,6 +39,8 @@ import {
 } from "@/components/flow/nodes";
 import { PROTOCOLS, BACKEND_PROTOCOL_IDS, type Protocol } from "@/lib/protocols";
 import { DiscoverDialog } from "@/components/flow/discover-dialog";
+import { ProtocolLogo } from "@/components/flow/protocol-logo";
+import { DeletableEdge } from "@/components/flow/deletable-edge";
 import { SimulateDialog, DEFAULT_GUARDRAILS, type Guardrail } from "@/components/flow/simulate-dialog";
 import { buildFlowGraph } from "@/lib/flow-mapper";
 import { applyProtocolRegistry, defaultActionConfig } from "@/lib/action-config";
@@ -59,11 +60,31 @@ const nodeTypes = {
   guardrail: GuardrailNode,
 };
 
+const edgeTypes = {
+  default: DeletableEdge,
+  deletable: DeletableEdge,
+};
+
 const initialNodes: Node[] = [
   { id: "trigger", type: "trigger", position: { x: 40, y: 200 }, data: { label: "Agent prompt", sub: "Describe the goal" } },
   { id: "output", type: "output", position: { x: 920, y: 200 }, data: { label: "MCP Server", sub: "Auto-generated" } },
 ];
 const initialEdges: Edge[] = [];
+
+const easeOut = [0.22, 1, 0.36, 1] as const;
+
+const stagger = {
+  hidden: { opacity: 0 },
+  show: {
+    opacity: 1,
+    transition: { staggerChildren: 0.07, delayChildren: 0.05 },
+  },
+};
+
+const fadeUp = {
+  hidden: { opacity: 0, y: 14 },
+  show: { opacity: 1, y: 0, transition: { duration: 0.35, ease: easeOut } },
+};
 
 function BuilderPage() {
   return (
@@ -81,19 +102,63 @@ function Builder() {
   const [discoverOpen, setDiscoverOpen] = useState(false);
   const [simulateOpen, setSimulateOpen] = useState(false);
   const [guardrails, setGuardrails] = useState<Guardrail[]>(DEFAULT_GUARDRAILS);
+  const [network, setNetwork] = useState<string | null>(null);
   const idRef = useRef(1);
+  const headlineRef = useRef<HTMLHeadingElement>(null);
   const { screenToFlowPosition } = useReactFlow();
 
   useEffect(() => {
     rillApi.protocols().then(applyProtocolRegistry).catch(() => {
       /* bundled TESTNET_MANIFEST is fallback */
     });
+    rillApi
+      .health()
+      .then((h) => {
+        const n = typeof h.network === "string" ? h.network : null;
+        if (n) setNetwork(n);
+      })
+      .catch(() => {});
   }, []);
 
+  useEffect(() => {
+    if (!headlineRef.current) return;
+    gsap.fromTo(
+      headlineRef.current,
+      { opacity: 0, y: 16, filter: "blur(6px)" },
+      { opacity: 1, y: 0, filter: "blur(0px)", duration: 0.7, ease: "power3.out", delay: 0.1 },
+    );
+  }, [network]);
+
   const onConnect = useCallback(
-    (c: Connection) => setEdges((es) => addEdge({ ...c, animated: true }, es)),
+    (c: Connection) => {
+      const coin =
+        c.sourceHandle?.includes("coin_out") ||
+        c.targetHandle?.includes("sui_coin") ||
+        c.targetHandle?.includes("coin_inputs");
+      setEdges((es) =>
+        addEdge(
+          {
+            ...c,
+            type: "deletable",
+            animated: !coin,
+            className: coin ? "coin-edge" : "flow-edge",
+          },
+          es,
+        ),
+      );
+    },
     [setEdges],
   );
+
+  const isValidConnection = useCallback((c: Connection) => {
+    const src = c.sourceHandle?.replace(/^(in|out):/, "") ?? "flow";
+    const tgt = c.targetHandle?.replace(/^(in|out):/, "") ?? "flow";
+    const coin = new Set(["coin_out", "sui_coin", "coin_inputs"]);
+    const srcCoin = coin.has(src);
+    const tgtCoin = coin.has(tgt);
+    if (srcCoin || tgtCoin) return srcCoin && tgtCoin;
+    return true;
+  }, []);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -239,20 +304,25 @@ function Builder() {
         <aside className="w-[320px] shrink-0 border-r border-border/60 bg-card/40 backdrop-blur flex flex-col min-h-0">
           <div className="p-4 border-b border-border/60 shrink-0">
             <div className="text-xs uppercase tracking-widest text-muted-foreground">Library</div>
-            <h2 className="mt-1 font-display text-2xl tracking-tight">Live on testnet</h2>
+            <h2 ref={headlineRef} className="mt-1 font-display text-2xl tracking-tight">
+              {network ? `Live on ${network}` : "Live on Sui"}
+            </h2>
             <p className="mt-2 text-[11px] text-muted-foreground leading-relaxed">
-              1. Drag node → set <strong>token & amount</strong> on canvas
+              1. Drag Cetus / Haedal onto canvas
               <br />
-              2. Wire <strong>coin_out → sui_coin</strong> (swap must output SUI for stake)
+              2. <strong>Trigger → Cetus</strong> (flow, dashed) · <strong>coin_out → sui_coin</strong> (solid)
               <br />
-              3. <strong>Simulate</strong> → then <strong>Compile & export</strong> for MCP URL
+              3. <strong>Simulate</strong> → <strong>Compile & export</strong>
             </p>
-            <button
+            <motion.button
+              whileHover={{ scale: 1.02, y: -1 }}
+              whileTap={{ scale: 0.98 }}
+              transition={{ type: "spring", stiffness: 420, damping: 24 }}
               onClick={() => setDiscoverOpen(true)}
-              className="mt-3 w-full inline-flex items-center justify-center gap-2 rounded-lg bg-foreground text-background px-3 py-2 text-sm font-medium hover:opacity-90 transition"
+              className="mt-3 w-full inline-flex items-center justify-center gap-2 rounded-lg bg-foreground text-background px-3 py-2 text-sm font-medium shadow-[var(--shadow-soft)]"
             >
               <Sparkles className="h-3.5 w-3.5" /> Discover / Import
-            </button>
+            </motion.button>
             <div className="mt-3 relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
               <input
@@ -264,48 +334,91 @@ function Builder() {
             </div>
           </div>
           <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
-            {filtered.map((p) => (
-              <ProtocolGroup key={p.id} p={p} onAdd={addAction} onDragStart={onDragStart} />
-            ))}
+            <AnimatePresence mode="popLayout">
+              {filtered.map((p, i) => (
+                <motion.div
+                  key={p.id}
+                  layout
+                  initial={{ opacity: 0, x: -16 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: -8, scale: 0.98 }}
+                  transition={{ delay: i * 0.05, duration: 0.35, ease: easeOut }}
+                >
+                  <ProtocolGroup p={p} onAdd={addAction} onDragStart={onDragStart} />
+                </motion.div>
+              ))}
+            </AnimatePresence>
             {filtered.length === 0 && (
-              <div className="text-sm text-muted-foreground text-center py-12">No matching actions.</div>
+              <motion.p
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="text-sm text-muted-foreground text-center py-12"
+              >
+                No matching actions.
+              </motion.p>
             )}
           </div>
         </aside>
 
         {/* Canvas — fixed viewport; pan/zoom inside ReactFlow only */}
         <main className="flex-1 min-h-0 relative overflow-hidden">
-          <div className="absolute top-3 right-3 z-10 flex flex-wrap gap-2 justify-end">
-            <button
-              onClick={addPtb}
-              className="inline-flex items-center gap-2 rounded-full bg-card border border-border px-3.5 py-2 text-sm font-medium hover:bg-secondary transition"
-            >
-              <Layers className="h-4 w-4" /> Add PTB
-            </button>
-            <button
-              onClick={addGuardrail}
-              className="inline-flex items-center gap-2 rounded-full bg-card border border-border px-3.5 py-2 text-sm font-medium hover:bg-secondary transition"
-            >
-              <Shield className="h-4 w-4" /> Guardrails
-            </button>
-            <button
-              onClick={() => setSimulateOpen(true)}
-              className="inline-flex items-center gap-2 rounded-full bg-card border border-border px-3.5 py-2 text-sm font-medium shadow-[var(--shadow-soft)] hover:bg-secondary transition"
-            >
-              <Play className="h-4 w-4" /> Simulate
-            </button>
-            <button
-              onClick={() => setExportOpen(true)}
-              className="inline-flex items-center gap-2 rounded-full bg-foreground text-background px-3.5 py-2 text-sm font-medium shadow-[var(--shadow-float)] hover:opacity-90 transition"
-            >
-              <Download className="h-4 w-4" /> Compile & export
-            </button>
+          <div className="pointer-events-none absolute inset-0 overflow-hidden">
+            <motion.div
+              className="absolute -top-24 -right-24 h-72 w-72 rounded-full bg-mint/20 blur-3xl"
+              animate={{ x: [0, 24, 0], y: [0, 16, 0], scale: [1, 1.08, 1] }}
+              transition={{ duration: 14, repeat: Infinity, ease: "easeInOut" }}
+            />
+            <motion.div
+              className="absolute bottom-0 left-1/4 h-64 w-64 rounded-full bg-lilac/15 blur-3xl"
+              animate={{ x: [0, -20, 0], y: [0, -12, 0], scale: [1, 1.05, 1] }}
+              transition={{ duration: 18, repeat: Infinity, ease: "easeInOut", delay: 2 }}
+            />
           </div>
 
-          <div className="absolute top-3 left-3 z-10 rounded-full bg-card/80 backdrop-blur border border-border px-3 py-1.5 text-[11px] text-muted-foreground flex items-center gap-2">
-            <span className="inline-block h-1.5 w-1.5 rounded-full bg-mint-foreground" />
-            Drag to wire labeled ports (amount_in → amount_out)
-          </div>
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.2, duration: 0.4, ease: easeOut }}
+            className="absolute top-3 right-3 z-10 flex flex-wrap gap-2 justify-end"
+          >
+            {(
+              [
+                { label: "Add PTB", icon: Layers, onClick: addPtb, primary: false },
+                { label: "Guardrails", icon: Shield, onClick: addGuardrail, primary: false },
+                { label: "Simulate", icon: Play, onClick: () => setSimulateOpen(true), primary: false },
+                { label: "Compile & export", icon: Download, onClick: () => setExportOpen(true), primary: true },
+              ] as const
+            ).map(({ label, icon: Icon, onClick, primary }) => (
+              <motion.button
+                key={label}
+                whileHover={{ scale: 1.04, y: -2 }}
+                whileTap={{ scale: 0.96 }}
+                transition={{ type: "spring", stiffness: 480, damping: 22 }}
+                onClick={onClick}
+                className={
+                  primary
+                    ? "inline-flex items-center gap-2 rounded-full bg-foreground text-background px-3.5 py-2 text-sm font-medium shadow-[var(--shadow-float)]"
+                    : "inline-flex items-center gap-2 rounded-full bg-card/90 backdrop-blur border border-border px-3.5 py-2 text-sm font-medium shadow-[var(--shadow-soft)]"
+                }
+              >
+                <Icon className="h-4 w-4" /> {label}
+              </motion.button>
+            ))}
+          </motion.div>
+
+          <motion.div
+            initial={{ opacity: 0, x: -8 }}
+            animate={{ opacity: 1, x: 0 }}
+            transition={{ delay: 0.35, duration: 0.4, ease: easeOut }}
+            className="absolute top-3 left-3 z-10 rounded-full bg-card/80 backdrop-blur border border-border px-3 py-1.5 text-[11px] text-muted-foreground flex items-center gap-2"
+          >
+            <motion.span
+              className="inline-block h-1.5 w-1.5 rounded-full bg-mint-foreground"
+              animate={{ scale: [1, 1.35, 1], opacity: [1, 0.65, 1] }}
+              transition={{ duration: 2.2, repeat: Infinity, ease: "easeInOut" }}
+            />
+            Drag flow (dashed) or coin ports (solid) · click line + Delete to remove
+          </motion.div>
 
           <div className="absolute inset-0 touch-none" onDrop={onDrop} onDragOver={onDragOver}>
             <ReactFlow
@@ -314,11 +427,17 @@ function Builder() {
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
+              isValidConnection={isValidConnection}
               nodeTypes={nodeTypes as any}
+              edgeTypes={edgeTypes as any}
               fitView
               className="h-full w-full"
               proOptions={{ hideAttribution: true }}
-              defaultEdgeOptions={{ animated: true }}
+              defaultEdgeOptions={{ type: "deletable", animated: true }}
+              edgesDeletable
+              deleteKeyCode={["Backspace", "Delete"]}
+              connectionRadius={28}
+              connectionLineStyle={{ stroke: "var(--color-primary)", strokeWidth: 2 }}
               preventScrolling
               panOnScroll
               zoomOnScroll
@@ -374,13 +493,6 @@ function ProtocolGroup({
   onDragStart: (e: React.DragEvent, p: Protocol, actionId: string) => void;
 }) {
   const [open, setOpen] = useState(true);
-  const colorMap: Record<string, string> = {
-    mint: "bg-mint text-mint-foreground",
-    peach: "bg-peach text-peach-foreground",
-    sky: "bg-sky text-sky-foreground",
-    lilac: "bg-lilac text-lilac-foreground",
-  };
-  const colorCls = colorMap[p.color];
   return (
     <div className="rounded-xl border border-border/70 bg-card overflow-hidden">
       <button
@@ -388,9 +500,7 @@ function ProtocolGroup({
         className="w-full flex items-center justify-between px-3 py-2.5 hover:bg-secondary/60 transition"
       >
         <div className="flex items-center gap-2">
-          <span className={`h-6 w-6 rounded-md ${colorCls} flex items-center justify-center`}>
-            <Box className="h-3.5 w-3.5" />
-          </span>
+          <ProtocolLogo protocolId={p.id} name={p.name} />
           <div className="text-left">
             <div className="text-sm font-semibold leading-tight">{p.name}</div>
             <div className="text-[11px] text-muted-foreground">{p.category}</div>
@@ -408,25 +518,31 @@ function ProtocolGroup({
             className="overflow-hidden border-t border-border/60"
           >
             <div className="p-2 space-y-1">
-              {p.actions.map((a) => (
-                <div
+              {p.actions.map((a, i) => (
+                <motion.div
                   key={a.id}
+                  initial={{ opacity: 0, x: -6 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: i * 0.04, duration: 0.25, ease: easeOut }}
+                  whileHover={{ x: 4, backgroundColor: "var(--color-secondary)" }}
                   draggable
                   onDragStart={(e) => onDragStart(e, p, a.id)}
                   onDoubleClick={() => onAdd(p, a.id)}
-                  className="group flex items-center justify-between gap-2 rounded-lg px-2.5 py-2 hover:bg-secondary/70 cursor-grab active:cursor-grabbing"
+                  className="group flex items-center justify-between gap-2 rounded-lg px-2.5 py-2 cursor-grab active:cursor-grabbing"
                 >
                   <div>
                     <div className="text-sm font-medium leading-tight">{a.name}</div>
                     <div className="text-[11px] text-muted-foreground line-clamp-1">{a.description}</div>
                   </div>
-                  <button
+                  <motion.button
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
                     onClick={() => onAdd(p, a.id)}
                     className="opacity-0 group-hover:opacity-100 transition text-[11px] rounded-md border border-border bg-background px-2 py-1"
                   >
                     Add
-                  </button>
-                </div>
+                  </motion.button>
+                </motion.div>
               ))}
             </div>
           </motion.div>
@@ -447,10 +563,11 @@ function ExportDialog({
   guardrails: Guardrail[];
   onClose: () => void;
 }) {
-  const [tab, setTab] = useState<"mcp" | "skill" | "cli">("mcp");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [published, setPublished] = useState<PublishResult | null>(null);
+  const [copied, setCopied] = useState<"mcp" | "config" | null>(null);
+  const mcpBoxRef = useRef<HTMLDivElement>(null);
   const actions = nodes.filter((n) => n.type === "action").map((n) => n.data as ActionNodeData);
 
   useEffect(() => {
@@ -483,62 +600,46 @@ function ExportDialog({
     };
   }, [nodes, edges]);
 
-  const mcp = useMemo(() => {
-    if (published) {
-      return JSON.stringify(
-        {
-          name: published.toolDefs.name,
-          description: published.toolDefs.description,
-          mcpUrl: published.mcpUrl,
-          skillUrl: published.skillUrl,
-          skillId: published.skillId,
-          runtime: { network: "sui:mainnet", mode: "keyless", sign: "thiny" },
-          guardrails: guardrails.filter((g) => g.enabled).map((g) => g.id),
-          warnings: published.warnings,
+  useEffect(() => {
+    if (!published || !mcpBoxRef.current) return;
+    gsap.fromTo(
+      mcpBoxRef.current,
+      { scale: 0.96, boxShadow: "0 0 0 rgba(0,0,0,0)" },
+      {
+        scale: 1,
+        boxShadow: "0 0 0 3px oklch(0.72 0.12 165 / 0.35)",
+        duration: 0.55,
+        ease: "back.out(1.6)",
+      },
+    );
+    gsap.to(mcpBoxRef.current, {
+      boxShadow: "0 0 0 0px oklch(0.72 0.12 165 / 0)",
+      delay: 0.9,
+      duration: 0.6,
+      ease: "power2.out",
+    });
+  }, [published]);
+
+  const claudeConfig = useMemo(() => {
+    if (!published) return "";
+    return JSON.stringify(
+      {
+        mcpServers: {
+          [published.toolDefs.name]: {
+            url: published.mcpUrl,
+          },
         },
-        null,
-        2,
-      );
-    }
-    return loading ? "Publishing to Rill backend…" : error ?? "";
-  }, [published, guardrails, loading, error]);
+      },
+      null,
+      2,
+    );
+  }, [published]);
 
-  const cli = useMemo(() => {
-    if (!published) return error ?? "Waiting for publish…";
-    return [
-      "# Rill MCP — paste into Thiny / Claude Code",
-      `curl -X POST ${published.mcpUrl} \\`,
-      '  -H "Content-Type: application/json" \\',
-      '  -d \'{"jsonrpc":"2.0","id":1,"method":"tools/list"}\'',
-      "",
-      "Guardrails:",
-      ...guardrails.filter((g) => g.enabled).map((g) => `  - ${g.label}`),
-      "",
-      "Steps:",
-      ...actions.map((a, i) => `  ${i + 1}. ${a.protocol} · ${a.action}`),
-    ].join("\n");
-  }, [published, guardrails, actions, error]);
-
-  const skill = useMemo(() => {
-    if (!published) return error ?? "";
-    return [
-      "---",
-      `name: ${published.toolDefs.name}`,
-      `description: ${published.toolDefs.description}`,
-      "---",
-      "",
-      "## MCP URL",
-      published.mcpUrl,
-      "",
-      "## Steps",
-      ...actions.map((a, i) => `${i + 1}. **${a.protocol} — ${a.action}**: ${a.description}`),
-      "",
-      "## Runtime",
-      "Agent calls MCP → Rill returns unsigned PTB + preview → Thiny signs (keyless backend).",
-    ].join("\n");
-  }, [published, actions, error]);
-
-  const content = tab === "mcp" ? mcp : tab === "cli" ? cli : skill;
+  const copy = async (text: string, kind: "mcp" | "config") => {
+    await navigator.clipboard.writeText(text);
+    setCopied(kind);
+    setTimeout(() => setCopied(null), 2000);
+  };
 
   return (
     <motion.div
@@ -549,73 +650,182 @@ function ExportDialog({
       onClick={onClose}
     >
       <motion.div
-        initial={{ opacity: 0, y: 20, scale: 0.98 }}
+        initial={{ opacity: 0, y: 24, scale: 0.96 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
-        exit={{ opacity: 0, y: 10, scale: 0.98 }}
-        transition={{ duration: 0.2 }}
+        exit={{ opacity: 0, y: 12, scale: 0.98 }}
+        transition={{ type: "spring", stiffness: 380, damping: 28 }}
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-3xl rounded-2xl bg-card border border-border shadow-[var(--shadow-float)] overflow-hidden"
+        className="w-full max-w-2xl rounded-2xl bg-card border border-border shadow-[var(--shadow-float)] overflow-hidden"
       >
-        <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-          <div>
-            <div className="text-xs uppercase tracking-widest text-muted-foreground">Compile flow</div>
-            <h3 className="font-display text-2xl tracking-tight">Ship to your agent</h3>
-            {published && (
-              <div className="mt-1 space-y-0.5 text-xs">
-                <a
-                  href={published.skillUrl ?? published.mcpUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-primary hover:underline block truncate max-w-md"
-                >
-                  {published.skillUrl ?? published.mcpUrl}
-                </a>
-                <p className="text-muted-foreground">MCP URL is POST-only — use skill doc or Copy for agents.</p>
-              </div>
-            )}
+        <div className="flex items-start justify-between px-5 py-4 border-b border-border gap-4">
+          <div className="min-w-0">
+            <div className="text-xs uppercase tracking-widest text-muted-foreground">Publish</div>
+            <h3 className="font-display text-2xl tracking-tight">
+              {loading ? "Compiling flow…" : published ? "MCP server ready" : "Publish failed"}
+            </h3>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {loading
+                ? "Building PTB, simulating, and registering tools on Rill."
+                : "Copy the URL below into Claude Code, Cursor, or Thiny — not a browser link."}
+            </p>
           </div>
-          <button onClick={onClose} className="rounded-full p-1.5 hover:bg-secondary">
+          <motion.button
+            whileHover={{ scale: 1.08, rotate: 90 }}
+            whileTap={{ scale: 0.92 }}
+            onClick={onClose}
+            className="rounded-full p-1.5 hover:bg-secondary shrink-0"
+          >
             <X className="h-4 w-4" />
-          </button>
+          </motion.button>
         </div>
-        <div className="px-5 pt-4 flex gap-1">
-          {[
-            { id: "mcp", label: "MCP Server", icon: Bot },
-            { id: "skill", label: "Agent Skill", icon: Code2 },
-            { id: "cli", label: "CLI Tool", icon: Terminal },
-          ].map((t) => (
-            <button
-              key={t.id}
-              onClick={() => setTab(t.id as "mcp" | "skill" | "cli")}
-              className={`inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-sm transition ${
-                tab === t.id ? "bg-foreground text-background" : "text-muted-foreground hover:bg-secondary"
-              }`}
+
+        <div className="p-5 space-y-4 min-h-[180px]">
+          {loading && (
+            <motion.div
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="flex flex-col items-center justify-center py-10 gap-4"
             >
-              <t.icon className="h-3.5 w-3.5" /> {t.label}
-            </button>
-          ))}
-        </div>
-        <div className="p-5">
-          <pre className="rounded-xl bg-foreground/5 border border-border p-4 text-xs font-mono overflow-auto max-h-[420px] text-foreground/85 whitespace-pre-wrap">
-            {loading ? "Publishing flow to Rill backend…" : content}
-          </pre>
-          <div className="mt-4 flex justify-end gap-2">
-            <button
-              disabled={!content || loading}
-              onClick={() => navigator.clipboard.writeText(content)}
-              className="rounded-full border border-border bg-background px-4 py-2 text-sm hover:bg-secondary transition disabled:opacity-50"
-            >
-              Copy
-            </button>
-            {published && (
-              <button
-                onClick={() => window.open(published.skillUrl ?? published.mcpUrl, "_blank")}
-                className="rounded-full bg-foreground text-background px-4 py-2 text-sm hover:opacity-90 transition"
+              <motion.div
+                animate={{ rotate: 360 }}
+                transition={{ duration: 1.2, repeat: Infinity, ease: "linear" }}
               >
-                Open skill doc
-              </button>
-            )}
-          </div>
+                <Loader2 className="h-8 w-8 text-primary" />
+              </motion.div>
+              <div className="flex gap-1.5">
+                {["Compose", "Simulate", "Publish"].map((step, i) => (
+                  <motion.span
+                    key={step}
+                    className="text-[11px] rounded-full border border-border px-2.5 py-1 text-muted-foreground"
+                    initial={{ opacity: 0.4 }}
+                    animate={{ opacity: [0.4, 1, 0.4] }}
+                    transition={{ duration: 1.4, repeat: Infinity, delay: i * 0.35 }}
+                  >
+                    {step}
+                  </motion.span>
+                ))}
+              </div>
+            </motion.div>
+          )}
+
+          {error && !loading && (
+            <motion.p
+              initial={{ opacity: 0, x: -8 }}
+              animate={{ opacity: 1, x: 0 }}
+              className="text-sm text-destructive rounded-lg border border-destructive/30 bg-destructive/5 p-3"
+            >
+              {error}
+            </motion.p>
+          )}
+
+          {published && !loading && (
+            <motion.div variants={stagger} initial="hidden" animate="show" className="space-y-4">
+              <motion.div variants={fadeUp} className="flex items-center gap-2 text-mint-foreground">
+                <motion.span
+                  initial={{ scale: 0 }}
+                  animate={{ scale: 1 }}
+                  transition={{ type: "spring", stiffness: 500, damping: 18, delay: 0.1 }}
+                  className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-mint/30"
+                >
+                  <Check className="h-3.5 w-3.5" />
+                </motion.span>
+                <span className="text-sm font-medium">Published successfully</span>
+              </motion.div>
+
+              <motion.div variants={fadeUp}>
+                <label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  MCP server URL
+                </label>
+                <div ref={mcpBoxRef} className="mt-1.5 flex gap-2 rounded-xl">
+                  <code className="flex-1 rounded-lg border border-border bg-foreground/5 px-3 py-2.5 text-xs break-all">
+                    {published.mcpUrl}
+                  </code>
+                  <motion.button
+                    whileHover={{ scale: 1.04 }}
+                    whileTap={{ scale: 0.96 }}
+                    onClick={() => copy(published.mcpUrl, "mcp")}
+                    className="shrink-0 rounded-full bg-foreground text-background px-4 py-2 text-sm font-medium"
+                  >
+                    <AnimatePresence mode="wait">
+                      {copied === "mcp" ? (
+                        <motion.span
+                          key="copied"
+                          initial={{ opacity: 0, y: 6 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0, y: -6 }}
+                          className="inline-flex items-center gap-1"
+                        >
+                          <Check className="h-3.5 w-3.5" /> Copied
+                        </motion.span>
+                      ) : (
+                        <motion.span key="copy" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+                          Copy URL
+                        </motion.span>
+                      )}
+                    </AnimatePresence>
+                  </motion.button>
+                </div>
+              </motion.div>
+
+              <motion.div
+                variants={fadeUp}
+                className="rounded-lg border border-border/60 bg-muted/30 px-4 py-3 text-sm space-y-2"
+              >
+                <p className="font-medium">How to use</p>
+                <ol className="list-decimal list-inside text-muted-foreground space-y-1 text-xs">
+                  <li>Copy the MCP URL above</li>
+                  <li>Add it to your agent&apos;s MCP config (Claude Code / Cursor / Thiny)</li>
+                  <li>
+                    Agent calls <code className="text-foreground">{published.toolDefs.name}</code> → gets unsigned PTB +
+                    simulation
+                  </li>
+                </ol>
+              </motion.div>
+
+              <motion.div variants={fadeUp}>
+                <label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Claude Code config (optional)
+                </label>
+                <pre className="mt-1.5 rounded-lg border border-border bg-foreground/5 p-3 text-[11px] font-mono overflow-auto max-h-36">
+                  {claudeConfig}
+                </pre>
+                <motion.button
+                  whileHover={{ x: 2 }}
+                  onClick={() => copy(claudeConfig, "config")}
+                  className="mt-2 text-xs text-primary hover:underline"
+                >
+                  {copied === "config" ? "Copied!" : "Copy config JSON"}
+                </motion.button>
+              </motion.div>
+
+              {published.warnings.length > 0 && (
+                <motion.p variants={fadeUp} className="text-xs text-amber-700 dark:text-amber-400">
+                  Warnings: {published.warnings.join(" · ")}
+                </motion.p>
+              )}
+
+              {published.skillUrl && (
+                <motion.p variants={fadeUp} className="text-xs text-muted-foreground border-t border-border pt-3">
+                  Need human-readable docs?{" "}
+                  <a
+                    href={published.skillUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-primary hover:underline"
+                  >
+                    Open SKILL.md
+                  </a>
+                  {" "}(includes the same MCP URL + signing steps)
+                </motion.p>
+              )}
+
+              <motion.p variants={fadeUp} className="text-[10px] text-muted-foreground">
+                Flow: {actions.map((a) => `${a.protocol} · ${a.action}`).join(" → ")}
+                {guardrails.filter((g) => g.enabled).length > 0 &&
+                  ` · Guardrails: ${guardrails.filter((g) => g.enabled).map((g) => g.label).join(", ")}`}
+              </motion.p>
+            </motion.div>
+          )}
         </div>
       </motion.div>
     </motion.div>
