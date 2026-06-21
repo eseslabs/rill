@@ -1,0 +1,23 @@
+{
+  "name": "@rill/signer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local signer for Rill — holds the agent's Sui key and signs the unsigned PTBs Rill builds. Exposed as an MCP server (sui_execute_ptb) and a CLI (rill-sign). Bounded by the on-chain agent_wallet.",
+  "bin": {
+    "rill-signer-mcp": "./src/mcp.ts",
+    "rill-sign": "./src/cli.ts"
+  },
+  "scripts": {
+    "mcp": "bun run src/mcp.ts",
+    "check": "tsc --noEmit -p tsconfig.json",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@mysten/sui": "^2.19.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.14",
+    "typescript": "^5.7.3"
+  }
+}
