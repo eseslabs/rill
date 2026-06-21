@@ -2,5 +2,10 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "tanstack-start",
   "installCommand": "bun install",
-  "buildCommand": "bun run build"
+  "buildCommand": "bun run build",
+  "build": {
+    "env": {
+      "VITE_RILL_API_URL": "https://api.rill.naisu.one/api"
+    }
+  }
 }

@@ -1,6 +1,18 @@
-const API_BASE =
-  import.meta.env.VITE_RILL_API_URL?.replace(/\/$/, "") ??
-  "https://api.rill.naisu.one/api";
+const API_FALLBACK = "https://api.rill.naisu.one/api";
+
+function normalizeApiBase(raw: string): string {
+  const trimmed = raw.replace(/\/$/, "");
+  if (trimmed.includes("rifuki.dev")) return API_FALLBACK;
+  return trimmed.endsWith("/api") ? trimmed : `${trimmed}/api`;
+}
+
+function resolveApiBase(): string {
+  const fromEnv = import.meta.env.VITE_RILL_API_URL;
+  if (fromEnv) return normalizeApiBase(fromEnv);
+  return API_FALLBACK;
+}
+
+const API_BASE = resolveApiBase();
 
 export type FlowEdge = {
   source: string;
@@ -46,6 +58,7 @@ export type ExecuteResult = {
 export type PublishResult = {
   skillId: string;
   mcpUrl: string;
+  skillUrl?: string;
   toolDefs: { name: string; description: string };
   warnings: string[];
 };
@@ -84,13 +97,24 @@ export type BackendFunction = {
   }[];
 };
 
+async function parseJsonResponse<T>(res: Response): Promise<T> {
+  const text = await res.text();
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(
+      `API returned non-JSON (${res.status} from ${res.url}): ${text.slice(0, 120) || "(empty body)"}`,
+    );
+  }
+}
+
 async function post<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  const json = (await res.json()) as { success: boolean; data?: T; error?: string };
+  const json = await parseJsonResponse<{ success: boolean; data?: T; error?: string }>(res);
   if (!res.ok || !json.success || !json.data) {
     throw new Error(json.error ?? `API error ${res.status}`);
   }
@@ -100,19 +124,19 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 export const rillApi = {
   baseUrl: API_BASE,
 
-  health() {
+  async health() {
     const root = API_BASE.replace(/\/api$/, "");
-    return fetch(root).then((r) => r.json());
+    const res = await fetch(`${root}/health`);
+    return parseJsonResponse<Record<string, unknown>>(res);
   },
 
-  protocols() {
-    return fetch(`${API_BASE}/protocols`).then(async (r) => {
-      const json = (await r.json()) as { success: boolean; data?: ProtocolRegistry; error?: string };
-      if (!r.ok || !json.success || !json.data) {
-        throw new Error(json.error ?? `API error ${r.status}`);
-      }
-      return json.data;
-    });
+  async protocols() {
+    const res = await fetch(`${API_BASE}/protocols`);
+    const json = await parseJsonResponse<{ success: boolean; data?: ProtocolRegistry; error?: string }>(res);
+    if (!res.ok || !json.success || !json.data) {
+      throw new Error(json.error ?? `API error ${res.status}`);
+    }
+    return json.data;
   },
 
   introspect(packageId: string) {
