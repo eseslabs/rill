@@ -1,6 +1,6 @@
 const API_BASE =
   import.meta.env.VITE_RILL_API_URL?.replace(/\/$/, "") ??
-  "https://api.rill.rifuki.dev/api";
+  "https://api.rill.naisu.one/api";
 
 export type FlowEdge = {
   source: string;

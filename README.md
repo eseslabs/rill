@@ -20,4 +20,7 @@ cd rill-backend && cp .env.example .env && bun install && bun run dev
 cd rill-frontend && cp .env.example .env && bun install && bun run dev
 ```
 
-Live API: https://api.rill.rifuki.dev
+| Site | URL |
+|---|---|
+| Frontend (Vercel) | https://rill.naisu.one |
+| Backend API + Swagger | https://api.rill.naisu.one |
