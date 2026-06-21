@@ -43,6 +43,12 @@ import { ProtocolLogo } from "@/components/flow/protocol-logo";
 import { DeletableEdge } from "@/components/flow/deletable-edge";
 import { SimulateDialog, DEFAULT_GUARDRAILS, type Guardrail } from "@/components/flow/simulate-dialog";
 import { buildFlowGraph } from "@/lib/flow-mapper";
+import {
+  inferWireKindFromConnection,
+  isValidWireConnection,
+  WIRE_IN,
+  WIRE_OUT,
+} from "@/lib/wire-inference";
 import { applyProtocolRegistry, defaultActionConfig } from "@/lib/action-config";
 import { getActionPorts } from "@/lib/action-ports";
 import { rillApi, type PublishResult } from "@/lib/rill-api";
@@ -131,34 +137,29 @@ function Builder() {
 
   const onConnect = useCallback(
     (c: Connection) => {
-      const coin =
-        c.sourceHandle?.includes("coin_out") ||
-        c.targetHandle?.includes("sui_coin") ||
-        c.targetHandle?.includes("coin_inputs");
+      const wireKind = inferWireKindFromConnection(c, nodes);
       setEdges((es) =>
         addEdge(
           {
             ...c,
+            sourceHandle: c.sourceHandle ?? WIRE_OUT,
+            targetHandle: c.targetHandle ?? WIRE_IN,
             type: "deletable",
-            animated: !coin,
-            className: coin ? "coin-edge" : "flow-edge",
+            animated: wireKind === "flow",
+            className: wireKind === "coin" ? "coin-edge" : "flow-edge",
+            data: { wireKind },
           },
           es,
         ),
       );
     },
-    [setEdges],
+    [setEdges, nodes],
   );
 
-  const isValidConnection = useCallback((c: Connection) => {
-    const src = c.sourceHandle?.replace(/^(in|out):/, "") ?? "flow";
-    const tgt = c.targetHandle?.replace(/^(in|out):/, "") ?? "flow";
-    const coin = new Set(["coin_out", "sui_coin", "coin_inputs"]);
-    const srcCoin = coin.has(src);
-    const tgtCoin = coin.has(tgt);
-    if (srcCoin || tgtCoin) return srcCoin && tgtCoin;
-    return true;
-  }, []);
+  const isValidConnection = useCallback(
+    (c: Connection) => isValidWireConnection(c, nodes),
+    [nodes],
+  );
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -310,7 +311,7 @@ function Builder() {
             <p className="mt-2 text-[11px] text-muted-foreground leading-relaxed">
               1. Drag actions onto canvas
               <br />
-              2. Wire <strong>flow</strong> (dashed) or <strong>coin</strong> ports (solid)
+              2. Wire <strong>out → in</strong> — solid = coin chain, dashed = sequence
               <br />
               3. <strong>Simulate</strong> → <strong>Compile & export</strong>
             </p>
@@ -417,7 +418,7 @@ function Builder() {
               animate={{ scale: [1, 1.35, 1], opacity: [1, 0.65, 1] }}
               transition={{ duration: 2.2, repeat: Infinity, ease: "easeInOut" }}
             />
-            Drag flow (dashed) or coin ports (solid) · click line + Delete to remove
+            Wire out → in · Delete to remove
           </motion.div>
 
           <div className="absolute inset-0 touch-none" onDrop={onDrop} onDragOver={onDragOver}>

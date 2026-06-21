@@ -7,15 +7,9 @@ import {
   buildDeepbookOrderFlowConfig,
   TOKEN_COIN_TYPE,
 } from "@/lib/action-config";
+import { resolveBackendCoinHandles, wireKindFromEdge } from "@/lib/wire-inference";
 
 const SUI = TOKEN_COIN_TYPE.SUI;
-
-function normalizeHandle(handle: string | null | undefined, fallback: string): string {
-  if (!handle) return fallback;
-  if (handle.startsWith("out:")) return handle.slice(4);
-  if (handle.startsWith("in:")) return handle.slice(3);
-  return handle;
-}
 
 /** Swap wired into Haedal must output SUI; stake amount cannot exceed swap output. */
 function applyWireConstraints(nodes: FlowNode[], edges: FlowEdge[]) {
@@ -67,26 +61,17 @@ function mapEdge(edge: Edge, nodes: Node[]): FlowEdge | null {
 
   const targetData = target.data as ActionNodeData;
   if (!isBackendSupported(targetData)) return null;
+  if (wireKindFromEdge(edge, nodes) !== "coin") return null;
 
-  if (targetData.protocolId === "haedal") {
-    return {
-      source: edge.source,
-      sourceHandle: normalizeHandle(edge.sourceHandle, "coin_out"),
-      target: edge.target,
-      targetHandle: normalizeHandle(edge.targetHandle, "sui_coin"),
-    };
-  }
+  const handles = resolveBackendCoinHandles(source, target);
+  if (!handles) return null;
 
-  if (targetData.protocolId === "cetus") {
-    return {
-      source: edge.source,
-      sourceHandle: normalizeHandle(edge.sourceHandle, "coin_out"),
-      target: edge.target,
-      targetHandle: normalizeHandle(edge.targetHandle, "coin_inputs"),
-    };
-  }
-
-  return null;
+  return {
+    source: edge.source,
+    sourceHandle: handles.sourceHandle,
+    target: edge.target,
+    targetHandle: handles.targetHandle,
+  };
 }
 
 export function buildFlowGraph(nodes: Node[], edges: Edge[]): FlowGraph & { skipped: string[] } {

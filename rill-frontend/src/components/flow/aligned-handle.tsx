@@ -1,76 +1,72 @@
 import { type ReactNode } from "react";
 import { Handle, Position, type HandleType } from "reactflow";
+import { WIRE_IN, WIRE_OUT } from "@/lib/wire-inference";
 import { cn } from "@/lib/utils";
 
-type PortRowProps = {
-  handleId: string;
-  handleType: HandleType;
-  side: "left" | "right";
-  tone?: "flow" | "coin-in" | "coin-out";
-  className?: string;
-  children: ReactNode;
-};
-
-/** Full-bleed wire row with an inline handle — edges snap to the visible circle. */
-export function PortRow({
-  handleId,
-  handleType,
-  side,
-  tone = "flow",
-  className,
-  children,
-}: PortRowProps) {
-  const toneCls =
-    tone === "coin-out"
-      ? "border-peach/45 bg-peach/10"
-      : tone === "coin-in"
-        ? "border-mint/45 bg-mint/10"
-        : "border-border/55 bg-muted/25";
-
-  return (
-    <div
-      className={cn(
-        "flex min-h-[38px] items-center gap-2 border-t border-dashed px-2 py-2.5 text-[10px]",
-        toneCls,
-        className,
-      )}
-    >
-      {side === "left" && (
-        <Handle
-          id={handleId}
-          type={handleType}
-          position={Position.Left}
-          className="flow-handle-port flow-handle-inline shrink-0"
-        />
-      )}
-      <div className="flex min-w-0 flex-1 items-center gap-2">{children}</div>
-      {side === "right" && (
-        <Handle
-          id={handleId}
-          type={handleType}
-          position={Position.Right}
-          className="flow-handle-port flow-handle-inline shrink-0"
-        />
-      )}
-    </div>
-  );
-}
-
-type InlineHandleProps = {
+type WireHandleProps = {
   id: string;
   type: HandleType;
-  position: Position;
-  className?: string;
+  side: "left" | "right";
 };
 
-/** Small inline handle for port grid rows (discovered ABI nodes). */
-export function InlineHandle({ id, type, position, className }: InlineHandleProps) {
+function WireHandle({ id, type, side }: WireHandleProps) {
   return (
     <Handle
       id={id}
       type={type}
-      position={position}
-      className={cn("flow-handle-port flow-handle-inline shrink-0", className)}
+      position={side === "left" ? Position.Left : Position.Right}
+      className="flow-handle-port flow-handle-inline shrink-0"
     />
+  );
+}
+
+export function FlowInLabels() {
+  return (
+    <>
+      <span className="font-mono text-muted-foreground">flow in</span>
+      <span className="ml-auto text-muted-foreground">← upstream</span>
+    </>
+  );
+}
+
+export function FlowOutLabels({ lead = "downstream" }: { lead?: string }) {
+  return (
+    <>
+      <span className="text-muted-foreground">{lead}</span>
+      <span className="ml-auto font-mono text-muted-foreground">flow out</span>
+    </>
+  );
+}
+
+export function NodePort({
+  id,
+  type,
+  side,
+  placement,
+  className,
+  children,
+}: {
+  id?: string;
+  type: HandleType;
+  side: "left" | "right";
+  /** Where the strip sits on the node — defaults to top for in, bottom for out */
+  placement?: "top" | "bottom";
+  className?: string;
+  children: ReactNode;
+}) {
+  const handleId = id ?? (side === "left" ? WIRE_IN : WIRE_OUT);
+  const strip = placement ?? (side === "left" ? "top" : "bottom");
+  return (
+    <div
+      className={cn(
+        "flex min-h-[38px] items-center gap-2 border-dashed border-border/55 bg-muted/25 px-2 py-2.5 text-[10px]",
+        strip === "top" ? "border-b" : "border-t",
+        className,
+      )}
+    >
+      {side === "left" && <WireHandle id={handleId} type={type} side="left" />}
+      <div className="flex min-w-0 flex-1 items-center gap-2">{children}</div>
+      {side === "right" && <WireHandle id={handleId} type={type} side="right" />}
+    </div>
   );
 }
