@@ -1,4 +1,4 @@
-import type { Port } from "@/lib/introspect";
+import type { Port } from "@/lib/rill-types";
 
 /** Wire handles for curated library actions (matches backend edge targetHandle names). */
 export function getActionPorts(
@@ -16,6 +16,10 @@ export function getActionPorts(
       inputs: [{ key: "sui_coin", label: "sui_coin", type: "Coin", role: "token_in" }],
       outputs: [],
     };
+  }
+  if (protocolId === "deepbook" && actionId === "limit_order") {
+    // Standalone — the order draws from the (pre-funded) BalanceManager, no coin wiring on canvas.
+    return { inputs: [], outputs: [] };
   }
   return undefined;
 }

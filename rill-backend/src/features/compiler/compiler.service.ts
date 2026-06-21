@@ -1,42 +1,25 @@
 import { Transaction } from '@mysten/sui/transactions';
-import type { AgentWalletBinding } from '../../core/agent-wallet';
 import { SUI_COIN_TYPE } from '../../core/agent-wallet';
-import { DEFAULT_SIMULATE_SENDER, SUI_CLOCK_ID } from '../../core/protocols';
-import { resolveCetusSwapConfig, resolveHaedalStakeConfig } from '../../core/node-config';
-import { pickSwapFunction, resolvePoolTypeArgs } from './pool-resolver';
+import { SUI_CLOCK_ID } from '../../core/protocols';
+import { getAdapter } from '../protocols/registry';
+import type {
+  CompileOptions,
+  CompileResult,
+  FlowEdge,
+  FlowGraph,
+  FlowNode,
+} from '../protocols/types';
 
-export interface FlowNode {
-  id: string;
-  type: string;
-  config?: Record<string, any>;
-  inputs?: Record<string, any>;
-}
+// Re-exported so existing importers (`from '../compiler/compiler.service'`) keep working.
+export type { FlowEdge, FlowGraph, FlowNode, CompileOptions, CompileResult };
 
-export interface FlowEdge {
-  source: string;
-  sourceHandle: string;
-  target: string;
-  targetHandle: string;
-}
-
-export interface FlowGraph {
-  nodes: FlowNode[];
-  edges: FlowEdge[];
-}
-
-export interface CompileOptions {
-  sender?: string;
-  /** When set, root SUI funding uses agent_wallet::spend() instead of tx.gas. */
-  agentWallet?: AgentWalletBinding;
-}
-
-export interface CompileResult {
-  transaction: Transaction;
-  warnings: string[];
-  agentWalletBound: boolean;
-  budgetSpendMist: bigint;
-}
-
+/**
+ * Compiles a visual flow graph into one unsigned PTB.
+ *
+ * Orchestration only — each node's Move calls live in its `ProtocolAdapter` (`features/protocols/*`).
+ * Funding flows through one chokepoint: `agent_wallet::spend()` (when an agent wallet is bound) or
+ * `tx.gas`, then `fundSuiCoin` hands SUI to whichever node needs it.
+ */
 export class CompilerService {
   async compileFlow(flow: FlowGraph, options: CompileOptions = {}): Promise<CompileResult> {
     const tx = new Transaction();
@@ -44,10 +27,10 @@ export class CompilerService {
     const orderedNodes = this.topologicalSort(flow.nodes, flow.edges);
     const nodeOutputs: Record<string, unknown> = {};
 
-    const rootFunding = this.computeRootSuiFunding(orderedNodes, flow.edges);
+    const rootTotal = this.computeRootSuiFunding(orderedNodes, flow);
     let budgetCoin: unknown | undefined;
 
-    if (options.agentWallet && rootFunding.total > 0n) {
+    if (options.agentWallet && rootTotal > 0n) {
       if (options.agentWallet.coinType !== SUI_COIN_TYPE) {
         throw new Error(
           `Agent wallet coin type ${options.agentWallet.coinType} is not supported for MVP (expected ${SUI_COIN_TYPE}).`,
@@ -60,143 +43,38 @@ export class CompilerService {
         arguments: [
           tx.object(options.agentWallet.walletId),
           tx.object(options.agentWallet.capId),
-          tx.pure.u64(rootFunding.total),
+          tx.pure.u64(rootTotal),
           tx.object(SUI_CLOCK_ID),
         ],
       });
-    } else if (options.agentWallet && rootFunding.total === 0n) {
+    } else if (options.agentWallet && rootTotal === 0n) {
       warnings.push('Agent wallet configured but no root SUI funding required — spend() not inserted.');
     }
 
+    const fundSuiCoin = (amount: bigint): unknown => {
+      if (options.agentWallet && budgetCoin !== undefined) {
+        const [split] = tx.splitCoins(budgetCoin as never, [amount]);
+        return split;
+      }
+      const [split] = tx.splitCoins(tx.gas, [amount]);
+      return split;
+    };
+
     for (const node of orderedNodes) {
-      if (node.type === 'cetus_swap') {
-        const { config: swapCfg, warnings: cfgWarnings } = resolveCetusSwapConfig(node);
-        warnings.push(...cfgWarnings);
-
-        const amountIn = BigInt(swapCfg.amount_in);
-        const poolId = swapCfg.pool;
-        const inputCoinType = swapCfg.inputCoinType;
-
-        const poolTypes = await resolvePoolTypeArgs(poolId);
-        const swap = pickSwapFunction(inputCoinType, poolTypes, swapCfg.minSqrtPrice, swapCfg.maxSqrtPrice);
-        const hasDownstream = flow.edges.some((e) => e.source === node.id);
-
-        const coinInputEdge = flow.edges.find(
-          (e) => e.target === node.id && e.targetHandle === 'coin_inputs',
-        );
-        let coinInputArg;
-
-        if (coinInputEdge) {
-          coinInputArg = nodeOutputs[coinInputEdge.source];
-          if (coinInputArg === undefined) {
-            throw new Error(
-              `Node ${node.id}: upstream coin from ${coinInputEdge.source} is missing — ensure swap uses router::swap (wire coin_out → sui_coin).`,
-            );
-          }
-        } else if (inputCoinType !== SUI_COIN_TYPE) {
-          throw new Error(
-            `Node ${node.id}: non-SUI input (${inputCoinType}) requires an upstream coin edge. Use Token in = SUI for standalone swap.`,
-          );
-        } else {
-          coinInputArg = this.fundSuiCoin(tx, amountIn, budgetCoin, options.agentWallet);
-        }
-
-        const feedsHaedal = flow.edges.some(
-          (e) =>
-            e.source === node.id &&
-            flow.nodes.some((n) => n.id === e.target && n.type === 'haedal_stake'),
-        );
-        if (feedsHaedal && swap.outputCoinType !== SUI_COIN_TYPE) {
-          throw new Error(
-            `Node ${node.id}: swap wired to Haedal stake must output SUI (set Token out = SUI / Token in = USDC).`,
-          );
-        }
-
-        const zeroA = tx.moveCall({
-          target: '0x2::coin::zero',
-          typeArguments: [poolTypes.coinTypeA],
-          arguments: [],
-        });
-        const zeroB = tx.moveCall({
-          target: '0x2::coin::zero',
-          typeArguments: [poolTypes.coinTypeB],
-          arguments: [],
-        });
-
-        const [coinAIn, coinBIn] = swap.a2b ? [coinInputArg, zeroB] : [zeroA, coinInputArg];
-
-        const [outA, outB] = tx.moveCall({
-          target: `${swapCfg.integratePackageId}::router::swap`,
-          typeArguments: swap.typeArguments,
-          arguments: [
-            tx.object(swapCfg.globalConfigId),
-            tx.object(poolId),
-            coinAIn,
-            coinBIn,
-            tx.pure.bool(swap.a2b),
-            tx.pure.bool(swapCfg.by_amount_in ?? true),
-            tx.pure.u64(amountIn),
-            tx.pure.u128(BigInt(swapCfg.sqrt_price_limit ?? swap.sqrtPriceLimit)),
-            tx.pure.bool(false),
-            tx.object(SUI_CLOCK_ID),
-          ],
-        });
-
-        const outputCoin = swap.a2b ? outB : outA;
-        nodeOutputs[node.id] = outputCoin;
-
-        if (!hasDownstream) {
-          if (swap.outputCoinType === SUI_COIN_TYPE) {
-            tx.mergeCoins(tx.gas, [outputCoin]);
-          } else {
-            const recipient = options.sender ?? DEFAULT_SIMULATE_SENDER;
-            tx.transferObjects([outputCoin], recipient);
-          }
-        }
-      } else if (node.type === 'haedal_stake') {
-        const { config: stakeCfg, warnings: cfgWarnings } = resolveHaedalStakeConfig(node);
-        warnings.push(...cfgWarnings);
-
-        const amount = BigInt(stakeCfg.amount);
-        const minStake = BigInt(stakeCfg.minStakeMist);
-
-        if (amount < minStake) {
-          throw new Error(
-            `Haedal minimum stake is ${minStake} mist. Got ${amount}.`,
-          );
-        }
-
-        const coinInputEdge = flow.edges.find(
-          (e) => e.target === node.id && e.targetHandle === 'sui_coin',
-        );
-        let coinInputArg;
-
-        if (coinInputEdge) {
-          coinInputArg = nodeOutputs[coinInputEdge.source];
-          if (coinInputArg === undefined) {
-            throw new Error(
-              `Node ${node.id}: missing SUI coin from ${coinInputEdge.source} — wire swap coin_out → sui_coin.`,
-            );
-          }
-        } else {
-          coinInputArg = this.fundSuiCoin(tx, amount, budgetCoin, options.agentWallet);
-        }
-
-        tx.moveCall({
-          target: stakeCfg.stakeTarget,
-          typeArguments: [],
-          arguments: [
-            tx.object(stakeCfg.suiSystemStateId),
-            tx.object(stakeCfg.stakingObjectId),
-            coinInputArg,
-            tx.pure.address(stakeCfg.validator ?? '0x0'),
-          ],
-        });
-      } else {
+      const adapter = getAdapter(node.type);
+      if (!adapter) {
         warnings.push(
           `Node type "${node.type}" is not supported by the current compiler version and was skipped.`,
         );
+        continue;
       }
+      await adapter.build({ tx, flow, node, nodeOutputs, budgetCoin, options, warnings, fundSuiCoin });
+    }
+
+    // The agent_wallet::spend() output is a Coin; after nodes split what they need, the remainder
+    // (≈0) must be consumed or the PTB aborts on execute (UnusedValueWithoutDrop). Merge it to gas.
+    if (budgetCoin !== undefined) {
+      tx.mergeCoins(tx.gas, [budgetCoin as never]);
     }
 
     if (options.sender) {
@@ -206,61 +84,19 @@ export class CompilerService {
     return {
       transaction: tx,
       warnings,
-      agentWalletBound: Boolean(options.agentWallet && rootFunding.total > 0n),
-      budgetSpendMist: rootFunding.total,
+      agentWalletBound: Boolean(options.agentWallet && rootTotal > 0n),
+      budgetSpendMist: rootTotal,
     };
   }
 
-  /** Sum SUI needed by nodes without an upstream coin edge. */
-  private computeRootSuiFunding(
-    nodes: FlowNode[],
-    edges: FlowEdge[],
-  ): { total: bigint; byNode: Map<string, bigint> } {
-    const byNode = new Map<string, bigint>();
+  /** Sum SUI (mist) needed from root by nodes without an upstream coin edge (delegated per adapter). */
+  private computeRootSuiFunding(nodes: FlowNode[], flow: FlowGraph): bigint {
     let total = 0n;
-
     for (const node of nodes) {
-      const hasCoinEdge =
-        node.type === 'cetus_swap'
-          ? edges.some((e) => e.target === node.id && e.targetHandle === 'coin_inputs')
-          : node.type === 'haedal_stake'
-            ? edges.some((e) => e.target === node.id && e.targetHandle === 'sui_coin')
-            : false;
-
-      if (hasCoinEdge) continue;
-
-      let amount = 0n;
-      if (node.type === 'cetus_swap') {
-        const { config: swapCfg } = resolveCetusSwapConfig(node);
-        if (swapCfg.inputCoinType !== SUI_COIN_TYPE) continue;
-        amount = BigInt(swapCfg.amount_in);
-      } else if (node.type === 'haedal_stake') {
-        const { config: stakeCfg } = resolveHaedalStakeConfig(node);
-        amount = BigInt(stakeCfg.amount);
-      }
-
-      if (amount > 0n) {
-        byNode.set(node.id, amount);
-        total += amount;
-      }
+      const adapter = getAdapter(node.type);
+      if (adapter) total += adapter.rootSuiFunding(node, flow);
     }
-
-    return { total, byNode };
-  }
-
-  private fundSuiCoin(
-    tx: Transaction,
-    amount: bigint,
-    budgetCoin: unknown | undefined,
-    agentWallet?: AgentWalletBinding,
-  ): unknown {
-    if (agentWallet && budgetCoin !== undefined) {
-      const [split] = tx.splitCoins(budgetCoin, [amount]);
-      return split;
-    }
-
-    const [splitCoin] = tx.splitCoins(tx.gas, [amount]);
-    return splitCoin;
+    return total;
   }
 
   private topologicalSort(nodes: FlowNode[], edges: FlowEdge[]): FlowNode[] {

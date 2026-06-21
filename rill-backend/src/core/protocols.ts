@@ -1,3 +1,5 @@
+import { testnetPools, mainnetPools, testnetCoins, mainnetCoins } from '@mysten/deepbook-v3';
+
 /** Curated protocol addresses — verified via Sui RPC + official docs. */
 
 const MAINNET = {
@@ -58,9 +60,9 @@ export const HAEDAL = {
 export const SUI_CLOCK_ID = '0x6';
 export const SUI_NETWORK = network;
 
-export const DEFAULT_SIMULATE_SENDER =
-  process.env.SIMULATE_SENDER ||
-  '0x8d0a6aff4a9240af7b7e378ccfacd1cc94c107fc1745a1afcb9b529bef7b61c4';
+/** 32-byte zero address — a valid sender for keyless devInspect dry-runs (no real funds involved). */
+export const ZERO_ADDRESS = `0x${'0'.repeat(64)}`;
+export const DEFAULT_SIMULATE_SENDER = process.env.SIMULATE_SENDER || ZERO_ADDRESS;
 
 /** Network defaults exposed to clients — FE should pass these in flow node config at compile time. */
 export function getProtocolRegistry(net: 'mainnet' | 'testnet' = SUI_NETWORK) {
@@ -87,6 +89,13 @@ export function getProtocolRegistry(net: 'mainnet' | 'testnet' = SUI_NETWORK) {
       stakingObjectId: haedal.stakingObjectId,
       minStakeMist: '1000000000',
       coinType: '0x2::sui::SUI',
+    },
+    deepbook_limit_order: {
+      // Pools/coins come from the DeepBook SDK (no hardcoded ids). Requires a funded BalanceManager.
+      pools: Object.keys(net === 'testnet' ? testnetPools : mainnetPools),
+      coins: Object.keys(net === 'testnet' ? testnetCoins : mainnetCoins),
+      requiresBalanceManager: true,
+      note: 'Provision + fund a BalanceManager (onboarding); pass balanceManagerId + poolKey + price/quantity/isBid.',
     },
   };
 }

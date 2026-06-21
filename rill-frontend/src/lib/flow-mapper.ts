@@ -1,7 +1,7 @@
 import type { Edge, Node } from "reactflow";
 import type { ActionNodeData } from "@/components/flow/nodes";
 import type { FlowEdge, FlowGraph, FlowNode } from "@/lib/rill-api";
-import { buildCetusSwapFlowConfig, buildHaedalStakeFlowConfig, TOKEN_COIN_TYPE } from "@/lib/action-config";
+import { buildCetusSwapFlowConfig, buildHaedalStakeFlowConfig, buildDeepbookOrderFlowConfig, TOKEN_COIN_TYPE } from "@/lib/action-config";
 
 const SUI = TOKEN_COIN_TYPE.SUI;
 
@@ -36,6 +36,7 @@ function applyWireConstraints(nodes: FlowNode[], edges: FlowEdge[]) {
 export function isBackendSupported(data: ActionNodeData): boolean {
   if (data.protocolId === "cetus" && data.action.toLowerCase().includes("swap")) return true;
   if (data.protocolId === "haedal" && data.action.toLowerCase().includes("stake")) return true;
+  if (data.protocolId === "deepbook" && data.action.toLowerCase().includes("limit")) return true;
   return false;
 }
 
@@ -47,6 +48,9 @@ function mapActionNode(id: string, data: ActionNodeData): FlowNode | null {
   }
   if (data.protocolId === "haedal" && data.action.toLowerCase().includes("stake")) {
     return { id, type: "haedal_stake", config: buildHaedalStakeFlowConfig(cfg) };
+  }
+  if (data.protocolId === "deepbook" && data.action.toLowerCase().includes("limit")) {
+    return { id, type: "deepbook_limit_order", config: buildDeepbookOrderFlowConfig(cfg) };
   }
   return null;
 }

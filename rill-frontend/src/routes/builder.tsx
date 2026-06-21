@@ -45,7 +45,7 @@ import { buildFlowGraph } from "@/lib/flow-mapper";
 import { applyProtocolRegistry, defaultActionConfig } from "@/lib/action-config";
 import { getActionPorts } from "@/lib/action-ports";
 import { rillApi, type PublishResult } from "@/lib/rill-api";
-import type { DiscoveredFunction, IntrospectionResult } from "@/lib/introspect";
+import type { DiscoveredFunction, IntrospectionResult } from "@/lib/rill-types";
 
 export const Route = createFileRoute("/builder")({
   component: BuilderPage,
@@ -102,7 +102,9 @@ function Builder() {
       .map((p) => ({
         ...p,
         actions: p.actions.filter((a) =>
-          (p.id === "cetus" && a.id === "swap") || (p.id === "haedal" && a.id === "stake"),
+          (p.id === "cetus" && a.id === "swap") ||
+          (p.id === "haedal" && a.id === "stake") ||
+          (p.id === "deepbook" && a.id === "limit_order"),
         ),
       }));
 
@@ -182,7 +184,7 @@ function Builder() {
   const onDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault();
-      const raw = e.dataTransfer.getData("application/rill") || e.dataTransfer.getData("application/conduit");
+      const raw = e.dataTransfer.getData("application/rill");
       if (!raw) return;
       const { protocolId, actionId } = JSON.parse(raw);
       const p = PROTOCOLS.find((x) => x.id === protocolId);

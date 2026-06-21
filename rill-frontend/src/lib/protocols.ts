@@ -147,7 +147,24 @@ export const PROTOCOLS: Protocol[] = [
       ]},
     ],
   },
+  {
+    id: "deepbook",
+    name: "DeepBook",
+    tagline: "On-chain central limit order book",
+    category: "DEX",
+    color: "sky",
+    actions: [
+      { id: "limit_order", name: "Place limit order", description: "Place a limit order on a DeepBook pool (needs a funded BalanceManager).", inputs: [
+        { key: "poolKey", label: "Pool", type: "string" },
+        { key: "balanceManagerId", label: "BalanceManager", type: "address" },
+        { key: "depositSui", label: "Deposit SUI", type: "number" },
+        { key: "price", label: "Price", type: "number" },
+        { key: "quantity", label: "Quantity", type: "number" },
+        { key: "isBid", label: "Side (bid?)", type: "string" },
+      ]},
+    ],
+  },
 ];
 
 /** Protocols with live Rill backend compile support (testnet). */
-export const BACKEND_PROTOCOL_IDS = new Set(["cetus", "haedal"]);
+export const BACKEND_PROTOCOL_IDS = new Set(["cetus", "haedal", "deepbook"]);

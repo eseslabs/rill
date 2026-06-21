@@ -1,10 +1,17 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
-import { X, Package, FileSearch, Boxes, Sparkles, Loader2, ChevronRight } from "lucide-react";
-import { introspect, KNOWN_PROTOCOL_IDS, SAMPLE_PACKAGE_IDS, type IntrospectionResult, type DiscoveredFunction } from "@/lib/introspect";
+import { X, Package, Sparkles, Loader2, ChevronRight, AlertCircle } from "lucide-react";
+import { rillApi } from "@/lib/rill-api";
+import {
+  backendFunctionsToDiscovered,
+  type DiscoveredFunction,
+  type IntrospectionResult,
+} from "@/lib/rill-types";
 
-type Tab = "package" | "tx" | "protocol";
-
+/**
+ * Discover a Sui protocol by reading its real on-chain ABI via the backend (`POST /introspect`).
+ * No mock data — paste a package id and Rill returns the actual entry functions + typed params.
+ */
 export function DiscoverDialog({
   onClose,
   onImport,
@@ -12,40 +19,46 @@ export function DiscoverDialog({
   onClose: () => void;
   onImport: (fns: DiscoveredFunction[], meta: IntrospectionResult) => void;
 }) {
-  const [tab, setTab] = useState<Tab>("package");
   const [pkg, setPkg] = useState("");
-  const [tx, setTx] = useState("");
-  const [proto, setProto] = useState("cetus");
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<IntrospectionResult | null>(null);
   const [picked, setPicked] = useState<Set<string>>(new Set());
 
   const run = async () => {
+    const packageId = pkg.trim();
+    if (!packageId) return;
     setLoading(true);
+    setError(null);
     setResult(null);
     setPicked(new Set());
-    const value = tab === "package" ? pkg : tab === "tx" ? tx : proto;
-    if (!value.trim()) {
+    try {
+      const fns = await rillApi.introspect(packageId);
+      const r = backendFunctionsToDiscovered(packageId, fns);
+      setResult(r);
+      setPicked(new Set(r.functions.map((f) => f.id)));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Introspection failed");
+    } finally {
       setLoading(false);
-      return;
     }
-    const r = await introspect({ kind: tab, value });
-    setResult(r);
-    setPicked(new Set(r.functions.map((f) => f.id)));
-    setLoading(false);
   };
 
   const toggle = (id: string) => {
     setPicked((s) => {
       const n = new Set(s);
-      n.has(id) ? n.delete(id) : n.add(id);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
       return n;
     });
   };
 
   const importPicked = () => {
     if (!result) return;
-    onImport(result.functions.filter((f) => picked.has(f.id)), result);
+    onImport(
+      result.functions.filter((f) => picked.has(f.id)),
+      result,
+    );
     onClose();
   };
 
@@ -68,11 +81,11 @@ export function DiscoverDialog({
         <div className="flex items-center justify-between px-5 py-4 border-b border-border">
           <div>
             <div className="text-xs uppercase tracking-widest text-muted-foreground flex items-center gap-1.5">
-              <Sparkles className="h-3 w-3" /> Auto-introspection
+              <Sparkles className="h-3 w-3" /> On-chain introspection
             </div>
             <h3 className="font-display text-2xl tracking-tight">Discover a Sui protocol</h3>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Paste a package ID, a transaction example, or pick a protocol — Rill reads the ABI and labels every input/output.
+              Paste a package ID — Rill reads the real ABI on-chain and labels every entry function and parameter.
             </p>
           </div>
           <button onClick={onClose} className="rounded-full p-1.5 hover:bg-secondary">
@@ -80,96 +93,34 @@ export function DiscoverDialog({
           </button>
         </div>
 
-        <div className="px-5 pt-4 flex gap-1">
-          {(
-            [
-              { id: "package", label: "Package ID", icon: Package },
-              { id: "tx", label: "Transaction", icon: FileSearch },
-              { id: "protocol", label: "Protocol", icon: Boxes },
-            ] as { id: Tab; label: string; icon: typeof Package }[]
-          ).map((t) => (
-            <button
-              key={t.id}
-              onClick={() => {
-                setTab(t.id);
-                setResult(null);
-              }}
-              className={`inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-sm transition ${
-                tab === t.id ? "bg-foreground text-background" : "text-muted-foreground hover:bg-secondary"
-              }`}
-            >
-              <t.icon className="h-3.5 w-3.5" /> {t.label}
-            </button>
-          ))}
-        </div>
-
         <div className="p-5">
-          {tab === "package" && (
-            <div>
-              <label className="text-xs text-muted-foreground">Sui package ID</label>
-              <input
-                value={pkg}
-                onChange={(e) => setPkg(e.target.value)}
-                placeholder="0x1eabed72c5…"
-                className="mt-1 w-full rounded-lg bg-background border border-border px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary/40"
-              />
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                <span className="text-[11px] text-muted-foreground self-center mr-1">Try:</span>
-                {Object.entries(SAMPLE_PACKAGE_IDS).slice(0, 5).map(([id, v]) => (
-                  <button
-                    key={id}
-                    onClick={() => setPkg(v)}
-                    className="text-[11px] font-mono rounded-md border border-border bg-background px-2 py-1 hover:bg-secondary"
-                  >
-                    {id}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-          {tab === "tx" && (
-            <div>
-              <label className="text-xs text-muted-foreground">Transaction digest</label>
-              <input
-                value={tx}
-                onChange={(e) => setTx(e.target.value)}
-                placeholder="DkA9k…q3WQ"
-                className="mt-1 w-full rounded-lg bg-background border border-border px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary/40"
-              />
-              <p className="mt-2 text-[11px] text-muted-foreground">
-                Conduit replays the tx, matches emitted events, and reconstructs the call graph.
-              </p>
-            </div>
-          )}
-          {tab === "protocol" && (
-            <div>
-              <label className="text-xs text-muted-foreground">Protocol</label>
-              <div className="mt-2 grid grid-cols-2 md:grid-cols-4 gap-2">
-                {KNOWN_PROTOCOL_IDS.map((id) => (
-                  <button
-                    key={id}
-                    onClick={() => setProto(id)}
-                    className={`rounded-lg border px-3 py-2 text-sm capitalize text-left ${
-                      proto === id ? "border-primary bg-primary/10" : "border-border hover:bg-secondary"
-                    }`}
-                  >
-                    {id}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          <div className="mt-4 flex justify-end">
+          <label className="text-xs text-muted-foreground flex items-center gap-1.5">
+            <Package className="h-3.5 w-3.5" /> Sui package ID
+          </label>
+          <div className="mt-1 flex gap-2">
+            <input
+              value={pkg}
+              onChange={(e) => setPkg(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && run()}
+              placeholder="0x… (the protocol's published package id)"
+              className="flex-1 rounded-lg bg-background border border-border px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary/40"
+            />
             <button
               onClick={run}
-              disabled={loading}
-              className="inline-flex items-center gap-2 rounded-full bg-foreground text-background px-4 py-2 text-sm font-medium hover:opacity-90 transition disabled:opacity-60"
+              disabled={loading || !pkg.trim()}
+              className="inline-flex items-center gap-2 rounded-full bg-foreground text-background px-4 py-2 text-sm font-medium hover:opacity-90 transition disabled:opacity-60 whitespace-nowrap"
             >
               {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-              {loading ? "Introspecting…" : "Run introspection"}
+              {loading ? "Reading ABI…" : "Introspect"}
             </button>
           </div>
+
+          {error && (
+            <div className="mt-3 flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
 
           {result && (
             <motion.div
@@ -179,58 +130,57 @@ export function DiscoverDialog({
             >
               <div className="px-4 py-3 border-b border-border flex items-center justify-between">
                 <div>
-                  <div className="text-xs text-muted-foreground">
-                    Detected · confidence{" "}
-                    <span className="font-mono text-foreground">{(result.confidence * 100).toFixed(0)}%</span>
-                  </div>
                   <div className="font-display text-xl tracking-tight">{result.protocol}</div>
                   <div className="text-[11px] font-mono text-muted-foreground truncate max-w-[420px]">
                     {result.packageId}
                   </div>
                 </div>
                 <span className="text-[11px] rounded-full bg-mint/60 text-mint-foreground px-2 py-1">
-                  {result.functions.length} entry functions
+                  {result.functions.length} functions
                 </span>
               </div>
-              <div className="max-h-[260px] overflow-y-auto divide-y divide-border">
-                {result.functions.map((f) => (
-                  <label
-                    key={f.id}
-                    className="flex items-start gap-3 px-4 py-3 hover:bg-secondary/60 cursor-pointer"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={picked.has(f.id)}
-                      onChange={() => toggle(f.id)}
-                      className="mt-1 accent-primary"
-                    />
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 text-sm">
-                        <span className="font-mono text-foreground/80">{f.module}::{f.name}</span>
-                        <ChevronRight className="h-3 w-3 text-muted-foreground" />
-                        <span className="text-muted-foreground">{f.description}</span>
+              {result.functions.length === 0 ? (
+                <div className="px-4 py-6 text-sm text-muted-foreground text-center">
+                  No public functions found for this package.
+                </div>
+              ) : (
+                <div className="max-h-[260px] overflow-y-auto divide-y divide-border">
+                  {result.functions.map((f) => (
+                    <label
+                      key={f.id}
+                      className="flex items-start gap-3 px-4 py-3 hover:bg-secondary/60 cursor-pointer"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={picked.has(f.id)}
+                        onChange={() => toggle(f.id)}
+                        className="mt-1 accent-primary"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 text-sm">
+                          <span className="font-mono text-foreground/80">
+                            {f.module}::{f.name}
+                          </span>
+                          <ChevronRight className="h-3 w-3 text-muted-foreground" />
+                          <span className="text-muted-foreground">{f.description}</span>
+                        </div>
+                        {f.inputs.length > 0 && (
+                          <div className="mt-1.5 flex flex-wrap gap-1">
+                            {f.inputs.map((p) => (
+                              <span
+                                key={"i" + p.key}
+                                className="text-[10px] font-mono rounded bg-mint/40 text-mint-foreground px-1.5 py-0.5"
+                              >
+                                {p.label}: {p.type}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </div>
-                      <div className="mt-1.5 flex flex-wrap gap-1">
-                        {f.inputs.map((p) => (
-                          <span key={"i" + p.key} className="text-[10px] font-mono rounded bg-mint/40 text-mint-foreground px-1.5 py-0.5">
-                            in · {p.label}
-                          </span>
-                        ))}
-                        {f.outputs.map((p) => (
-                          <span key={"o" + p.key} className="text-[10px] font-mono rounded bg-peach/40 text-peach-foreground px-1.5 py-0.5">
-                            out · {p.label}
-                          </span>
-                        ))}
-                        {f.events.map((e) => (
-                          <span key={e} className="text-[10px] font-mono rounded bg-foreground/10 px-1.5 py-0.5">
-                            event · {e.split("::").pop()}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  </label>
-                ))}
-              </div>
+                    </label>
+                  ))}
+                </div>
+              )}
               <div className="px-4 py-3 border-t border-border flex justify-end gap-2">
                 <button
                   onClick={onClose}

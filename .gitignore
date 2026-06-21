@@ -4,3 +4,6 @@ node_modules/
 .DS_Store
 dist/
 *.log
+
+# Move build artifacts
+move/**/build/

@@ -1,6 +1,7 @@
 import { motion } from "framer-motion";
 import { Link } from "@tanstack/react-router";
 import { ArrowRight } from "lucide-react";
+import { ConnectButton } from "@mysten/dapp-kit";
 
 export function SiteHeader() {
   return (
@@ -36,6 +37,9 @@ export function SiteHeader() {
           >
             Open builder <ArrowRight className="h-3.5 w-3.5" />
           </Link>
+          <span className="ml-2">
+            <ConnectButton />
+          </span>
         </nav>
       </div>
     </header>

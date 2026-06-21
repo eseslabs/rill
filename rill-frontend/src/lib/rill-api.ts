@@ -128,8 +128,8 @@ export const rillApi = {
     }>("/simulate", { flow });
   },
 
-  execute(flow: FlowGraph, execute = false) {
-    return post<ExecuteResult>("/execute", { flow, execute });
+  execute(flow: FlowGraph, execute = false, sender?: string) {
+    return post<ExecuteResult>("/execute", { flow, execute, ...(sender ? { sender } : {}) });
   },
 
   publish(flow: FlowGraph) {

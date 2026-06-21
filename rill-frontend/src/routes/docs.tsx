@@ -4,10 +4,10 @@ import { SiteHeader, SiteFooter } from "@/components/site-chrome";
 export const Route = createFileRoute("/docs")({
   head: () => ({
     meta: [
-      { title: "Docs — Conduit" },
-      { name: "description", content: "Learn how Conduit turns Sui dApps into agent-callable tools." },
-      { property: "og:title", content: "Docs — Conduit" },
-      { property: "og:description", content: "Learn how Conduit turns Sui dApps into agent-callable tools." },
+      { title: "Docs — Rill" },
+      { name: "description", content: "Learn how Rill turns Sui dApps into agent-callable tools." },
+      { property: "og:title", content: "Docs — Rill" },
+      { property: "og:description", content: "Learn how Rill turns Sui dApps into agent-callable tools." },
     ],
   }),
   component: DocsPage,
@@ -22,7 +22,7 @@ function DocsPage() {
         <h1 className="mt-2 font-display text-5xl tracking-tight">Getting started</h1>
         <div className="prose prose-neutral mt-8 max-w-none">
           <p className="text-lg text-muted-foreground leading-relaxed">
-            Conduit gives AI agents a clean, typed surface over Sui protocols. You design the flow once; agents call it forever.
+            Rill gives AI agents a clean, typed surface over Sui protocols. You design the flow once; agents call it forever.
           </p>
 
           <h2 className="font-display text-2xl mt-10">1 · Compose</h2>
@@ -33,7 +33,7 @@ function DocsPage() {
 
           <h2 className="font-display text-2xl mt-10">2 · Configure</h2>
           <p className="text-muted-foreground">
-            Each action has typed inputs. Pin static values, or expose them so the agent decides. Conduit handles validation and
+            Each action has typed inputs. Pin static values, or expose them so the agent decides. Rill handles validation and
             transaction construction for Sui testnet automatically.
           </p>
 
@@ -45,7 +45,7 @@ function DocsPage() {
 
           <h2 className="font-display text-2xl mt-10">Runtime</h2>
           <p className="text-muted-foreground">
-            Conduit speaks the Sui TypeScript SDK under the hood and uses the standard Sui wallet kit for signing. Testnet is enabled by
+            Rill speaks the Sui TypeScript SDK under the hood and uses the standard Sui wallet kit for signing. Testnet is enabled by
             default; mainnet ships post-hackathon.
           </p>
         </div>

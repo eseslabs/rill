@@ -2,7 +2,7 @@ import { memo, useCallback } from "react";
 import { Handle, Position, type NodeProps, useReactFlow } from "reactflow";
 import { motion } from "framer-motion";
 import { Shield, Layers, Sparkles } from "lucide-react";
-import type { Port } from "@/lib/introspect";
+import type { Port } from "@/lib/rill-types";
 import {
   SWAP_TOKENS,
   defaultActionConfig,

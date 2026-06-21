@@ -40,6 +40,17 @@ export function defaultActionConfig(protocolId: string, actionId: string): Actio
   if (protocolId === "haedal" && actionId === "stake") {
     return { amount: "1" };
   }
+  if (protocolId === "deepbook" && actionId === "limit_order") {
+    return {
+      poolKey: "SUI_DBUSDC",
+      balanceManagerId: "",
+      depositSui: "1.1",
+      price: "1",
+      quantity: "1",
+      isBid: "false",
+      payWithDeep: "false",
+    };
+  }
   return {};
 }
 
@@ -79,6 +90,20 @@ export function buildHaedalStakeFlowConfig(cfg: ActionConfig) {
     stakingObjectId: m.stakingObjectId,
     minStakeMist: m.minStakeMist,
     amount: toMist(String(cfg.amount ?? "1"), m.minStakeMist),
+  };
+}
+
+/** Build backend config for a DeepBook limit order. BalanceManager must be funded (onboarding). */
+export function buildDeepbookOrderFlowConfig(cfg: ActionConfig) {
+  return {
+    poolKey: cfg.poolKey || "SUI_DBUSDC",
+    balanceManagerId: cfg.balanceManagerId || "",
+    depositSui: cfg.depositSui || "0",
+    price: cfg.price || "1",
+    quantity: cfg.quantity || "1",
+    isBid: cfg.isBid === "true" ? "true" : "false",
+    payWithDeep: cfg.payWithDeep === "true" ? "true" : "false",
+    clientOrderId: "1",
   };
 }
 

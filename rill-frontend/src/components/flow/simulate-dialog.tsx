@@ -5,6 +5,7 @@ import type { Edge, Node } from "reactflow";
 import type { ActionNodeData } from "./nodes";
 import { buildFlowGraph } from "@/lib/flow-mapper";
 import { rillApi, type ExecuteResult } from "@/lib/rill-api";
+import { useCurrentAccount } from "@mysten/dapp-kit";
 
 export type Guardrail = { id: string; label: string; enabled: boolean };
 
@@ -33,6 +34,7 @@ export function SimulateDialog({
   const [result, setResult] = useState<ExecuteResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const actions = nodes.filter((n) => n.type === "action").map((n) => n.data as ActionNodeData);
+  const account = useCurrentAccount();
 
   useEffect(() => {
     let cancelled = false;
@@ -54,7 +56,7 @@ export function SimulateDialog({
       }
 
       try {
-        const data = await rillApi.execute({ nodes: flowNodes, edges: flowEdges }, false);
+        const data = await rillApi.execute({ nodes: flowNodes, edges: flowEdges }, false, account?.address);
         if (cancelled) return;
         setResult(data);
         setPhase(data.simulation.ok ? "ok" : "fail");
@@ -72,7 +74,7 @@ export function SimulateDialog({
     return () => {
       cancelled = true;
     };
-  }, [nodes, edges]);
+  }, [nodes, edges, account?.address]);
 
   const toggle = (id: string) => onChange(guardrails.map((g) => (g.id === id ? { ...g, enabled: !g.enabled } : g)));
 

@@ -45,6 +45,12 @@ export function buildToolDefs(flow: FlowGraph, skillId: string) {
           },
           {} as Record<string, { type: string; description: string }>,
         ),
+        sender: {
+          type: 'string',
+          description:
+            "The agent's Sui address. The PTB is built for this sender (tx sender + output recipient) " +
+            'so the agent can sign + execute it. Omit for preview-only.',
+        },
         execute: {
           type: 'boolean',
           description: 'If true, sign and submit on-chain after simulation (requires local signer).',

@@ -107,10 +107,9 @@ function Landing() {
           transition={{ delay: 0.6, duration: 0.6 }}
           className="mt-6 max-w-2xl text-lg text-muted-foreground leading-relaxed"
         >
-          Conduit is a visual flow builder for Sui protocols. Drag actions, wire them together,
-          and export an <span className="text-foreground font-medium">MCP server</span>,{" "}
-          <span className="text-foreground font-medium">agent skill</span>, or{" "}
-          <span className="text-foreground font-medium">CLI</span> — so any agent can act on-chain.
+          Rill is a visual flow builder for Sui protocols. Drag actions, wire them together,
+          and publish a hosted <span className="text-foreground font-medium">MCP server</span> any agent
+          (Claude, Cursor, Thiny) can call — grounded, simulated, and signed safely on-chain.
         </motion.p>
 
         <motion.div
@@ -203,9 +202,9 @@ function Landing() {
       <section className="mx-auto max-w-6xl px-6 mt-24">
         <div className="grid md:grid-cols-3 gap-5">
           {[
-            { icon: Bot, label: "MCP Server", code: "npx conduit serve my-flow" },
-            { icon: Code2, label: "Agent Skill", code: "claude-skill add ./my-flow" },
-            { icon: Terminal, label: "CLI Tool", code: "conduit run rebalance --amount 100" },
+            { icon: Bot, label: "MCP Server", code: "Add the hosted MCP URL to Claude / Cursor / Thiny" },
+            { icon: Terminal, label: "Simulate first", code: "POST /api/simulate → devInspect on Sui" },
+            { icon: Code2, label: "Unsigned PTB", code: "returns a base64 PTB — Thiny / wallet signs" },
           ].map((e) => (
             <motion.div
               key={e.label}

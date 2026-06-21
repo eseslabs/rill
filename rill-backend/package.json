@@ -8,8 +8,10 @@
     "@hono/swagger-ui": "^0.6.1",
     "@hono/zod-validator": "^0.8.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@mysten/deepbook-v3": "^1.5.1",
     "@mysten/sui": "^2.19.0",
     "@mysten/walrus": "^1.2.1",
+    "bn.js": "^5.2.3",
     "dotenv": "^17.4.2",
     "hono": "^4.12.26",
     "zod": "^4.4.3"

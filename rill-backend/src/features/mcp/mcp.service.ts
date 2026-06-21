@@ -51,6 +51,10 @@ export async function handleMcpJsonRpc(
     const args = { ...(params.arguments ?? {}) };
     const wantsExecute = args.execute === true;
     delete args.execute;
+    // The agent's address: the PTB is built for this sender (tx sender + output recipient), so the
+    // agent can sign it. Without it the server falls back to the simulate sender (preview only).
+    const sender = typeof args.sender === 'string' ? args.sender : undefined;
+    delete args.sender;
 
     const devSignAvailable = config.devSignEnabled && canExecuteOnChain();
     const shouldExecute = wantsExecute && devSignAvailable;
@@ -58,6 +62,7 @@ export async function handleMcpJsonRpc(
     const result = await skillRunnerService.runFlow(skill.flow, args, {
       execute: shouldExecute,
       forceExecute: shouldExecute,
+      sender,
       agentWallet: config.agentWallet,
     });
 

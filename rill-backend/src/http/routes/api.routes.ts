@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { config } from '../../core/config';
-import { getProtocolRegistry } from '../../core/protocols';
+import { getProtocolRegistry, DEFAULT_SIMULATE_SENDER } from '../../core/protocols';
 import { introspectService } from '../../features/introspect/introspect.service';
 import { resolverService } from '../../features/introspect/resolver.service';
 import { compilerService } from '../../features/compiler/compiler.service';
@@ -77,7 +77,7 @@ apiRouter.post('/compile', zValidator('json', CompileSchema), async (c) => {
 apiRouter.post('/simulate', zValidator('json', SimulateSchema), async (c) => {
   const body = c.req.valid('json');
   const compileResult = await compilerService.compileFlow(body.flow, {
-    sender: body.sender,
+    sender: body.sender ?? DEFAULT_SIMULATE_SENDER,
     agentWallet: resolveAgentWallet(body),
   });
 
@@ -102,7 +102,9 @@ apiRouter.post('/simulate', zValidator('json', SimulateSchema), async (c) => {
 
 apiRouter.post('/publish', zValidator('json', PublishSchema), async (c) => {
   const { flow, policyId } = c.req.valid('json');
-  const { warnings } = await compilerService.compileFlow(flow);
+  // Publish only needs warnings + tool defs (the compiled tx is discarded), so a placeholder sim
+  // sender is fine — the real recipient/sender is supplied by the agent at execute time.
+  const { warnings } = await compilerService.compileFlow(flow, { sender: DEFAULT_SIMULATE_SENDER });
 
   const skillId = `skill_${crypto.randomUUID().replace(/-/g, '').slice(0, 10)}`;
   const toolDefs = buildToolDefs(flow, skillId);

@@ -7,10 +7,10 @@ import { PROTOCOLS } from "@/lib/protocols";
 export const Route = createFileRoute("/protocols")({
   head: () => ({
     meta: [
-      { title: "Protocols — Conduit" },
-      { name: "description", content: "Browse Sui protocols available as nodes in Conduit." },
-      { property: "og:title", content: "Protocols — Conduit" },
-      { property: "og:description", content: "Browse Sui protocols available as nodes in Conduit." },
+      { title: "Protocols — Rill" },
+      { name: "description", content: "Browse Sui protocols available as nodes in Rill." },
+      { property: "og:title", content: "Protocols — Rill" },
+      { property: "og:description", content: "Browse Sui protocols available as nodes in Rill." },
     ],
   }),
   component: ProtocolsPage,
@@ -31,7 +31,7 @@ function ProtocolsPage() {
         <div className="text-xs uppercase tracking-widest text-muted-foreground">Library</div>
         <h1 className="mt-2 font-display text-5xl tracking-tight">Sui protocols, agent-ready.</h1>
         <p className="mt-4 max-w-2xl text-muted-foreground text-lg leading-relaxed">
-          Every protocol exposes a set of typed actions. Drop them into the builder and Conduit handles the boring parts —
+          Every protocol exposes a set of typed actions. Drop them into the builder and Rill handles the boring parts —
           transactions, signing, validation, and the agent-facing schema.
         </p>
 
