@@ -11,6 +11,7 @@ import { simulatorService } from '../../features/compiler/simulator.service';
 import { skillsStore } from '../../features/mcp/skills.store';
 import { skillRunnerService } from '../../features/mcp/skill-runner.service';
 import { buildToolDefs } from '../../features/mcp/tool-schema';
+import { buildSkillDoc } from '../../features/mcp/skill-doc';
 import { handleMcpJsonRpc } from '../../features/mcp/mcp.service';
 import { walrusAuditService } from '../../features/walrus/audit.service';
 import {
@@ -109,6 +110,7 @@ apiRouter.post('/publish', zValidator('json', PublishSchema), async (c) => {
   const skillId = `skill_${crypto.randomUUID().replace(/-/g, '').slice(0, 10)}`;
   const toolDefs = buildToolDefs(flow, skillId);
   const mcpUrl = `${config.publicBaseUrl}/api/mcp/${skillId}`;
+  const skillUrl = `${config.publicBaseUrl}/api/skills/${skillId}/skill.md`;
 
   skillsStore.save({
     id: skillId,
@@ -122,8 +124,15 @@ apiRouter.post('/publish', zValidator('json', PublishSchema), async (c) => {
 
   return c.json({
     success: true,
-    data: { skillId, mcpUrl, toolDefs, warnings },
+    data: { skillId, mcpUrl, skillUrl, toolDefs, warnings },
   });
+});
+
+/** Skill doc — paste this URL into any AI agent (Claude Code, OpenClaw, Hermes, …). */
+apiRouter.get('/skills/:id/skill.md', (c) => {
+  const skill = skillsStore.get(c.req.param('id'));
+  if (!skill) return c.text('Skill not found', 404);
+  return c.text(buildSkillDoc(skill), 200, { 'content-type': 'text/markdown; charset=utf-8' });
 });
 
 apiRouter.get('/skills', (c) => {
@@ -132,6 +141,7 @@ apiRouter.get('/skills', (c) => {
     name: s.name,
     description: s.description,
     mcpUrl: `${config.publicBaseUrl}/api/mcp/${s.id}`,
+    skillUrl: `${config.publicBaseUrl}/api/skills/${s.id}/skill.md`,
     toolDefs: s.toolDefs,
     createdAt: s.createdAt,
   }));
