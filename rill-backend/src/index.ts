@@ -1,9 +1,11 @@
 import { Hono } from 'hono';
+import { swaggerUI } from '@hono/swagger-ui';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import { config } from './core/config';
 import { errorHandler } from './core/errors';
 import { apiRouter } from './http/routes/api.routes';
+import { buildOpenApiDocument } from './http/openapi';
 
 const app = new Hono();
 
@@ -18,17 +20,24 @@ app.use('*', cors({
   credentials: true,
 }));
 
-// Route Registrations
-app.get('/', (c) => {
-  return c.json({
+const swagger = swaggerUI({ url: '/api/openapi.json' });
+
+app.get('/health', (c) =>
+  c.json({
     name: 'Rill Bun-Hono API',
     status: 'healthy',
     version: '1.0.0',
     network: config.network,
     apiBase: `${config.publicBaseUrl}/api`,
-    description: 'Autonomous Move package semantic resolver and visual flow compilation engine for Sui.'
-  });
-});
+    docs: config.publicBaseUrl,
+    description: 'Autonomous Move package semantic resolver and visual flow compilation engine for Sui.',
+  }),
+);
+
+app.get('/', swagger);
+app.get('/api/docs', swagger);
+
+app.get('/api/openapi.json', (c) => c.json(buildOpenApiDocument(config.publicBaseUrl)));
 
 app.route('/api', apiRouter);
 
