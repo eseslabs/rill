@@ -16,23 +16,7 @@ if (!KEY) throw new Error('Set RILL_SUI_PRIVATE_KEY');
 
 // Derive sender from the key (so Rill builds the PTB for us).
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
-import { Transaction } from '@mysten/sui/transactions';
 const ME = Ed25519Keypair.fromSecretKey(KEY).getPublicKey().toSuiAddress();
-const PKG = process.env.AGENT_WALLET_PACKAGE_ID || '0xd9265581b6b930f5fd27d9ec98e67b48f876f5de7bd25155639d808e9da636da';
-
-/** A PTB that cannot execute (spend on a non-existent wallet) — re-simulation must reject it. */
-function unexecutablePtb(): string {
-  const fake = `0x${'1'.repeat(64)}`;
-  const tx = new Transaction();
-  tx.setSender(ME);
-  const coin = tx.moveCall({
-    target: `${PKG}::agent_wallet::spend`,
-    typeArguments: ['0x2::sui::SUI'],
-    arguments: [tx.object(fake), tx.object(fake), tx.pure.u64(1), tx.object('0x6')],
-  });
-  tx.mergeCoins(tx.gas, [coin]);
-  return Buffer.from(tx.serialize()).toString('base64');
-}
 
 let passed = 0;
 let failed = 0;
@@ -114,12 +98,14 @@ async function main() {
   try { digest = JSON.parse(t1).digest ?? ''; } catch { /* */ }
   check(r1.result?.isError === false && !!digest, 'valid PTB signed + submitted', digest ? `digest ${digest}` : `(${t1.slice(0, 120)})`);
 
-  // 2) error path: un-executable PTB → re-sim fails → guard must reject WITHOUT submitting
-  console.log('2) sui_execute_ptb — un-executable PTB (expect guard reject, NO submit)');
-  const r2 = await mcp.call(3, 'tools/call', { name: 'sui_execute_ptb', arguments: { unsignedPtb: unexecutablePtb() } });
+  // 2) slippage path: unsatisfiable min_out → rill_guard aborts on-chain → re-sim fails →
+  //    signer must reject WITHOUT submitting. Proves the guard + the signer's sim-guard together.
+  console.log('2) sui_execute_ptb — unsatisfiable min_out (expect slippage reject, NO submit)');
+  const badPtb = await compile('999999999999999');
+  const r2 = await mcp.call(3, 'tools/call', { name: 'sui_execute_ptb', arguments: { unsignedPtb: badPtb } });
   const t2 = r2.result?.content?.[0]?.text ?? '';
   const rejected = r2.result?.isError === true && !t2.includes('"digest"');
-  check(rejected, 'un-executable PTB rejected before signing (no submit)', `(${t2.slice(0, 90)})`);
+  check(rejected, 'slippage floor rejected before signing (no submit)', `(${t2.slice(0, 90)})`);
 
   mcp.kill();
   console.log(`\n──────── RESULT: ${passed} passed, ${failed} failed ────────`);

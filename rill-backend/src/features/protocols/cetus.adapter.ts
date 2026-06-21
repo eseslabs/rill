@@ -2,6 +2,7 @@ import { SUI_COIN_TYPE } from '../../core/agent-wallet';
 import { SUI_CLOCK_ID } from '../../core/protocols';
 import { resolveCetusSwapConfig } from '../../core/node-config';
 import { pickSwapFunction, resolvePoolTypeArgs } from '../compiler/pool-resolver';
+import { injectMinOutAssert } from './guard';
 import type { AdapterCtx, FlowGraph, FlowNode, ProtocolAdapter } from './types';
 
 /**
@@ -96,6 +97,10 @@ export const cetusAdapter: ProtocolAdapter = {
     const leftoverCoin = swap.a2b ? outA : outB;
     const leftoverType = swap.a2b ? poolTypes.coinTypeA : poolTypes.coinTypeB;
     nodeOutputs[node.id] = outputCoin;
+
+    // On-chain slippage floor: abort if the swap output is below min_amount_out (borrows the coin,
+    // so it stays usable below). Deterministic backstop against bad fills / sandwich MEV.
+    injectMinOutAssert(tx, outputCoin, swap.outputCoinType, BigInt(swapCfg.min_amount_out), warnings);
 
     // Settle a coin: SUI merges back to gas; anything else goes to the owner. Both swap outputs MUST be
     // consumed or the PTB aborts on execute with UnusedValueWithoutDrop (devInspect won't catch this).

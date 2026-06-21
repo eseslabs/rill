@@ -16,6 +16,8 @@ export const config = {
   /** Keyless by default — server signing only when explicitly enabled (dev/VPS testing). */
   devSignEnabled: (process.env.DEV_SIGN_ENABLED || 'false').toLowerCase() === 'true',
   agentWallet: loadAgentWalletFromEnv(),
+  /** Published rill_guard package — the on-chain slippage chokepoint (assert_min_value). */
+  guardPackageId: process.env.RILL_GUARD_PACKAGE_ID,
   walrusEnabled: (process.env.WALRUS_ENABLED || 'false').toLowerCase() === 'true',
   walrusUploadRelay:
     process.env.WALRUS_UPLOAD_RELAY || 'https://upload-relay.testnet.walrus.space',
