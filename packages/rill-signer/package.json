@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Local signer for Rill — holds the agent's Sui key and signs the unsigned PTBs Rill builds. Exposed as an MCP server (sui_execute_ptb) and a CLI (rill-sign). Bounded by the on-chain agent_wallet.",
+  "description": "Local signer for policy-validated Rill ExecutionEnvelopes. Raw rill-sign --unsafe-ptb execution is development-only.",
   "bin": {
     "rill-signer-mcp": "./src/mcp.ts",
     "rill-sign": "./src/cli.ts"
