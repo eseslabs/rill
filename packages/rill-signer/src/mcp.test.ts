@@ -107,7 +107,7 @@ test('handler imports and lists tools without runtime env or key initialization'
 
 test('execute_rill_action records policy rejection for explain_rejection', async () => {
   const handler = createWalletMcpHandler({
-    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true },
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
     signer: {
       address: policy.sender,
       network: 'testnet',
@@ -140,7 +140,7 @@ test('execute_rill_action records policy rejection for explain_rejection', async
 
 test('execute_rill_action rejects raw PTB arguments', async () => {
   const handler = createWalletMcpHandler({
-    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true },
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
     signer: {
       address: policy.sender,
       network: 'testnet',
@@ -169,7 +169,7 @@ test('execute_rill_action rejects raw PTB arguments', async () => {
 
 test('list_capabilities returns only public run-specific policy data', async () => {
   const handler = createWalletMcpHandler({
-    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true },
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
     signer: {
       address: policy.sender,
       network: 'testnet',
@@ -206,7 +206,7 @@ test('list_capabilities returns only public run-specific policy data', async () 
 
 test('wallet_status reports public budget and strategy eligibility', async () => {
   const handler = createWalletMcpHandler({
-    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true },
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
     signer: {
       address: policy.sender,
       network: 'testnet',
@@ -248,7 +248,7 @@ test('wallet_status reports public budget and strategy eligibility', async () =>
 
 test('wallet_status and list_capabilities require a loaded policy', async () => {
   const handler = createWalletMcpHandler({
-    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true },
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
     signer: {
       address: policy.sender,
       network: 'testnet',
@@ -297,7 +297,7 @@ afterEach(() => {
 
 test('get_onboarding_config returns defaults with autoCreateRunSets read live from env, and set_onboarding_config only updates non-privileged fields', async () => {
   const handler = createWalletMcpHandler({
-    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true },
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
     signer: { address: policy.sender, network: 'testnet', client: {} as never, hasKey: () => true },
   });
   const get = await handler({
@@ -343,7 +343,7 @@ test('get_onboarding_config returns defaults with autoCreateRunSets read live fr
 
 test('set_onboarding_config rejects autoCreateRunSets: the agent-facing MCP surface cannot enable auto onboarding', async () => {
   const handler = createWalletMcpHandler({
-    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true },
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
     signer: { address: policy.sender, network: 'testnet', client: {} as never, hasKey: () => true },
   });
   const response = await handler({
@@ -362,7 +362,7 @@ test('set_onboarding_config rejects autoCreateRunSets: the agent-facing MCP surf
 
 test('signer_status returns address, network and balance', async () => {
   const handler = createWalletMcpHandler({
-    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true },
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
     signer: {
       address: policy.sender,
       network: 'testnet',
@@ -390,7 +390,7 @@ test('signer_status returns address, network and balance', async () => {
 
 test('request_faucet rejects on mainnet and when disabled', async () => {
   const handler = createWalletMcpHandler({
-    cfg: { network: 'mainnet', allowMainnet: true, requireSimSuccess: true },
+    cfg: { network: 'mainnet', allowMainnet: true, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
     signer: { address: policy.sender, network: 'mainnet', client: {} as never, hasKey: () => true },
   });
   const mainnet = await handler({
@@ -404,7 +404,7 @@ test('request_faucet rejects on mainnet and when disabled', async () => {
 
   saveOnboardingConfig({ allowTestnetFaucet: false });
   const testnetHandler = createWalletMcpHandler({
-    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true },
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
     signer: { address: policy.sender, network: 'testnet', client: {} as never, hasKey: () => true },
   });
   const disabled = await testnetHandler({
@@ -426,7 +426,7 @@ test('list_run_sets returns saved run-sets', async () => {
   };
   saveRunSet('saved_set', runSet);
   const handler = createWalletMcpHandler({
-    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true },
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
     signer: { address: policy.sender, network: 'testnet', client: {} as never, hasKey: () => true },
   });
   const response = await handler({
@@ -527,7 +527,7 @@ function buildOnboardingTradeCapPtb(params: {
 
 test('create_run_set requires confirmation, then returns the prepared plan without signing when the env gate is off', async () => {
   const handler = createWalletMcpHandler({
-    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true },
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
     signer: { address: policy.sender, network: 'testnet', client: {} as never, hasKey: () => true },
   });
   const unconfirmed = await handler({
@@ -567,7 +567,7 @@ test('create_run_set requires confirmation, then returns the prepared plan witho
 test('create_run_set rejects a hostile setup PTB with an appended transfer to a foreign address, even with the env gate on', async () => {
   process.env.RILL_ALLOW_AUTO_ONBOARDING = 'true';
   const handler = createWalletMcpHandler({
-    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true },
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
     signer: { address: policy.sender, network: 'testnet', client: {} as never, hasKey: () => true },
   });
   const walletPackageId = id(2);
@@ -599,7 +599,7 @@ test('create_run_set rejects a hostile setup PTB with an appended transfer to a 
 test('create_run_set rejects a hostile trade-cap PTB that transfers to a foreign address, even with the env gate on', async () => {
   process.env.RILL_ALLOW_AUTO_ONBOARDING = 'true';
   const handler = createWalletMcpHandler({
-    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true },
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
     signer: { address: policy.sender, network: 'testnet', client: {} as never, hasKey: () => true },
   });
   const walletPackageId = id(2);
@@ -630,7 +630,7 @@ test('create_run_set rejects a hostile trade-cap PTB that transfers to a foreign
 test('create_run_set rejects a hostile setup PTB calling an unexpected MoveCall target, even with the env gate on', async () => {
   process.env.RILL_ALLOW_AUTO_ONBOARDING = 'true';
   const handler = createWalletMcpHandler({
-    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true },
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
     signer: { address: policy.sender, network: 'testnet', client: {} as never, hasKey: () => true },
   });
   const walletPackageId = id(2);
@@ -662,7 +662,7 @@ test('create_run_set rejects a hostile setup PTB calling an unexpected MoveCall 
 test('create_run_set rejects a hostile setup PTB whose actual split amount exceeds the budget ceiling, even when the declared run-set amount is within bounds', async () => {
   process.env.RILL_ALLOW_AUTO_ONBOARDING = 'true';
   const handler = createWalletMcpHandler({
-    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true },
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
     signer: { address: policy.sender, network: 'testnet', client: {} as never, hasKey: () => true },
   });
   const walletPackageId = id(2);

@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import { Transaction } from '@mysten/sui/transactions';
 import { normalizeSuiAddress } from '@mysten/sui/utils';
+import { decimalToBaseUnits, parseU64String } from '../../rill-sdk/src/amounts';
 import { assertExecutionEnvelope, digestUnsignedPtb } from '../../rill-sdk/src/execution-envelope';
 import type { ExecutionEnvelope, RillNetwork } from '../../rill-sdk/src/types';
 
@@ -16,6 +17,13 @@ export interface LocalSignerPolicy {
   balanceManagerId: string;
   tradeCapId: string;
   poolId: string;
+  /**
+   * R10 typeArguments validation: the DeepBook pool's quote coin type (e.g. DBUSDC on testnet),
+   * checked against the `pool::place_limit_order` call's second type argument. Optional so run-sets
+   * written before this field existed keep loading (backward compatible) — when absent, only the
+   * base/SUI type argument and overall arity are enforced, which is always checked regardless.
+   */
+  quoteCoinType?: string;
   allowedTargets: string[];
   requiredGuards: string[];
   maxAmountMist: string;
@@ -69,11 +77,49 @@ function sameValues(a: readonly string[], b: readonly string[]): boolean {
   return left.every((value, index) => value === right[index]);
 }
 
-function decimalU64(value: string, label: string): bigint {
-  if (!/^\d+$/.test(value)) throw new Error(`${label} must be a decimal u64 string.`);
-  const parsed = BigInt(value);
-  if (parsed > 0xffff_ffff_ffff_ffffn) throw new Error(`${label} exceeds u64.`);
-  return parsed;
+/**
+ * Normalizes a simple (non-generic) Move coin type string `address::module::Name` — the shape every
+ * coin type in the DeepBook hero flow takes (SUI, DBUSDC, mainnet USDC, ...). Rejects anything with a
+ * different arity, e.g. a nested generic like `0x2::coin::Coin<0x2::sui::SUI>`, which this flow never
+ * legitimately produces (R10 typeArguments validation).
+ */
+function normalizeCoinType(coinType: string): string {
+  const [address, module, name, extra] = coinType.split('::');
+  if (!address || !module || !name || extra) throw new Error(`Invalid coin type ${coinType}.`);
+  return `${normalized(address)}::${module}::${name}`;
+}
+
+/** The DeepBook hero flow always spends/deposits SUI — see the typeArguments checks in inspect(). */
+const SUI_COIN_TYPE = normalizeCoinType('0x2::sui::SUI');
+
+function assertTypeArguments(actual: readonly string[], expected: readonly string[], label: string): void {
+  const normalizedActual = actual.map((value) => normalizeCoinType(value));
+  if (normalizedActual.length !== expected.length || !normalizedActual.every((value, index) => value === expected[index])) {
+    throw new Error(`${label} typeArguments mismatch.`);
+  }
+}
+
+/**
+ * R5/R10: canonicalize a finite JS number into a bigint at a fixed 9-decimal (MIST-scale) precision
+ * via the SDK's string/bigint decimalToBaseUnits, replacing a `Math.abs(a - b) > 1e-9` float-tolerance
+ * comparison or a `Math.round(x * 1e9)` scaling with exact bigint equality. `toFixed` always renders
+ * plain fixed-point notation (never scientific notation, the one shape decimalToBaseUnits rejects),
+ * and 9 decimal places matches the finest precision anything in this system (Sui MIST) uses — the
+ * same granularity the old tolerance constant implicitly assumed.
+ */
+function nineDecimalUnits(value: number, label: string): bigint {
+  if (!Number.isFinite(value)) throw new Error(`${label} must be a finite number.`);
+  return decimalToBaseUnits(value.toFixed(9), 9);
+}
+
+/** A non-negative integer JS number (e.g. a simulation gasEstimate), widened to bigint MIST. Unlike
+ * nineDecimalUnits, gas estimates are already whole MIST counts, not decimal token amounts, so no
+ * scaling is applied — only a guard against a fractional or negative value slipping through. */
+function nonNegativeIntegerMist(value: number, label: string): bigint {
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
+    throw new Error(`${label} must be a non-negative integer.`);
+  }
+  return BigInt(value);
 }
 
 export function loadPolicy(path = process.env.RILL_SIGNER_POLICY_PATH): LocalSignerPolicy {
@@ -164,6 +210,7 @@ function inspect(transaction: Transaction, policy: LocalSignerPolicy) {
   const spend = data.commands[spendIndex];
   if (!spend || spend.$kind !== 'MoveCall') throw new Error('PTB is missing required wallet spend target.');
   exactArity(spend.MoveCall.arguments, 4, 'PTB wallet spend');
+  assertTypeArguments(spend.MoveCall.typeArguments, [SUI_COIN_TYPE], 'PTB wallet spend');
   expectNormalizedMatch(
     objectArgument(spend.MoveCall.arguments[3], 'wallet spend clock'),
     '0x6',
@@ -187,6 +234,7 @@ function inspect(transaction: Transaction, policy: LocalSignerPolicy) {
     throw new Error('PTB is missing ordered DeepBook deposit.');
   }
   exactArity(deposit.MoveCall.arguments, 2, 'PTB DeepBook deposit');
+  assertTypeArguments(deposit.MoveCall.typeArguments, [SUI_COIN_TYPE], 'PTB DeepBook deposit');
   expectNormalizedMatch(
     objectArgument(deposit.MoveCall.arguments[0], 'DeepBook deposit BalanceManager'),
     policy.balanceManagerId,
@@ -220,6 +268,7 @@ function inspect(transaction: Transaction, policy: LocalSignerPolicy) {
     throw new Error('PTB is missing ordered DeepBook trader proof.');
   }
   exactArity(proof.MoveCall.arguments, 2, 'PTB DeepBook trader proof');
+  assertTypeArguments(proof.MoveCall.typeArguments, [], 'PTB DeepBook trader proof');
   expectNormalizedMatch(
     objectArgument(proof.MoveCall.arguments[0], 'DeepBook proof BalanceManager'),
     policy.balanceManagerId,
@@ -237,6 +286,18 @@ function inspect(transaction: Transaction, policy: LocalSignerPolicy) {
     throw new Error('PTB is missing ordered DeepBook limit order.');
   }
   exactArity(order.MoveCall.arguments, 12, 'PTB DeepBook order');
+  if (order.MoveCall.typeArguments.length !== 2) {
+    throw new Error('PTB DeepBook order must have exactly 2 type arguments.');
+  }
+  if (normalizeCoinType(order.MoveCall.typeArguments[0]) !== SUI_COIN_TYPE) {
+    throw new Error('PTB DeepBook order base typeArguments mismatch.');
+  }
+  if (
+    policy.quoteCoinType !== undefined &&
+    normalizeCoinType(order.MoveCall.typeArguments[1]) !== normalizeCoinType(policy.quoteCoinType)
+  ) {
+    throw new Error('PTB DeepBook order quote typeArguments mismatch.');
+  }
   expectNormalizedMatch(
     objectArgument(order.MoveCall.arguments[11], 'DeepBook order clock'),
     '0x6',
@@ -301,6 +362,11 @@ export async function validateExecutionEnvelope(
   signerNetwork: RillNetwork,
   policy: LocalSignerPolicy,
   now = Date.now(),
+  /** R10 mandatory gas ceiling: when provided (core.ts always resolves and passes one — see
+   * loadConfigFromEnv's maxGasBudgetMist), the envelope's own declared simulation.gasEstimate is
+   * checked against it here, independent of core.ts's own live-re-simulation gas check. Optional so
+   * every existing direct caller of this function that does not care about gas stays unaffected. */
+  gasCeilingMist?: bigint,
 ): Promise<ValidatedEnvelope> {
   const envelope = assertExecutionEnvelope(value);
   const expiresAt = Date.parse(envelope.expiresAt);
@@ -338,7 +404,7 @@ export async function validateExecutionEnvelope(
   for (const [name, expected] of Object.entries(policy.demoParams)) {
     const actual = envelope.resolvedParams[name as keyof ExecutionEnvelope['resolvedParams']];
     if (typeof expected === 'number' && typeof actual === 'number') {
-      if (Math.abs(actual - expected) > 1e-9) {
+      if (nineDecimalUnits(actual, `resolved ${name}`) !== nineDecimalUnits(expected, `policy demoParams ${name}`)) {
         throw new Error(`ExecutionEnvelope resolved ${name} mismatch.`);
       }
       continue;
@@ -349,6 +415,15 @@ export async function validateExecutionEnvelope(
   }
   if (!envelope.simulation.ok || envelope.simulation.verification !== 'verified') {
     throw new Error('ExecutionEnvelope simulation is not a verified success.');
+  }
+  if (gasCeilingMist !== undefined) {
+    const gasEstimateMist = nonNegativeIntegerMist(
+      envelope.simulation.gasEstimate,
+      'ExecutionEnvelope simulation gasEstimate',
+    );
+    if (gasEstimateMist > gasCeilingMist) {
+      throw new Error('ExecutionEnvelope simulation gasEstimate exceeds the local gas ceiling.');
+    }
   }
   const requiredGuards = policy.requiredGuards.map(normalizeTarget);
   if (!sameValues(envelope.requiredGuards.map(normalizeTarget), requiredGuards)) {
@@ -400,17 +475,22 @@ export async function validateExecutionEnvelope(
   if (!sameValues(inspected.objectIds, policyObjectIds)) {
     throw new Error('PTB object policy must contain exactly the fixed hero objects and Sui clock.');
   }
-  const resolvedSpend = decimalU64(
+  const resolvedSpend = parseU64String(
     envelope.resolvedParams.spendAmountMist,
     'ExecutionEnvelope resolved spendAmountMist',
   );
   if (inspected.spendAmountMist !== resolvedSpend) {
     throw new Error('PTB amount differs from resolvedParams.');
   }
-  if (inspected.spendAmountMist > decimalU64(policy.maxAmountMist, 'Local policy maxAmountMist')) {
+  // R10 independent hard cap: maxAmountMist is checked BEFORE and INDEPENDENTLY of the demoParams
+  // equality check below — an envelope whose spend matches demoParams.depositSui exactly is still
+  // rejected here if that amount exceeds the policy's maxAmountMist ceiling. The two checks bound the
+  // spend from two unrelated sources (the local policy's absolute ceiling vs. the fixed demo amount),
+  // so neither can be satisfied by loosening the other.
+  if (inspected.spendAmountMist > parseU64String(policy.maxAmountMist, 'Local policy maxAmountMist')) {
     throw new Error('PTB amount exceeds maxAmountMist.');
   }
-  const expectedSpendAmountMist = BigInt(Math.round(policy.demoParams.depositSui * 1_000_000_000));
+  const expectedSpendAmountMist = nineDecimalUnits(policy.demoParams.depositSui, 'policy demoParams depositSui');
   if (inspected.spendAmountMist !== expectedSpendAmountMist) {
     throw new Error('PTB amount differs from demo depositSui policy.');
   }
@@ -431,6 +511,7 @@ export async function assertCapabilitiesActive(
   client: Pick<SuiGrpcClient, 'getObject'>,
   policy: LocalSignerPolicy,
   spendAmountMist: bigint,
+  now = Date.now(),
 ): Promise<void> {
   const wallet = await client.getObject({
     objectId: policy.walletId,
@@ -447,11 +528,22 @@ export async function assertCapabilitiesActive(
   if (normalized(fields.agent) !== normalized(policy.sender)) {
     throw new Error('AgentWallet agent mismatch.');
   }
-  const remainingMist = decimalU64(readMoveU64(fields, 'budget'), 'AgentWallet budget');
+  // R10 live capability checks: read the wallet's own on-chain expires_at_ms/per_tx_max — set by the
+  // owner, independent of anything the run-set/policy file or the envelope declares — and reject
+  // pre-sign when the wallet has expired or when this specific spend exceeds its live per-tx ceiling.
+  const expiresAtMs = parseU64String(readMoveU64(fields, 'expires_at_ms'), 'AgentWallet expires_at_ms');
+  if (BigInt(now) >= expiresAtMs) {
+    throw new Error('AgentWallet has expired.');
+  }
+  const perTxMaxMist = parseU64String(readMoveU64(fields, 'per_tx_max'), 'AgentWallet per_tx_max');
+  if (spendAmountMist > perTxMaxMist) {
+    throw new Error('AgentWallet spend exceeds per_tx_max.');
+  }
+  const remainingMist = parseU64String(readMoveU64(fields, 'budget'), 'AgentWallet budget');
   if (remainingMist < spendAmountMist) throw new Error('AgentWallet balance cannot cover this action.');
   if (
     remainingMist - spendAmountMist <
-    decimalU64(policy.minimumRemainingMist, 'Local policy minimumRemainingMist')
+    parseU64String(policy.minimumRemainingMist, 'Local policy minimumRemainingMist')
   ) {
     throw new Error('AgentWallet balance would fall below minimumRemainingMist after this action.');
   }

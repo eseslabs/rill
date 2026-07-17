@@ -66,6 +66,8 @@ async function envelope(options: {
   extraObjectId?: string;
   spendClockId?: string;
   orderClockId?: string;
+  spendTypeArguments?: string[];
+  orderTypeArguments?: string[];
   callShape?:
     | 'spend-missing-clock'
     | 'spend-extra'
@@ -84,7 +86,7 @@ async function envelope(options: {
     ? tx.splitCoins(tx.gas, [amount])[0]
     : tx.moveCall({
         target: `${walletPackageId}::agent_wallet::spend`,
-        typeArguments: ['0x2::sui::SUI'],
+        typeArguments: options.spendTypeArguments ?? ['0x2::sui::SUI'],
         arguments: [
           tx.object(policy.walletId),
           tx.object(policy.agentCapId),
@@ -118,7 +120,7 @@ async function envelope(options: {
   });
   tx.moveCall({
     target: options.target ?? `${deepbookPackageId}::pool::place_limit_order`,
-    typeArguments: ['0x2::sui::SUI', id(9)],
+    typeArguments: options.orderTypeArguments ?? ['0x2::sui::SUI', id(9)],
     arguments: [
       tx.object(policy.poolId),
       tx.object(policy.balanceManagerId),
@@ -366,6 +368,21 @@ test('excess amount is rejected', async () => {
   )).rejects.toThrow('maxAmountMist');
 });
 
+// R10 independent hard cap: this fixture's spend (6_000_000n, from the default envelope()'s amount)
+// matches policy.demoParams.depositSui (0.006 SUI) EXACTLY, so the demoParams equality check alone
+// would happily accept it — maxAmountMist must still reject it, and must do so on its own error
+// ('maxAmountMist', not 'demo depositSui'), proving it is checked independently and not subsumed by
+// the demoParams comparison.
+test('maxAmountMist rejects a spend that matches demoParams.depositSui exactly, independent of demoParams equality', async () => {
+  const matchingEnvelope = await envelope(); // amount defaults to 6_000_000n === depositSui-derived mist
+  await expect(validateExecutionEnvelope(
+    matchingEnvelope,
+    sender,
+    'testnet',
+    { ...policy, maxAmountMist: '5999999' },
+  )).rejects.toThrow('maxAmountMist');
+});
+
 test('wallet spend that differs from the fixed deposit is rejected', async () => {
   await expect(validateExecutionEnvelope(await envelope({ amount: 7_000_000n }), sender, 'testnet', policy))
     .rejects.toThrow('demo depositSui');
@@ -415,6 +432,88 @@ test('off-scope target is rejected even when envelope digest matches', async () 
   )).rejects.toThrow('off-scope');
 });
 
+// R10 typeArguments validation: inspect() must reject a structurally-correct PTB (right targets,
+// right objects, right amounts) whose MoveCall typeArguments swap in an unexpected coin type — the
+// checks added above the on-chain-order manifest check in inspect().
+
+test('wallet spend with a non-SUI typeArgument is rejected', async () => {
+  await expect(validateExecutionEnvelope(
+    await envelope({ spendTypeArguments: [`${id(50)}::fake::FAKE`] }),
+    sender,
+    'testnet',
+    policy,
+  )).rejects.toThrow('wallet spend typeArguments mismatch');
+});
+
+test('DeepBook order with only one type argument is rejected', async () => {
+  await expect(validateExecutionEnvelope(
+    await envelope({ orderTypeArguments: ['0x2::sui::SUI'] }),
+    sender,
+    'testnet',
+    policy,
+  )).rejects.toThrow('exactly 2 type arguments');
+});
+
+test('DeepBook order with a non-SUI base typeArgument is rejected', async () => {
+  await expect(validateExecutionEnvelope(
+    await envelope({ orderTypeArguments: [`${id(51)}::fake::FAKE`, id(9)] }),
+    sender,
+    'testnet',
+    policy,
+  )).rejects.toThrow('base typeArguments mismatch');
+});
+
+test('DeepBook order quote typeArgument is not checked when the policy does not declare quoteCoinType (backward compatible)', async () => {
+  // The shared `policy` fixture has no quoteCoinType; id(9) is a bare address, not a real coin type,
+  // proving the quote slot's *value* is genuinely unchecked here (arity + base are still enforced).
+  await expect(validateExecutionEnvelope(await envelope(), sender, 'testnet', policy))
+    .resolves.toBeTruthy();
+});
+
+test('DeepBook order quote typeArgument is checked against policy.quoteCoinType when declared, and a mismatch is rejected', async () => {
+  const quoteCoinType = `${id(52)}::dbusdc::DBUSDC`;
+  await expect(validateExecutionEnvelope(
+    await envelope({ orderTypeArguments: ['0x2::sui::SUI', `${id(53)}::other::OTHER`] }),
+    sender,
+    'testnet',
+    { ...policy, quoteCoinType },
+  )).rejects.toThrow('quote typeArguments mismatch');
+});
+
+test('DeepBook order quote typeArgument matching policy.quoteCoinType exactly is accepted', async () => {
+  const quoteCoinType = `${id(52)}::dbusdc::DBUSDC`;
+  await expect(validateExecutionEnvelope(
+    await envelope({ orderTypeArguments: ['0x2::sui::SUI', quoteCoinType] }),
+    sender,
+    'testnet',
+    { ...policy, quoteCoinType },
+  )).resolves.toBeTruthy();
+});
+
+// R10 mandatory gas ceiling (policy-side): validateExecutionEnvelope's optional gasCeilingMist
+// argument checks the envelope's own declared simulation.gasEstimate independently of core.ts's
+// live re-simulation gas check.
+
+test('envelope gasEstimate above an explicit gas ceiling is rejected', async () => {
+  const value = await envelope();
+  value.simulation.gasEstimate = 5_000_000;
+  await expect(validateExecutionEnvelope(value, sender, 'testnet', policy, undefined, 4_000_000n))
+    .rejects.toThrow('gasEstimate exceeds the local gas ceiling');
+});
+
+test('envelope gasEstimate at or below an explicit gas ceiling is accepted', async () => {
+  const value = await envelope();
+  value.simulation.gasEstimate = 4_000_000;
+  await expect(validateExecutionEnvelope(value, sender, 'testnet', policy, undefined, 4_000_000n))
+    .resolves.toBeTruthy();
+});
+
+test('no gas ceiling argument means gasEstimate is not checked (caller must opt in)', async () => {
+  const value = await envelope();
+  value.simulation.gasEstimate = 999_999_999;
+  await expect(validateExecutionEnvelope(value, sender, 'testnet', policy)).resolves.toBeTruthy();
+});
+
 for (const [field, value] of [
   ['clientOrderId', '71602'],
   ['orderType', '1'],
@@ -439,6 +538,8 @@ function liveReader(options: {
   walletBudget?: string;
   walletRevoked?: boolean;
   walletOwner?: unknown;
+  walletExpiresAtMs?: string;
+  walletPerTxMax?: string;
   missing?: string;
   ownerOverrides?: Record<string, string>;
   agentCapWalletId?: string;
@@ -455,6 +556,10 @@ function liveReader(options: {
               budget: options.walletBudget ?? '100000000',
               revoked: options.walletRevoked ?? false,
               agent: sender,
+              // Far-future expiry and a generous per_tx_max by default, so tests that are not
+              // exercising R10's live capability checks are unaffected by them.
+              expires_at_ms: options.walletExpiresAtMs ?? '9999999999999',
+              per_tx_max: options.walletPerTxMax ?? '1000000000',
             },
           },
         };
@@ -479,6 +584,44 @@ function liveReader(options: {
 
 test('active shared wallet and signer-owned bound capabilities are accepted', async () => {
   await expect(assertCapabilitiesActive(liveReader() as never, policy, 5_000_000n)).resolves.toBeUndefined();
+});
+
+// R10 live capability checks: assertCapabilitiesActive reads the wallet's own on-chain
+// expires_at_ms/per_tx_max fields (independent of anything the run-set/policy file declares) and
+// rejects pre-sign when the wallet has expired or the spend exceeds its live per-tx ceiling.
+
+test('expired wallet is rejected before signing', async () => {
+  await expect(assertCapabilitiesActive(
+    liveReader({ walletExpiresAtMs: String(Date.now() - 1_000) }) as never,
+    policy,
+    5_000_000n,
+  )).rejects.toThrow('expired');
+});
+
+test('wallet expiring exactly now is rejected before signing (inclusive boundary)', async () => {
+  const now = Date.now();
+  await expect(assertCapabilitiesActive(
+    liveReader({ walletExpiresAtMs: String(now) }) as never,
+    policy,
+    5_000_000n,
+    now,
+  )).rejects.toThrow('expired');
+});
+
+test('spend above the live per_tx_max is rejected before signing', async () => {
+  await expect(assertCapabilitiesActive(
+    liveReader({ walletPerTxMax: '4000000' }) as never,
+    policy,
+    5_000_000n,
+  )).rejects.toThrow('per_tx_max');
+});
+
+test('spend exactly at the live per_tx_max is accepted', async () => {
+  await expect(assertCapabilitiesActive(
+    liveReader({ walletPerTxMax: '5000000' }) as never,
+    policy,
+    5_000_000n,
+  )).resolves.toBeUndefined();
 });
 
 test('revoked wallet is rejected before signing', async () => {
