@@ -1,3 +1,5 @@
+import { decimalToBaseUnits, findToken } from "@rill/sdk";
+
 /** Testnet protocol manifest — passed in full to backend on every compile/simulate. */
 
 export const TESTNET_MANIFEST = {
@@ -59,11 +61,77 @@ export function defaultActionConfig(protocolId: string, actionId: string): Actio
   return {};
 }
 
-/** Convert human-readable token amount to mist string. */
+/**
+ * KTD-2 (docs/plans/2026-07-17-001-fix-audit-hardening-plan.md): the one money path. Every
+ * token-amount field an action node renders (Cetus swap `amount`, Haedal stake `amount`) is
+ * validated and converted through `@rill/sdk`'s `decimalToBaseUnits` with the *actual* decimals
+ * of the selected coin — never a hardcoded 9. Fixes the bug where "1 USDC" (6 decimals) produced
+ * `1000000000` base units instead of `1000000`.
+ */
+export type AmountParseResult = { ok: true; baseUnits: bigint } | { ok: false; error: string };
+
+/** Pure validate+convert. Never throws — callers that only need a yes/no or an error string
+ *  should use {@link isValidActionAmount} / {@link actionAmountError} below. Unknown coin types
+ *  fall back to 9 decimals (SUI); the swap/stake tokens this builder offers are all registered in
+ *  `@rill/sdk`'s token registry, so that fallback path should be rare in practice. */
+export function parseActionAmount(amount: string | undefined, coinType: string): AmountParseResult {
+  const raw = (amount ?? "").trim();
+  const decimals = findToken(coinType)?.decimals ?? 9;
+  if (raw === "") {
+    return { ok: false, error: "Amount is required." };
+  }
+  let baseUnits: bigint;
+  try {
+    baseUnits = decimalToBaseUnits(raw, decimals);
+  } catch {
+    return {
+      ok: false,
+      error: `Enter a valid positive amount with up to ${decimals} decimal place${decimals === 1 ? "" : "s"}.`,
+    };
+  }
+  if (baseUnits <= 0n) {
+    return { ok: false, error: "Amount must be greater than 0." };
+  }
+  return { ok: true, baseUnits };
+}
+
+/** R5: no silent fallback — the node's inline error and the flow-level simulate/publish gate
+ *  (`publish-gate.ts`) both read this same predicate, mirroring `isGuardrailMinValueValid`. */
+export function isValidActionAmount(amount: string | undefined, coinType: string): boolean {
+  return parseActionAmount(amount, coinType).ok;
+}
+
+/** `null` when valid, else a user-facing message for the node's inline field error. */
+export function actionAmountError(amount: string | undefined, coinType: string): string | null {
+  const result = parseActionAmount(amount, coinType);
+  return result.ok ? null : result.error;
+}
+
+/** Base-units string for a backend config payload. Returns `"0"` on invalid input instead of
+ *  throwing — this runs on every render (via `buildFlowGraph`, including dialogs that are mounted
+ *  but not open), so it must never crash the canvas. The actual safety backstop is the gate: an
+ *  invalid amount blocks simulate/publish (see `publish-gate.ts`) before this payload is ever sent
+ *  to the backend, so "0" here is inert, not a silently-accepted amount. */
+function toBaseUnitsString(amount: string | undefined, coinType: string): string {
+  const result = parseActionAmount(amount, coinType);
+  return result.ok ? result.baseUnits.toString() : "0";
+}
+
+/** Convert human-readable token amount to mist (9-decimal SUI base units) string. Used for
+ *  UI-only, non-final-path conversions (wire-constraint capping between Cetus swap and Haedal
+ *  stake, guardrail `minValue`, both denominated in SUI on this canvas) where a malformed
+ *  in-progress keystroke should fall back rather than throw. The security-critical amount path
+ *  (`amount_in`/`amount` sent to the backend) goes through {@link parseActionAmount} above instead,
+ *  which is gated — never silently defaulted — at the flow level. */
 export function toMist(amount: string, fallbackMist: string): string {
-  const n = parseFloat(amount);
-  if (!Number.isFinite(n) || n <= 0) return fallbackMist;
-  return String(Math.round(n * 1e9));
+  const raw = (amount ?? "").trim();
+  try {
+    const n = decimalToBaseUnits(raw, 9);
+    if (n <= 0n) return fallbackMist;
+    return n.toString();
+  } catch {
+    return fallbackMist;
+  }
 }
 
 export function otherSwapToken(symbol: SwapTokenSymbol): SwapTokenSymbol {
@@ -74,13 +142,14 @@ export function otherSwapToken(symbol: SwapTokenSymbol): SwapTokenSymbol {
 export function buildCetusSwapFlowConfig(cfg: ActionConfig) {
   const tokenIn = (cfg.tokenIn as SwapTokenSymbol) || "SUI";
   const m = TESTNET_MANIFEST.cetus_swap;
+  const inputCoinType = TOKEN_COIN_TYPE[tokenIn] ?? TOKEN_COIN_TYPE.SUI;
   return {
     integratePackageId: m.integratePackageId,
     globalConfigId: m.globalConfigId,
     pool: m.defaultPoolId,
-    inputCoinType: TOKEN_COIN_TYPE[tokenIn] ?? TOKEN_COIN_TYPE.SUI,
+    inputCoinType,
     outputCoinType: TOKEN_COIN_TYPE[otherSwapToken(tokenIn)],
-    amount_in: toMist(String(cfg.amount ?? "0.1"), "100000000"),
+    amount_in: toBaseUnitsString(cfg.amount ?? "0.1", inputCoinType),
     min_amount_out: "1",
     minSqrtPrice: m.minSqrtPrice,
     maxSqrtPrice: m.maxSqrtPrice,
@@ -94,7 +163,7 @@ export function buildHaedalStakeFlowConfig(cfg: ActionConfig) {
     suiSystemStateId: m.suiSystemStateId,
     stakingObjectId: m.stakingObjectId,
     minStakeMist: m.minStakeMist,
-    amount: toMist(String(cfg.amount ?? "1"), m.minStakeMist),
+    amount: toBaseUnitsString(cfg.amount ?? "1", TOKEN_COIN_TYPE.SUI),
   };
 }
 

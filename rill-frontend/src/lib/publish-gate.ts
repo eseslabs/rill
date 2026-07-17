@@ -1,5 +1,6 @@
 import type { Edge, Node } from "reactflow";
 import type { ActionNodeData, GuardrailNodeData } from "@/components/flow/nodes";
+import { actionAmountError, TOKEN_COIN_TYPE, type SwapTokenSymbol } from "@/lib/action-config";
 import { isBackendSupported } from "@/lib/flow-mapper";
 import { hasCycle } from "@/lib/wire-inference";
 
@@ -40,9 +41,69 @@ export function invalidGuardrailNodes(nodes: Node[]): Node[] {
   );
 }
 
-/** Blocks BOTH simulate and publish — an unset/non-positive guardrail is a no-op
- *  guard, so running against it would misrepresent what's actually enforced. */
+function isCetusSwapAction(data: ActionNodeData): boolean {
+  return data.protocolId === "cetus" && data.action.toLowerCase().includes("swap");
+}
+
+function isHaedalStakeAction(data: ActionNodeData): boolean {
+  return data.protocolId === "haedal" && data.action.toLowerCase().includes("stake");
+}
+
+/** Coin type an action node's `amount` field is denominated in, for R5 amount validation —
+ *  mirrors the detection nodes.tsx itself uses to render the field. `null` for action kinds not
+ *  validated here (e.g. DeepBook, which takes raw price/quantity strings, not one converted
+ *  amount). */
+function actionAmountCoinType(data: ActionNodeData): string | null {
+  if (isCetusSwapAction(data)) {
+    const tokenIn = (data.config?.tokenIn as SwapTokenSymbol) || "SUI";
+    return TOKEN_COIN_TYPE[tokenIn] ?? TOKEN_COIN_TYPE.SUI;
+  }
+  if (isHaedalStakeAction(data)) {
+    return TOKEN_COIN_TYPE.SUI;
+  }
+  return null;
+}
+
+export type InvalidAmountNode = { node: Node; error: string };
+
+/** R5: no silent fallback — an invalid/non-positive/over-precision amount blocks simulate and
+ *  publish instead of being converted to a fallback base-unit amount. Same predicate
+ *  (`actionAmountError`, action-config.ts) drives the node's own inline field error. */
+export function invalidAmountNodes(nodes: Node[]): InvalidAmountNode[] {
+  const result: InvalidAmountNode[] = [];
+  for (const n of nodes) {
+    if (n.type !== "action") continue;
+    const data = n.data as ActionNodeData;
+    const coinType = actionAmountCoinType(data);
+    if (!coinType) continue;
+    const error = actionAmountError(data.config?.amount, coinType);
+    if (error) result.push({ node: n, error });
+  }
+  return result;
+}
+
+/** Names the node/protocol in the reason so an invalid-amount node that's off-screen on a
+ *  multi-node canvas is still discoverable from the blocking message. Panning/selecting the
+ *  canvas to the node is a follow-up — not built this sweep. */
+export function amountGateReason(nodes: Node[]): string | null {
+  const bad = invalidAmountNodes(nodes);
+  if (bad.length === 0) return null;
+  if (bad.length === 1) {
+    const data = bad[0].node.data as ActionNodeData;
+    return `${data.protocol} · ${data.action}: ${bad[0].error}`;
+  }
+  return `${bad.length} nodes have an invalid amount — fix before simulating or publishing.`;
+}
+
+/** Blocks BOTH simulate and publish. Covers two independent no-op-guard/no-silent-fallback
+ *  cases: an unset/non-positive guardrail `minValue` (R1) and an invalid/non-positive action
+ *  amount (R5). Kept under its original name — simulate-dialog.tsx and `computePublishGate`
+ *  both already call this single function, so broadening it here covers both call sites without
+ *  touching either. */
 export function guardrailGateReason(nodes: Node[]): string | null {
+  const amountReason = amountGateReason(nodes);
+  if (amountReason) return amountReason;
+
   const bad = invalidGuardrailNodes(nodes);
   if (bad.length === 0) return null;
   return bad.length === 1
