@@ -31,7 +31,11 @@ export class SkillRunnerService {
       agentWallet: options.agentWallet,
     }, params);
 
-    const preview = previewService.buildPreview(compileResult.resolvedFlow, compileResult.warnings);
+    const preview = previewService.buildPreview(
+      compileResult.resolvedFlow,
+      compileResult.manifest,
+      compileResult.warnings,
+    );
     const unsignedPtb = await serializeUnsignedPtb(compileResult.transaction);
     const simulation = await simulatorService.simulateTransaction(compileResult.transaction, options.sender);
     const inspection = inspectTransaction(compileResult.transaction);

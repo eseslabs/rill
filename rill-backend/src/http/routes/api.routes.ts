@@ -70,7 +70,11 @@ apiRouter.post('/compile', zValidator('json', CompileSchema), async (c) => {
     agentWallet: resolveAgentWallet(body),
   });
 
-  const preview = previewService.buildPreview(compileResult.resolvedFlow, compileResult.warnings);
+  const preview = previewService.buildPreview(
+    compileResult.resolvedFlow,
+    compileResult.manifest,
+    compileResult.warnings,
+  );
   const unsignedPtb = await serializeUnsignedPtb(compileResult.transaction);
 
   return c.json({
@@ -96,7 +100,11 @@ apiRouter.post('/simulate', zValidator('json', SimulateSchema), async (c) => {
     compileResult.transaction,
     body.sender,
   );
-  const preview = previewService.buildPreview(compileResult.resolvedFlow, compileResult.warnings);
+  const preview = previewService.buildPreview(
+    compileResult.resolvedFlow,
+    compileResult.manifest,
+    compileResult.warnings,
+  );
   const unsignedPtb = await serializeUnsignedPtb(compileResult.transaction);
 
   return c.json({

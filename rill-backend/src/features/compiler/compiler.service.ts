@@ -5,6 +5,7 @@ import { resolveEffectiveFlow } from '../../core/node-config';
 import { SUI_CLOCK_ID } from '../../core/protocols';
 import { getAdapter } from '../protocols/registry';
 import { injectMinOutAssert } from '../protocols/guard';
+import { deriveCallManifest, type ManifestCall } from './manifest';
 import type {
   CompileOptions,
   CompileResult,
@@ -15,6 +16,15 @@ import type {
 
 // Re-exported so existing importers (`from '../compiler/compiler.service'`) keep working.
 export type { FlowEdge, FlowGraph, FlowNode, CompileOptions, CompileResult };
+
+/**
+ * A compile result that also carries the call manifest read back out of `transaction`.
+ * Every consumer that renders or attests to what the PTB does must use `manifest` rather
+ * than re-reading the flow, so preview, envelope, and bytes cannot drift apart.
+ */
+export interface CompileResultWithManifest extends CompileResult {
+  manifest: ManifestCall[];
+}
 
 /**
  * Compiles a visual flow graph into one unsigned PTB.
@@ -28,7 +38,7 @@ export class CompilerService {
     flow: FlowGraph,
     options: CompileOptions = {},
     runtimeParams: Record<string, unknown> = {},
-  ): Promise<CompileResult> {
+  ): Promise<CompileResultWithManifest> {
     const resolvedFlow = resolveEffectiveFlow(flow, runtimeParams);
     const tx = new Transaction();
     const warnings: string[] = [];
@@ -117,6 +127,8 @@ export class CompilerService {
       warnings,
       agentWalletBound: Boolean(options.agentWallet && rootTotal > 0n),
       budgetSpendMist: rootTotal,
+      // Read back out of the finished bytes, so it describes what was actually compiled.
+      manifest: deriveCallManifest(tx),
     };
   }
 

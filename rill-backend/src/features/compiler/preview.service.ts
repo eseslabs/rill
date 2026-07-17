@@ -1,66 +1,60 @@
+import { ValidationError } from '../../core/errors';
 import type { FlowGraph, FlowNode } from './compiler.service';
-
-function isTrueLike(value: unknown): boolean {
-  return value === true || value === 'true';
-}
+import type { ManifestCall } from './manifest';
 
 export class PreviewService {
-  buildPreview(flow: FlowGraph, warnings: string[]): string {
-    const lines: string[] = ['Transaction preview:', ''];
-
-    for (const node of flow.nodes) {
-      lines.push(this.describeNode(node));
+  /**
+   * Renders the preview from `manifest` — which was decoded back out of the compiled PTB —
+   * so the preview cannot describe a call the bytes do not contain. `flow` supplies human
+   * labels only; no value in the output is ever read from node config.
+   */
+  buildPreview(flow: FlowGraph, manifest: ManifestCall[], warnings: string[]): string {
+    if (manifest.length === 0) {
+      throw new ValidationError('This flow compiled to no on-chain calls; refusing to preview it.');
     }
 
-    if (flow.edges.length > 0) {
-      lines.push('');
-      lines.push('Wiring:');
-      for (const edge of flow.edges) {
-        lines.push(`  ${edge.source}.${edge.sourceHandle} → ${edge.target}.${edge.targetHandle}`);
-      }
+    const lines: string[] = ['Transaction preview:', ''];
+    lines.push(`${manifest.length} on-chain call(s), in execution order:`);
+    for (const call of manifest) {
+      const types = call.typeArguments.length > 0 ? `<${call.typeArguments.join(', ')}>` : '';
+      const amounts = call.u64Args.length > 0 ? ` amounts=[${call.u64Args.join(', ')}]` : '';
+      lines.push(`  ${call.index + 1}. ${call.target}${types}${amounts}`);
+    }
+
+    const labels = flow.nodes.map((node) => this.describeNode(node)).filter(Boolean);
+    if (labels.length > 0) {
+      lines.push('', 'Intent (labels only — values above are read from the compiled bytes):');
+      for (const label of labels) lines.push(`  • ${label}`);
     }
 
     if (warnings.length > 0) {
-      lines.push('');
-      lines.push('Warnings:');
-      for (const w of warnings) {
-        lines.push(`  • ${w}`);
-      }
+      lines.push('', 'Warnings:');
+      for (const w of warnings) lines.push(`  • ${w}`);
     }
 
-    lines.push('');
-    lines.push('Atomic: all steps succeed or the entire transaction reverts.');
-
+    lines.push('', 'Atomic: all steps succeed or the entire transaction reverts.');
     return lines.join('\n');
   }
 
+  /**
+   * A bare human label for a node. Deliberately carries no amounts, addresses, or object ids:
+   * every value in the preview must come from the compiled bytes via the manifest, never from
+   * node config, or preview and PTB can disagree again.
+   */
   private describeNode(node: FlowNode): string {
-    const config = node.config ?? {};
     switch (node.type) {
       case 'cetus_swap':
-        return `- Cetus swap - amount_in: ${config.amount_in ?? '?'} mist, min_out: ${config.min_amount_out ?? '?'} mist`;
+        return 'Cetus swap';
       case 'haedal_stake':
-        return `- Haedal stake - amount: ${config.amount ?? '?'} mist SUI`;
+        return 'Haedal stake';
       case 'deepbook_limit_order':
-        return [
-          '- DeepBook limit order',
-          `pool: ${config.poolKey ?? '?'}`,
-          `price: ${config.price ?? '?'}`,
-          `quantity: ${config.quantity ?? '?'}`,
-          `side: ${isTrueLike(config.isBid) ? 'bid' : 'ask'}`,
-          `pay_with_deep: ${isTrueLike(config.payWithDeep)}`,
-          `client_order_id: ${config.clientOrderId ?? '?'}`,
-          `deposit_sui: ${config.depositSui ?? 0}`,
-        ].join(' - ');
+        return 'DeepBook limit order';
       case 'ptb':
-        return `- PTB boundary — all wired actions compile into one transaction`;
-      case 'guardrail': {
-        const min = config.minValue ?? '?';
-        const asset = config.coinType ?? 'SUI';
-        return `- Guardrail — assert output coin value >= ${min} mist (${asset})`;
-      }
+        return 'PTB boundary — all wired actions compile into one transaction';
+      case 'guardrail':
+        return 'Guardrail — assert output coin value meets the compiled minimum';
       default:
-        return `- ${node.type} (unsupported - skipped at compile time)`;
+        return `${node.type} (unsupported - skipped at compile time)`;
     }
   }
 }

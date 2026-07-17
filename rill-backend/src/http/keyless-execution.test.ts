@@ -265,7 +265,12 @@ test('compile API and OpenAPI expose the actual keyless fields', async () => {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      flow: { nodes: [], edges: [] },
+      // A flow that compiles to real MoveCalls: the preview is now derived from the compiled
+      // bytes, so a flow with no on-chain calls is refused rather than previewed.
+      flow: {
+        nodes: [{ id: 'stake', type: 'haedal_stake', config: { amount: '1000000000' } }],
+        edges: [],
+      },
       sender: `0x${'1'.repeat(64)}`,
       agentWallet: {
         packageId: `0x${'2'.repeat(64)}`,
