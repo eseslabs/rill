@@ -11,13 +11,15 @@ import {
   type Signer,
   type SignerConfig,
 } from './core';
-import { loadOnboardingConfig, saveOnboardingConfig } from './config';
+import { isAutoOnboardingAllowed, loadOnboardingConfig, saveOnboardingConfig, type OnboardingConfig } from './config';
 import { listRunSets, saveRunSet, type RunSet } from './runsets';
-import { loadPolicy, readMoveU64, type LocalSignerPolicy } from './policy';
+import { inspectOnboarding, loadPolicy, readMoveU64, type LocalSignerPolicy, type OnboardingAllowlist } from './policy';
 
 const FAUCET_URL = 'https://faucet.testnet.sui.io/v1/gas';
 const MIN_GAS_BALANCE_MIST = 50_000_000n;
-const PLACEHOLDER_BALANCE_MANAGER_ID = '0x0000000000000000000000000000000000000000000000000000000000000000';
+/** Sui framework address for the stdlib `transfer` module — not backend/network-supplied, so it is
+ * hardcoded into the onboarding allowlist rather than derived from `plan`. */
+const SUI_FRAMEWORK_PACKAGE_ID = '0x2';
 
 export const walletTools = [
   {
@@ -52,16 +54,20 @@ export const walletTools = [
   },
   {
     name: 'get_onboarding_config',
-    description: 'Return the local onboarding configuration from .rill/config.json.',
+    description:
+      'Return the local onboarding configuration from .rill/config.json, plus the live autoCreateRunSets ' +
+      'gate read from the RILL_ALLOW_AUTO_ONBOARDING launch environment variable (read-only here).',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
     name: 'set_onboarding_config',
-    description: 'Update the local onboarding configuration. Partial updates are merged.',
+    description:
+      'Update the local, non-privileged onboarding settings (auto-setup budget ceiling, testnet faucet toggle). ' +
+      'Partial updates are merged. autoCreateRunSets is NOT settable here: it can only be enabled by setting ' +
+      'RILL_ALLOW_AUTO_ONBOARDING=true in the signer process environment at launch.',
     inputSchema: {
       type: 'object',
       properties: {
-        autoCreateRunSets: { type: 'boolean' },
         maxAutoSetupBudgetMist: { type: 'string' },
         allowTestnetFaucet: { type: 'boolean' },
       },
@@ -84,7 +90,11 @@ export const walletTools = [
   },
   {
     name: 'create_run_set',
-    description: 'Create a run-set from a prepared setup plan. Requires confirmed=true and autoCreateRunSets=true.',
+    description:
+      'Validate a prepared setup plan (the setup and trade-cap PTBs are always structurally inspected against a ' +
+      'fixed onboarding allowlist before anything signs) and create a run-set. Requires confirmed=true. Only ' +
+      'signs and executes when RILL_ALLOW_AUTO_ONBOARDING=true was set in the signer launch environment; ' +
+      'otherwise returns the validated plan unsigned for a human to run manually.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -221,56 +231,60 @@ function isRunSetTemplate(value: unknown): value is RunSet {
   );
 }
 
-function patchTradeCapPtb(base64Ptb: string, balanceManagerId: string): string {
-  const tx = Transaction.from(Buffer.from(base64Ptb, 'base64').toString('utf8'));
-  const data = tx.getData() as unknown as {
-    inputs: Array<
-      | {
-          $kind: 'UnresolvedObject';
-          UnresolvedObject: { objectId: string };
-        }
-      | {
-          $kind: 'Object';
-          Object: {
-            $kind: string;
-            SharedObject?: { objectId: string };
-            ImmOrOwnedObject?: { objectId: string };
-            Receiving?: { objectId: string };
-          };
-        }
-    >;
-  };
-  let patched = false;
-  for (const input of data.inputs) {
-    if (input.$kind === 'UnresolvedObject') {
-      if (
-        input.UnresolvedObject.objectId === PLACEHOLDER_BALANCE_MANAGER_ID ||
-        input.UnresolvedObject.objectId === '0x0'
-      ) {
-        input.UnresolvedObject.objectId = balanceManagerId;
-        patched = true;
-      }
-      continue;
-    }
-    if (input.$kind !== 'Object') continue;
-    const objectId =
-      input.Object.$kind === 'SharedObject' && input.Object.SharedObject
-        ? input.Object.SharedObject.objectId
-        : input.Object.$kind === 'ImmOrOwnedObject' && input.Object.ImmOrOwnedObject
-        ? input.Object.ImmOrOwnedObject.objectId
-        : input.Object.Receiving?.objectId;
-    if (objectId !== PLACEHOLDER_BALANCE_MANAGER_ID && objectId !== '0x0') continue;
-    if (input.Object.$kind === 'SharedObject' && input.Object.SharedObject) {
-      input.Object.SharedObject.objectId = balanceManagerId;
-    } else if (input.Object.$kind === 'ImmOrOwnedObject' && input.Object.ImmOrOwnedObject) {
-      input.Object.ImmOrOwnedObject.objectId = balanceManagerId;
-    } else if (input.Object.Receiving) {
-      input.Object.Receiving.objectId = balanceManagerId;
-    }
-    patched = true;
-  }
-  if (!patched) throw new Error('tradeCapPtb placeholder BalanceManager ID not found.');
+function decodePtb(base64Ptb: string): Transaction {
+  return Transaction.from(Buffer.from(base64Ptb, 'base64').toString('utf8'));
+}
+
+/**
+ * Builds the trade-cap mint PTB locally from known-safe template parameters — mirroring
+ * rill-backend's buildMintTradeCapTransaction (mint_trade_cap, then transfer the cap to the agent).
+ *
+ * This replaces the old patchTradeCapPtb, which took the backend-supplied tradeCapPtb bytes and
+ * string/object-patched a placeholder BalanceManager ID into them before signing: that meant the
+ * signer ultimately signed backend-controlled bytes. Now the signer never signs the backend's
+ * tradeCapPtb at all — it is only ever structurally inspected (see createRunSet) — and instead
+ * constructs the transaction itself from the one object ID it just watched get created on-chain
+ * (balanceManagerId, from the setup PTB's own execution effects) plus its own address.
+ */
+function buildTradeCapPtb(deepbookPackageId: string, balanceManagerId: string, agent: string): string {
+  const tx = new Transaction();
+  const cap = tx.moveCall({
+    target: `${deepbookPackageId}::balance_manager::mint_trade_cap`,
+    arguments: [tx.object(balanceManagerId)],
+  });
+  tx.transferObjects([cap], agent);
   return Buffer.from(tx.serialize()).toString('base64');
+}
+
+/** The fixed set of MoveCall targets a setup/trade-cap onboarding PTB may contain — derived from what
+ * rill-backend/src/features/setup/setup.service.ts actually emits (buildSetupTransaction,
+ * buildMintTradeCapTransaction). Nothing else is reachable through create_run_set. */
+function onboardingAllowlistFor(
+  plan: { walletPackageId: string; deepbookPackageId: string },
+  signerAddress: string,
+  budgetCeilingMist: bigint,
+): OnboardingAllowlist {
+  return {
+    allowedTargets: [
+      `${plan.walletPackageId}::agent_wallet::create_wallet`,
+      `${plan.deepbookPackageId}::balance_manager::new`,
+      `${SUI_FRAMEWORK_PACKAGE_ID}::transfer::public_share_object`,
+      `${plan.deepbookPackageId}::balance_manager::mint_trade_cap`,
+    ],
+    allowedRecipients: [signerAddress],
+    budgetCeilingMist,
+  };
+}
+
+interface PreparedOnboardingPlan {
+  status: 'prepared';
+  signed: false;
+  reason: string;
+  plan: {
+    setupPtb: string;
+    tradeCapPtb: string;
+    runSetTemplate: RunSet;
+  };
 }
 
 async function createRunSet(
@@ -284,21 +298,38 @@ async function createRunSet(
   },
   signer: Signer,
   cfg: SignerConfig,
-): Promise<RunSet> {
+): Promise<RunSet | PreparedOnboardingPlan> {
   if (!plan.confirmed) throw new Error('Run-set creation must be confirmed.');
   if (!isRunSetTemplate(plan.runSetTemplate)) throw new Error('runSetTemplate is missing required fields.');
+  if (!signer.address) throw new Error('No local signer key configured.');
+  const signerAddress = signer.address;
 
   const onboarding = loadOnboardingConfig();
-  if (!onboarding.autoCreateRunSets) throw new Error('autoCreateRunSets is disabled in onboarding config.');
-
+  const budgetCeilingMist = BigInt(onboarding.maxAutoSetupBudgetMist);
   const budgetMist = BigInt(plan.runSetTemplate.maxAmountMist);
-  const maxBudgetMist = BigInt(onboarding.maxAutoSetupBudgetMist);
-  if (budgetMist > maxBudgetMist) {
-    throw new Error(`Run-set budget ${budgetMist} MIST exceeds maxAutoSetupBudgetMist ${maxBudgetMist}.`);
+  if (budgetMist > budgetCeilingMist) {
+    throw new Error(`Run-set budget ${budgetMist} MIST exceeds maxAutoSetupBudgetMist ${budgetCeilingMist}.`);
   }
 
-  if (!signer.address) throw new Error('No local signer key configured.');
-  const balance = await signer.client.getBalance({ owner: signer.address });
+  // R8: never sign backend-supplied bytes without structural policy inspection — unconditionally,
+  // regardless of whether the env gate below ends up allowing a signature at all.
+  const allowlist = onboardingAllowlistFor(plan, signerAddress, budgetCeilingMist);
+  inspectOnboarding(decodePtb(plan.setupPtb), allowlist);
+  inspectOnboarding(decodePtb(plan.tradeCapPtb), allowlist);
+
+  if (!isAutoOnboardingAllowed()) {
+    return {
+      status: 'prepared',
+      signed: false,
+      reason:
+        'RILL_ALLOW_AUTO_ONBOARDING is not "true" in the signer launch environment. The setup and trade-cap ' +
+        'PTBs passed structural inspection but were not signed or submitted. Relaunch the signer with ' +
+        'RILL_ALLOW_AUTO_ONBOARDING=true to allow auto-onboarding, or sign this plan through another trusted path.',
+      plan: { setupPtb: plan.setupPtb, tradeCapPtb: plan.tradeCapPtb, runSetTemplate: plan.runSetTemplate },
+    };
+  }
+
+  const balance = await signer.client.getBalance({ owner: signerAddress });
   if (BigInt(balance.balance.balance) < MIN_GAS_BALANCE_MIST) {
     throw new Error(`Signer balance too low for setup gas (need > ${MIN_GAS_BALANCE_MIST} MIST).`);
   }
@@ -308,8 +339,8 @@ async function createRunSet(
   const agentCapId = extractCreatedObjectId(setupResult.effects as never, '::agent_wallet::AgentCap');
   const balanceManagerId = extractCreatedObjectId(setupResult.effects as never, '::balance_manager::BalanceManager');
 
-  const patchedTradeCapPtb = patchTradeCapPtb(plan.tradeCapPtb, balanceManagerId);
-  const tradeCapResult = await signAndExecutePtb(patchedTradeCapPtb, signer, cfg);
+  const tradeCapPtb = buildTradeCapPtb(plan.deepbookPackageId, balanceManagerId, signerAddress);
+  const tradeCapResult = await signAndExecutePtb(tradeCapPtb, signer, cfg);
   const tradeCapId = extractCreatedObjectId(tradeCapResult.effects as never, '::balance_manager::TradeCap');
 
   const runSet: RunSet = {
@@ -350,6 +381,12 @@ function requireRuntime(runtime: WalletMcpRuntime | undefined): WalletMcpRuntime
   return runtime;
 }
 
+/** The persisted, non-privileged config plus the live (env-derived, read-only here) auto-onboarding
+ * gate — merged so callers can see whether auto-onboarding is active without being able to set it. */
+function effectiveOnboardingConfig(): OnboardingConfig & { autoCreateRunSets: boolean } {
+  return { ...loadOnboardingConfig(), autoCreateRunSets: isAutoOnboardingAllowed() };
+}
+
 export function createWalletMcpHandler(runtime?: WalletMcpRuntime) {
   let lastRejection: { code: string; message: string } | undefined;
 
@@ -380,11 +417,12 @@ export function createWalletMcpHandler(runtime?: WalletMcpRuntime) {
       }
       case 'get_onboarding_config': {
         assertOnlyArguments(args, EMPTY_ARGUMENTS);
-        return loadOnboardingConfig();
+        return effectiveOnboardingConfig();
       }
       case 'set_onboarding_config': {
-        assertOnlyArguments(args, ['autoCreateRunSets', 'maxAutoSetupBudgetMist', 'allowTestnetFaucet']);
-        return saveOnboardingConfig(args as Partial<{ autoCreateRunSets: boolean; maxAutoSetupBudgetMist: string; allowTestnetFaucet: boolean }>);
+        assertOnlyArguments(args, ['maxAutoSetupBudgetMist', 'allowTestnetFaucet']);
+        saveOnboardingConfig(args as Partial<Pick<OnboardingConfig, 'maxAutoSetupBudgetMist' | 'allowTestnetFaucet'>>);
+        return effectiveOnboardingConfig();
       }
       case 'request_faucet': {
         assertOnlyArguments(args, EMPTY_ARGUMENTS);

@@ -481,3 +481,143 @@ export async function assertCapabilitiesActive(
     }
   }
 }
+
+// ── inspectOnboarding ──────────────────────────────────────────────────────────────────────────
+//
+// A NEW, INDEPENDENT structural inspector for backend-supplied onboarding PTBs (create_run_set's
+// setupPtb / tradeCapPtb in mcp.ts). This shares ZERO code with inspect() above by design: inspect()
+// is a hardcoded validator for the one fixed DeepBook envelope sequence that validateExecutionEnvelope
+// (R9-R11) depends on, and must stay stable and untouched. Onboarding PTBs have a different, much
+// simpler shape (wallet creation, balance-manager creation, trade-cap mint), so this walks the command
+// list from scratch in the same style — rather than generalizing or reusing inspect()'s internals —
+// so neither validator can destabilize the other.
+//
+// R8: the signer must never sign backend-supplied bytes without structural policy inspection,
+// including onboarding. This function is the onboarding half of that boundary: it allows only
+// MoveCalls to an explicit target allowlist, SplitCoins/MergeCoins bookkeeping, and TransferObjects to
+// an explicit recipient allowlist (sender/agent), and it enforces a hard ceiling on the total value any
+// SplitCoins command in the PTB may carve off. Any other shape is rejected.
+
+export interface OnboardingAllowlist {
+  /** Exact Move call targets (`package::module::function`) permitted anywhere in the PTB. */
+  allowedTargets: readonly string[];
+  /** Addresses TransferObjects may send objects to — the local signer's own sender/agent address. */
+  allowedRecipients: readonly string[];
+  /** Hard ceiling, in MIST, on the sum of every SplitCoins amount in the PTB. */
+  budgetCeilingMist: bigint;
+}
+
+export interface OnboardingInspection {
+  targets: string[];
+  totalSplitMist: bigint;
+  transferRecipients: string[];
+}
+
+function onboardingMoveCallTarget(packageId: string, module: string, fn: string): string {
+  return `${normalizeSuiAddress(packageId)}::${module}::${fn}`;
+}
+
+function onboardingAllowlistTargetSet(allowedTargets: readonly string[]): Set<string> {
+  return new Set(
+    allowedTargets.map((target) => {
+      const [packageId, module, fn, extra] = target.split('::');
+      if (!packageId || !module || !fn || extra) {
+        throw new Error(`Invalid onboarding allowlist target ${target}.`);
+      }
+      return onboardingMoveCallTarget(packageId, module, fn);
+    }),
+  );
+}
+
+function onboardingInputAt(
+  inputs: ReturnType<Transaction['getData']>['inputs'],
+  argument: unknown,
+  label: string,
+) {
+  const value = argument as { $kind?: string; Input?: number };
+  if (value.$kind !== 'Input' || value.Input == null) throw new Error(`${label} is not a plain input.`);
+  const input = inputs[value.Input];
+  if (!input) throw new Error(`${label} input is missing.`);
+  return input;
+}
+
+function onboardingPureBytes(
+  inputs: ReturnType<Transaction['getData']>['inputs'],
+  argument: unknown,
+  label: string,
+): Buffer {
+  const input = onboardingInputAt(inputs, argument, label);
+  if (input.$kind !== 'Pure') throw new Error(`${label} must be a static pure value.`);
+  return Buffer.from(input.Pure.bytes, 'base64');
+}
+
+function onboardingU64(
+  inputs: ReturnType<Transaction['getData']>['inputs'],
+  argument: unknown,
+  label: string,
+): bigint {
+  const bytes = onboardingPureBytes(inputs, argument, label);
+  if (bytes.length !== 8) throw new Error(`${label} is not a u64.`);
+  return bytes.readBigUInt64LE();
+}
+
+function onboardingAddress(
+  inputs: ReturnType<Transaction['getData']>['inputs'],
+  argument: unknown,
+  label: string,
+): string {
+  const bytes = onboardingPureBytes(inputs, argument, label);
+  if (bytes.length !== 32) throw new Error(`${label} is not a 32-byte address.`);
+  return normalizeSuiAddress(`0x${bytes.toString('hex')}`);
+}
+
+/**
+ * Structurally validates a setup or trade-cap onboarding PTB against an explicit allowlist. Throws on
+ * the first violation (fail-closed); returns a summary of what it saw on success.
+ */
+export function inspectOnboarding(transaction: Transaction, allow: OnboardingAllowlist): OnboardingInspection {
+  const data = transaction.getData();
+  const allowedTargetSet = onboardingAllowlistTargetSet(allow.allowedTargets);
+  const allowedRecipientSet = new Set(allow.allowedRecipients.map((address) => normalizeSuiAddress(address)));
+
+  const targets: string[] = [];
+  const transferRecipients: string[] = [];
+  let totalSplitMist = 0n;
+
+  data.commands.forEach((command, index) => {
+    if (command.$kind === 'MoveCall') {
+      const target = onboardingMoveCallTarget(command.MoveCall.package, command.MoveCall.module, command.MoveCall.function);
+      if (!allowedTargetSet.has(target)) {
+        throw new Error(`Onboarding PTB command ${index} calls an unexpected target ${target}.`);
+      }
+      targets.push(target);
+      return;
+    }
+    if (command.$kind === 'SplitCoins') {
+      command.SplitCoins.amounts.forEach((amount, amountIndex) => {
+        totalSplitMist += onboardingU64(data.inputs, amount, `SplitCoins command ${index} amount ${amountIndex}`);
+      });
+      return;
+    }
+    if (command.$kind === 'MergeCoins') {
+      return;
+    }
+    if (command.$kind === 'TransferObjects') {
+      const recipient = onboardingAddress(data.inputs, command.TransferObjects.address, `TransferObjects command ${index} recipient`);
+      if (!allowedRecipientSet.has(recipient)) {
+        throw new Error(`Onboarding PTB command ${index} transfers to an unexpected address ${recipient}.`);
+      }
+      transferRecipients.push(recipient);
+      return;
+    }
+    throw new Error(`Onboarding PTB command ${index} has an unsupported kind ${command.$kind}.`);
+  });
+
+  if (totalSplitMist > allow.budgetCeilingMist) {
+    throw new Error(
+      `Onboarding PTB splits ${totalSplitMist} MIST total, exceeding the ${allow.budgetCeilingMist} MIST budget ceiling.`,
+    );
+  }
+
+  return { targets, totalSplitMist, transferRecipients };
+}

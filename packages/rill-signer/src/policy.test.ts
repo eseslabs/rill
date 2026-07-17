@@ -1,11 +1,14 @@
 import { expect, test } from 'bun:test';
 import { Transaction } from '@mysten/sui/transactions';
+import { normalizeSuiAddress } from '@mysten/sui/utils';
 import { digestUnsignedPtb } from '../../rill-sdk/src/execution-envelope';
 import type { ExecutionEnvelope } from '../../rill-sdk/src/types';
 import {
   assertCapabilitiesActive,
+  inspectOnboarding,
   validateExecutionEnvelope,
   type LocalSignerPolicy,
+  type OnboardingAllowlist,
 } from './policy';
 
 const id = (n: number) => `0x${n.toString(16).padStart(64, '0')}`;
@@ -564,4 +567,145 @@ test('wallet unable to cover the spend is rejected before signing', async () => 
     policy,
     BigInt(policy.minimumRemainingMist) + 1n,
   )).rejects.toThrow('cannot cover');
+});
+
+// ── inspectOnboarding ──
+//
+// Independent from inspect() above (zero shared code, by design — see policy.ts). These fixtures
+// mirror the exact PTB shapes rill-backend/src/features/setup/setup.service.ts emits:
+// buildSetupTransaction (create_wallet + balance_manager::new + transfer::public_share_object) and
+// buildMintTradeCapTransaction (balance_manager::mint_trade_cap + transferObjects to the agent).
+
+const onboardingWalletPackageId = id(101);
+const onboardingDeepbookPackageId = id(102);
+const onboardingSigner = id(103);
+const onboardingForeignAddress = id(104);
+const onboardingBalanceManagerId = id(105);
+const SUI_TYPE = '0x2::sui::SUI';
+
+function onboardingAllow(overrides: Partial<OnboardingAllowlist> = {}): OnboardingAllowlist {
+  return {
+    allowedTargets: [
+      `${onboardingWalletPackageId}::agent_wallet::create_wallet`,
+      `${onboardingDeepbookPackageId}::balance_manager::new`,
+      '0x2::transfer::public_share_object',
+      `${onboardingDeepbookPackageId}::balance_manager::mint_trade_cap`,
+    ],
+    allowedRecipients: [onboardingSigner],
+    budgetCeilingMist: 2_000_000_000n,
+    ...overrides,
+  };
+}
+
+function buildOnboardingSetupTx(options: {
+  createWalletTarget?: string;
+  budgetMist?: bigint;
+  appendForeignTransfer?: boolean;
+} = {}): Transaction {
+  const tx = new Transaction();
+  tx.setSender(onboardingSigner);
+  const budgetMist = options.budgetMist ?? 1_000_000_000n;
+  const [funds] = tx.splitCoins(tx.gas, [budgetMist]);
+  tx.moveCall({
+    target: options.createWalletTarget ?? `${onboardingWalletPackageId}::agent_wallet::create_wallet`,
+    typeArguments: [SUI_TYPE],
+    arguments: [
+      funds,
+      tx.pure.address(onboardingSigner),
+      tx.pure.u64(1_000_000_000n),
+      tx.pure.u64(9_999_999_999_999n),
+      tx.pure.vector('address', [onboardingDeepbookPackageId]),
+    ],
+  });
+  const manager = tx.moveCall({ target: `${onboardingDeepbookPackageId}::balance_manager::new` });
+  tx.moveCall({
+    target: '0x2::transfer::public_share_object',
+    typeArguments: [`${onboardingDeepbookPackageId}::balance_manager::BalanceManager`],
+    arguments: [manager],
+  });
+  if (options.appendForeignTransfer) {
+    const [leftover] = tx.splitCoins(tx.gas, [1n]);
+    tx.transferObjects([leftover], onboardingForeignAddress);
+  }
+  return tx;
+}
+
+function buildOnboardingTradeCapTx(options: { balanceManagerId?: string; transferTo?: string } = {}): Transaction {
+  const tx = new Transaction();
+  tx.setSender(onboardingSigner);
+  const cap = tx.moveCall({
+    target: `${onboardingDeepbookPackageId}::balance_manager::mint_trade_cap`,
+    arguments: [tx.object(options.balanceManagerId ?? onboardingBalanceManagerId)],
+  });
+  tx.transferObjects([cap], options.transferTo ?? onboardingSigner);
+  return tx;
+}
+
+test('inspectOnboarding accepts a legitimate setup PTB shaped like the backend setup service emits', () => {
+  const inspected = inspectOnboarding(buildOnboardingSetupTx(), onboardingAllow());
+  expect(inspected.targets).toEqual([
+    `${onboardingWalletPackageId}::agent_wallet::create_wallet`,
+    `${onboardingDeepbookPackageId}::balance_manager::new`,
+    `${normalizeSuiAddress('0x2')}::transfer::public_share_object`,
+  ]);
+  expect(inspected.totalSplitMist).toBe(1_000_000_000n);
+  expect(inspected.transferRecipients).toEqual([]);
+});
+
+test('inspectOnboarding accepts a legitimate trade-cap PTB', () => {
+  const inspected = inspectOnboarding(buildOnboardingTradeCapTx(), onboardingAllow());
+  expect(inspected.targets).toEqual([`${onboardingDeepbookPackageId}::balance_manager::mint_trade_cap`]);
+  expect(inspected.transferRecipients).toEqual([onboardingSigner]);
+  expect(inspected.totalSplitMist).toBe(0n);
+});
+
+test('inspectOnboarding rejects an unexpected MoveCall target', () => {
+  const hostile = buildOnboardingSetupTx({ createWalletTarget: `${id(999)}::evil::drain` });
+  expect(() => inspectOnboarding(hostile, onboardingAllow())).toThrow(/unexpected target/);
+});
+
+test('inspectOnboarding rejects a transfer to a foreign address appended to a setup PTB', () => {
+  const hostile = buildOnboardingSetupTx({ appendForeignTransfer: true });
+  expect(() => inspectOnboarding(hostile, onboardingAllow())).toThrow(/unexpected address/);
+});
+
+test('inspectOnboarding rejects a trade-cap PTB that transfers to a foreign address', () => {
+  const hostile = buildOnboardingTradeCapTx({ transferTo: onboardingForeignAddress });
+  expect(() => inspectOnboarding(hostile, onboardingAllow())).toThrow(/unexpected address/);
+});
+
+test('inspectOnboarding rejects a split total above the budget ceiling', () => {
+  const hostile = buildOnboardingSetupTx({ budgetMist: 3_000_000_000n });
+  expect(() => inspectOnboarding(hostile, onboardingAllow({ budgetCeilingMist: 2_000_000_000n })))
+    .toThrow(/budget ceiling/);
+});
+
+test('inspectOnboarding accepts a split total exactly at the budget ceiling', () => {
+  const atCeiling = buildOnboardingSetupTx({ budgetMist: 2_000_000_000n });
+  expect(() => inspectOnboarding(atCeiling, onboardingAllow({ budgetCeilingMist: 2_000_000_000n })))
+    .not.toThrow();
+});
+
+test('inspectOnboarding rejects an unsupported command kind (e.g. Publish)', () => {
+  const tx = new Transaction();
+  tx.setSender(onboardingSigner);
+  tx.publish({ modules: [], dependencies: [] });
+  expect(() => inspectOnboarding(tx, onboardingAllow())).toThrow(/unsupported/);
+});
+
+test('inspectOnboarding rejects a split amount that is not a static pure value', () => {
+  const tx = new Transaction();
+  tx.setSender(onboardingSigner);
+  const manager = tx.moveCall({ target: `${onboardingDeepbookPackageId}::balance_manager::new` });
+  // A hostile PTB could try to size a split from a runtime result instead of a static amount, to
+  // dodge the budget-ceiling check entirely.
+  tx.splitCoins(tx.gas, [manager]);
+  expect(() => inspectOnboarding(tx, onboardingAllow())).toThrow();
+});
+
+test('inspectOnboarding rejects an off-allowlist target even when the package ID is otherwise valid', () => {
+  const hostile = buildOnboardingSetupTx({
+    createWalletTarget: `${onboardingWalletPackageId}::agent_wallet::spend`,
+  });
+  expect(() => inspectOnboarding(hostile, onboardingAllow())).toThrow(/unexpected target/);
 });
