@@ -1,3 +1,14 @@
+import type {
+  DeepBookResolvedParams,
+  ExecutionEnvelope,
+  StrictSimulationResult,
+} from './envelope.schema';
+
+// Re-exported so `ExecutionEnvelope` and friends keep resolving from `./types` for existing
+// importers. The schema in `./envelope.schema` is the single canonical definition (KTD-4); these
+// are `z.infer` types, not hand-written interfaces.
+export type { DeepBookResolvedParams, ExecutionEnvelope, StrictSimulationResult };
+
 export interface FlowEdge {
   source: string;
   sourceHandle: string;
@@ -54,57 +65,7 @@ export interface ResolvedManifest {
 
 export type RillNetwork = 'testnet' | 'mainnet';
 
-export interface StrictSimulationResult {
-  ok: boolean;
-  verification: 'verified' | 'unverified';
-  error?: string;
-  gasEstimate: number;
-  balanceChanges: {
-    owner: string;
-    coinType: string;
-    amount: string;
-  }[];
-  objectChanges: {
-    type: 'mutated' | 'created' | 'deleted';
-    objectId: string;
-    objectType: string;
-  }[];
-}
-
 export type SimulationResult = StrictSimulationResult;
-
-export interface DeepBookResolvedParams {
-  poolKey: string;
-  poolId: string;
-  price: number;
-  quantity: number;
-  isBid: boolean;
-  payWithDeep: boolean;
-  clientOrderId: string;
-  depositSui: number;
-  spendAmountMist: string;
-}
-
-export interface ExecutionEnvelope {
-  version: '1';
-  actionId: string;
-  actionDigest: string;
-  network: RillNetwork;
-  sender: string;
-  walletPackageId: string;
-  walletId: string;
-  agentCapId: string;
-  balanceManagerId: string;
-  tradeCapId: string;
-  resolvedParams: DeepBookResolvedParams;
-  allowedTargets: string[];
-  requiredObjectIds: string[];
-  requiredGuards: string[];
-  unsignedPtb: string;
-  preview: string;
-  simulation: StrictSimulationResult;
-  expiresAt: string;
-}
 
 export interface JsonSchema {
   type: string;
