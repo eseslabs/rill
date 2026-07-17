@@ -8,8 +8,8 @@ export interface PoolTypeArgs {
 
 /** Parse `Pool<T0, T1>` from on-chain pool object type. */
 export async function resolvePoolTypeArgs(poolId: string): Promise<PoolTypeArgs> {
-  const obj = await suiClient.getObject({ id: poolId, options: { showType: true } });
-  const poolType = obj.data?.type;
+  const obj = await suiClient.getObject({ objectId: poolId });
+  const poolType = obj.object.type;
   if (!poolType) {
     throw new Error(`Pool object ${poolId} not found on ${process.env.SUI_NETWORK || 'mainnet'}`);
   }

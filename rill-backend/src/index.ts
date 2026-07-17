@@ -14,14 +14,24 @@ const app = new Hono();
 app.use('*', logger());
 // Public, keyless API consumed by agents/MCP clients from anywhere → wildcard origin, NO credentials
 // (wildcard + credentials is invalid per the CORS spec and rejected by browsers).
-app.use('*', cors({
-  origin: '*',
-  allowMethods: ['GET', 'POST', 'OPTIONS'],
-  allowHeaders: ['Content-Type'],
-  maxAge: 600,
-}));
+app.use(
+  '*',
+  cors({
+    origin: '*',
+    allowMethods: ['GET', 'POST', 'OPTIONS'],
+    allowHeaders: ['Content-Type'],
+    maxAge: 600,
+  }),
+);
 // Cap request bodies — flows/PTBs are small; reject oversized payloads early (DoS guard).
-app.use('*', bodyLimit({ maxSize: 512 * 1024, onError: (c) => c.json({ success: false, error: 'Request body too large (max 512KB).' }, 413) }));
+app.use(
+  '*',
+  bodyLimit({
+    maxSize: 512 * 1024,
+    onError: (c) =>
+      c.json({ success: false, error: 'Request body too large (max 512KB).' }, 413),
+  }),
+);
 
 const swagger = swaggerUI({ url: '/api/openapi.json' });
 
@@ -33,12 +43,15 @@ app.get('/health', (c) =>
     network: config.network,
     apiBase: `${config.publicBaseUrl}/api`,
     docs: config.publicBaseUrl,
-    keyless: !config.devSignEnabled,
-    devSignEnabled: config.devSignEnabled,
+    keyless: true,
     agentWalletConfigured: Boolean(config.agentWallet),
-    walrus: config.walrusEnabled,
+    walrus: {
+      readEndpoint: '/api/audit/:blobId',
+      availability: 'unchecked',
+      uploadsEnabled: false,
+    },
     description:
-      'Keyless Move flow compiler for Sui — builds unsigned PTBs, simulates, and serves MCP tools. Thiny signs.',
+      'Keyless Move flow compiler for Sui - builds and simulates unsigned PTBs; signing is local.',
   }),
 );
 

@@ -24,13 +24,13 @@ async function sourceCoinFromSender(
   let total = 0n;
   let cursor: string | null | undefined = undefined;
   do {
-    const page = await suiClient.getCoins({ owner: sender, coinType, cursor: cursor ?? null });
-    for (const c of page.data) {
-      ids.push(c.coinObjectId);
+    const page = await suiClient.listCoins({ owner: sender, coinType, cursor: cursor ?? null });
+    for (const c of page.objects) {
+      ids.push(c.objectId);
       total += BigInt(c.balance);
       if (total >= amount) break;
     }
-    cursor = total >= amount || !page.hasNextPage ? null : page.nextCursor;
+    cursor = total >= amount || !page.hasNextPage ? null : page.cursor;
   } while (cursor);
 
   if (ids.length === 0 || total < amount) {

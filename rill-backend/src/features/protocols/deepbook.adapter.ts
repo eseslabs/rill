@@ -1,75 +1,71 @@
-import { DeepBookClient } from '@mysten/deepbook-v3';
+import {
+  DeepBookClient,
+  mainnetPackageIds,
+  testnetPackageIds,
+} from '@mysten/deepbook-v3';
+import { SUI_COIN_TYPE } from '../../core/agent-wallet';
 import { config, suiClient } from '../../core/config';
-import { resolveDeepbookOrderConfig } from '../../core/node-config';
 import { ValidationError } from '../../core/errors';
-import type { AdapterCtx, ProtocolAdapter } from './types';
+import { resolveDeepbookOrderConfig } from '../../core/node-config';
+import type { AdapterCtx, FlowGraph, FlowNode, ProtocolAdapter } from './types';
 
-/**
- * DeepBook v3 limit order. Uses the official SDK builders (`(tx) => void`) composed into the same PTB
- * — PTB-safe, no signing in the backend. The BalanceManager is pre-funded during onboarding, so the
- * order draws from its internal balance (no root SUI funding here). Owner-proof requires the tx sender
- * to equal the BalanceManager owner; for delegated agents, pass `tradeCapId` (trade, not withdraw).
- */
+const toMist = (sui: number) => BigInt(Math.round(sui * 1_000_000_000));
+
 export const deepbookAdapter: ProtocolAdapter = {
   nodeType: 'deepbook_limit_order',
 
-  rootSuiFunding(): bigint {
-    return 0n; // BalanceManager is funded via onboarding, not from the flow's root coin
+  rootSuiFunding(node: FlowNode, _flow: FlowGraph): bigint {
+    return toMist(resolveDeepbookOrderConfig(node).config.depositSui);
   },
 
   async build(ctx: AdapterCtx): Promise<void> {
-    const { tx, node, options, warnings } = ctx;
-    const { config: order } = resolveDeepbookOrderConfig(node);
-
-    // No BalanceManager yet → provision one (the user's DeepBook "account"). DeepBook requires a shared
-    // BalanceManager to exist before any order can reference it, so creation is its own transaction —
-    // create + share here; deposits/orders reuse its id afterwards. The user passes nothing.
+    const { tx, node, options, fundSuiCoin } = ctx;
+    const order = resolveDeepbookOrderConfig(node).config;
+    if (!options.agentWallet) {
+      throw new ValidationError(`Node ${node.id}: DeepBook hero path requires an AgentWallet binding.`);
+    }
+    if (options.agentWallet.coinType !== SUI_COIN_TYPE) {
+      throw new ValidationError(`Node ${node.id}: DeepBook hero path requires AgentWallet<SUI>.`);
+    }
     if (!order.balanceManagerId) {
-      const provisioner = new DeepBookClient({
-        client: suiClient as never,
-        address: options.sender ?? '0x0',
-        network: config.network,
-      });
-      provisioner.balanceManager.createAndShareBalanceManager()(tx);
-      warnings.push(
-        `Node ${node.id}: no BalanceManager set — this transaction provisions one (create + share). ` +
-          `Reuse the new BalanceManager id to fund it and place orders.`,
-      );
-      return;
+      throw new ValidationError(`Node ${node.id}: pre-provisioned BalanceManager is required.`);
     }
-
-    // Order path: now the order params are required.
+    if (!order.tradeCapId) {
+      throw new ValidationError(`Node ${node.id}: delegated TradeCap is required.`);
+    }
     if (!order.poolKey || order.price == null || order.quantity == null) {
-      throw new ValidationError(`Node ${node.id}: DeepBook order requires poolKey, price, and quantity.`);
+      throw new ValidationError(`Node ${node.id}: poolKey, price, and quantity are required.`);
     }
 
-    const db = new DeepBookClient({
-      // SuiJsonRpcClient implements the core read API the SDK needs (read-only here; we only build).
+    const spendAmountMist = toMist(order.depositSui);
+    if (spendAmountMist <= 0n) {
+      throw new ValidationError(`Node ${node.id}: depositSui must be positive.`);
+    }
+    const packageIds = config.network === 'testnet' ? testnetPackageIds : mainnetPackageIds;
+    const walletCoin = fundSuiCoin(spendAmountMist);
+
+    tx.moveCall({
+      target: `${packageIds.DEEPBOOK_PACKAGE_ID}::balance_manager::deposit`,
+      typeArguments: [SUI_COIN_TYPE],
+      arguments: [tx.object(order.balanceManagerId), walletCoin as never],
+    });
+
+    const deepbook = new DeepBookClient({
       client: suiClient as never,
       address: options.sender ?? '0x0',
       network: config.network,
       balanceManagers: {
-        NODE: { address: order.balanceManagerId, tradeCap: order.tradeCapId },
+        HERO: { address: order.balanceManagerId, tradeCap: order.tradeCapId },
       },
     });
-
-    // Self-funding: deposit SUI into the BalanceManager from the sender's coins before the order, so the
-    // order doesn't need a separately pre-funded BM. (Future: route this through agent_wallet::spend.)
-    if (order.depositSui > 0) {
-      db.balanceManager.depositIntoManager('NODE', 'SUI', order.depositSui)(tx);
-    }
-
-    // Appends place_limit_order (+ the trade proof) to our PTB. The agent signs it later (keyless backend).
-    db.deepBook.placeLimitOrder({
+    deepbook.deepBook.placeLimitOrder({
       poolKey: order.poolKey,
-      balanceManagerKey: 'NODE',
+      balanceManagerKey: 'HERO',
       clientOrderId: order.clientOrderId,
       price: order.price,
       quantity: order.quantity,
       isBid: order.isBid,
       payWithDeep: order.payWithDeep,
     })(tx);
-
-    return Promise.resolve();
   },
 };

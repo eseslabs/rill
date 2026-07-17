@@ -2,17 +2,19 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname } from 'node:path';
 import type { FlowGraph } from '../compiler/compiler.service';
 import { config } from '../../core/config';
+import {
+  buildToolDefs,
+  HERO_ACTION_DESCRIPTION,
+  HERO_ACTION_NAME,
+  isHeroActionFlow,
+} from './tool-schema';
 
 export interface PublishedSkill {
   id: string;
   name: string;
   description: string;
   flow: FlowGraph;
-  toolDefs: {
-    name: string;
-    description: string;
-    inputSchema: Record<string, unknown>;
-  };
+  toolDefs: ReturnType<typeof buildToolDefs>;
   policyId?: string;
   createdAt: string;
 }
@@ -35,7 +37,15 @@ class SkillsStore {
     try {
       if (!existsSync(this.path)) return;
       const raw = JSON.parse(readFileSync(this.path, 'utf8')) as PublishedSkill[];
-      for (const s of raw) this.skills.set(s.id, s);
+      for (const skill of raw) {
+        if (!isHeroActionFlow(skill.flow)) continue;
+        this.skills.set(skill.id, {
+          ...skill,
+          name: HERO_ACTION_NAME,
+          description: HERO_ACTION_DESCRIPTION,
+          toolDefs: buildToolDefs(skill.flow, skill.id),
+        });
+      }
       console.log(`[skills] loaded ${this.skills.size} published skill(s) from ${this.path}`);
     } catch (err) {
       console.error(`[skills] failed to load ${this.path} — starting empty:`, (err as Error).message);

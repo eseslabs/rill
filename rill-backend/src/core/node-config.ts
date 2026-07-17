@@ -1,4 +1,6 @@
+import { ValidationError } from './errors';
 import { CETUS, HAEDAL, SUI_CLOCK_ID } from './protocols';
+import type { FlowGraph, FlowNode } from '../features/protocols/types';
 
 export interface CetusSwapNodeConfig {
   integratePackageId: string;
@@ -22,34 +24,121 @@ export interface HaedalStakeNodeConfig {
   minStakeMist: string;
 }
 
-function pick(node: { config?: Record<string, unknown>; inputs?: Record<string, unknown> }, key: string): unknown {
-  return node.config?.[key] ?? node.inputs?.[key];
+const RUNTIME_KEYS: Record<string, readonly string[]> = {
+  cetus_swap: ['amount_in', 'min_amount_out'],
+  haedal_stake: ['amount'],
+  deepbook_limit_order: [
+    'poolKey',
+    'balanceManagerId',
+    'tradeCapId',
+    'price',
+    'quantity',
+    'isBid',
+    'payWithDeep',
+    'clientOrderId',
+    'depositSui',
+  ],
+};
+
+const FLOW_INPUT_KEYS: Record<string, readonly string[]> = {
+  ...RUNTIME_KEYS,
+  cetus_swap: [...RUNTIME_KEYS.cetus_swap, 'pool'],
+};
+
+function selectAllowedEntries(
+  source: Record<string, unknown> | undefined,
+  allowedKeys: readonly string[],
+): Record<string, unknown> {
+  if (!source || allowedKeys.length === 0) {
+    return {};
+  }
+
+  return Object.fromEntries(Object.entries(source).filter(([key]) => allowedKeys.includes(key)));
+}
+
+function fallbackString(
+  node: FlowNode,
+  warnings: string[],
+  key: string,
+  fallbackValue: string,
+): string {
+  const value = pick(node, key);
+  if (value == null || value === '') {
+    warnings.push(`Node ${node.id}: config.${key} missing — using server default`);
+    return fallbackValue;
+  }
+
+  return String(value);
+}
+
+function isTrueLike(value: unknown): boolean {
+  return value === true || value === 'true';
+}
+
+export function resolveEffectiveFlow(
+  flow: FlowGraph,
+  runtimeParams: Record<string, unknown> = {},
+): FlowGraph {
+  const runtimeParamKeys = Object.keys(runtimeParams);
+
+  for (const key of runtimeParamKeys) {
+    const matchesFlow = flow.nodes.some((node) => RUNTIME_KEYS[node.type]?.includes(key));
+    if (!matchesFlow) {
+      throw new ValidationError(
+        `Runtime parameter "${key}" does not match an allowed runtime key for any node in this flow.`,
+      );
+    }
+  }
+
+  for (const [nodeType, runtimeKeys] of Object.entries(RUNTIME_KEYS)) {
+    if (!runtimeParamKeys.some((key) => runtimeKeys.includes(key))) continue;
+    const matchingNodes = flow.nodes.filter((node) => node.type === nodeType).length;
+    if (matchingNodes > 1) {
+      throw new ValidationError(
+        `Flat runtime params for "${nodeType}" require one matching node; found ${matchingNodes}.`,
+      );
+    }
+  }
+
+  return {
+    edges: flow.edges.map((edge) => ({ ...edge })),
+    nodes: flow.nodes.map((node) => {
+      const runtimeKeys = RUNTIME_KEYS[node.type] ?? [];
+      const flowInputKeys = FLOW_INPUT_KEYS[node.type] ?? [];
+
+      return {
+        ...node,
+        config: {
+          ...(node.config ?? {}),
+          ...selectAllowedEntries(node.inputs, flowInputKeys),
+          ...selectAllowedEntries(runtimeParams, runtimeKeys),
+        },
+        inputs: undefined,
+      };
+    }),
+  };
+}
+
+function pick(node: FlowNode, key: string): unknown {
+  return node.config?.[key];
 }
 
 /** Resolve Cetus swap params — FE should pass full config; server defaults are fallback only. */
 export function resolveCetusSwapConfig(
-  node: { id: string; config?: Record<string, unknown>; inputs?: Record<string, unknown> },
+  node: FlowNode,
 ): { config: CetusSwapNodeConfig; warnings: string[] } {
   const warnings: string[] = [];
-  const fallback = (key: string, value: string) => {
-    const v = pick(node, key);
-    if (v == null || v === '') {
-      warnings.push(`Node ${node.id}: config.${key} missing — using server default`);
-      return value;
-    }
-    return String(v);
-  };
 
   return {
     config: {
-      integratePackageId: fallback('integratePackageId', CETUS.integratePackageId),
-      globalConfigId: fallback('globalConfigId', CETUS.globalConfigId),
-      pool: fallback('pool', CETUS.defaultPoolId),
-      inputCoinType: fallback('inputCoinType', CETUS.defaultInputCoinType),
-      amount_in: fallback('amount_in', '0'),
-      min_amount_out: fallback('min_amount_out', '1'),
-      minSqrtPrice: fallback('minSqrtPrice', CETUS.minSqrtPrice),
-      maxSqrtPrice: fallback('maxSqrtPrice', CETUS.maxSqrtPrice),
+      integratePackageId: fallbackString(node, warnings, 'integratePackageId', CETUS.integratePackageId),
+      globalConfigId: fallbackString(node, warnings, 'globalConfigId', CETUS.globalConfigId),
+      pool: fallbackString(node, warnings, 'pool', CETUS.defaultPoolId),
+      inputCoinType: fallbackString(node, warnings, 'inputCoinType', CETUS.defaultInputCoinType),
+      amount_in: fallbackString(node, warnings, 'amount_in', '0'),
+      min_amount_out: fallbackString(node, warnings, 'min_amount_out', '1'),
+      minSqrtPrice: fallbackString(node, warnings, 'minSqrtPrice', CETUS.minSqrtPrice),
+      maxSqrtPrice: fallbackString(node, warnings, 'maxSqrtPrice', CETUS.maxSqrtPrice),
       by_amount_in: pick(node, 'by_amount_in') !== false,
       sqrt_price_limit: pick(node, 'sqrt_price_limit') as string | undefined,
     },
@@ -58,26 +147,18 @@ export function resolveCetusSwapConfig(
 }
 
 export function resolveHaedalStakeConfig(
-  node: { id: string; config?: Record<string, unknown>; inputs?: Record<string, unknown> },
+  node: FlowNode,
 ): { config: HaedalStakeNodeConfig; warnings: string[] } {
   const warnings: string[] = [];
-  const fallback = (key: string, value: string) => {
-    const v = pick(node, key);
-    if (v == null || v === '') {
-      warnings.push(`Node ${node.id}: config.${key} missing — using server default`);
-      return value;
-    }
-    return String(v);
-  };
 
   return {
     config: {
-      stakeTarget: fallback('stakeTarget', HAEDAL.stakeTarget),
-      suiSystemStateId: fallback('suiSystemStateId', HAEDAL.suiSystemStateId),
-      stakingObjectId: fallback('stakingObjectId', HAEDAL.stakingObjectId),
-      amount: fallback('amount', '0'),
+      stakeTarget: fallbackString(node, warnings, 'stakeTarget', HAEDAL.stakeTarget),
+      suiSystemStateId: fallbackString(node, warnings, 'suiSystemStateId', HAEDAL.suiSystemStateId),
+      stakingObjectId: fallbackString(node, warnings, 'stakingObjectId', HAEDAL.stakingObjectId),
+      amount: fallbackString(node, warnings, 'amount', '0'),
       validator: (pick(node, 'validator') as string | undefined) ?? '0x0',
-      minStakeMist: fallback('minStakeMist', HAEDAL.minStakeMist.toString()),
+      minStakeMist: fallbackString(node, warnings, 'minStakeMist', HAEDAL.minStakeMist.toString()),
     },
     warnings,
   };
@@ -104,7 +185,7 @@ export interface DeepbookOrderNodeConfig {
  * order params only on the order path. This keeps simulate/compile from erroring before onboarding.
  */
 export function resolveDeepbookOrderConfig(
-  node: { id: string; config?: Record<string, unknown>; inputs?: Record<string, unknown> },
+  node: FlowNode,
 ): { config: DeepbookOrderNodeConfig; warnings: string[] } {
   const str = (key: string): string | undefined => {
     const v = pick(node, key);
@@ -122,8 +203,8 @@ export function resolveDeepbookOrderConfig(
       tradeCapId: str('tradeCapId'),
       price: num('price'),
       quantity: num('quantity'),
-      isBid: pick(node, 'isBid') === true || pick(node, 'isBid') === 'true',
-      payWithDeep: pick(node, 'payWithDeep') === true || pick(node, 'payWithDeep') === 'true',
+      isBid: isTrueLike(pick(node, 'isBid')),
+      payWithDeep: isTrueLike(pick(node, 'payWithDeep')),
       clientOrderId: String(pick(node, 'clientOrderId') ?? '1'),
       depositSui: Number(pick(node, 'depositSui') ?? 0) || 0,
     },

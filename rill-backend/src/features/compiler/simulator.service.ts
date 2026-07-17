@@ -2,23 +2,46 @@ import { suiClient } from '../../core/config';
 import { DEFAULT_SIMULATE_SENDER } from '../../core/protocols';
 import { isCetusDevInspectVersionAbort } from './pool-resolver';
 import { Transaction } from '@mysten/sui/transactions';
+import type { SuiClientTypes } from '@mysten/sui/client';
+import type { StrictSimulationResult } from '../../../../packages/rill-sdk/src/types';
 
-export interface SimulationResult {
-  ok: boolean;
-  error?: string;
-  gasEstimate: number;
-  balanceChanges: {
-    owner: string;
-    coinType: string;
-    amount: string;
-  }[];
-  objectChanges: {
-    type: 'mutated' | 'created' | 'deleted';
-    objectId: string;
-    objectType: string;
-  }[];
-  /** Set when devInspect is unreliable but PTB is likely valid on mainnet. */
-  simulatedViaFallback?: boolean;
+export type SimulationResult = StrictSimulationResult;
+
+type UnclassifiedSimulation = Omit<SimulationResult, 'verification'>;
+
+export function classifySimulation(result: UnclassifiedSimulation): SimulationResult {
+  return {
+    ...result,
+    verification:
+      !result.ok && isCetusDevInspectVersionAbort(result.error) ? 'unverified' : 'verified',
+  };
+}
+
+type SimulatedTransaction = SuiClientTypes.Transaction<{
+  effects: true;
+  balanceChanges: true;
+  objectTypes: true;
+}>;
+
+type ChangedObject = SuiClientTypes.TransactionEffects['changedObjects'][number];
+
+function classifyObjectChange(change: ChangedObject, objectTypes: Record<string, string> | undefined):
+  | { type: 'mutated' | 'created' | 'deleted'; objectId: string; objectType: string }
+  | null {
+  const objectId = change.objectId;
+  if (!objectId) return null;
+
+  if (change.idOperation === 'Created') {
+    return { type: 'created', objectId, objectType: objectTypes?.[objectId] ?? '' };
+  }
+  if (change.idOperation === 'Deleted') {
+    return { type: 'deleted', objectId, objectType: objectTypes?.[objectId] ?? '' };
+  }
+  // Mutated objects have idOperation 'None' but were written to output state.
+  if (change.idOperation === 'None' && change.outputState !== 'DoesNotExist') {
+    return { type: 'mutated', objectId, objectType: objectTypes?.[objectId] ?? '' };
+  }
+  return null;
 }
 
 export class SimulatorService {
@@ -27,16 +50,16 @@ export class SimulatorService {
     tx.setSenderIfNotSet(simulateSender);
 
     try {
-      const response = await suiClient.devInspectTransactionBlock({
-        sender: simulateSender,
-        transactionBlock: tx,
+      const response = await suiClient.simulateTransaction({
+        transaction: tx,
+        include: { effects: true, balanceChanges: true, objectTypes: true } as SuiClientTypes.SimulateTransactionInclude,
       });
 
-      const parsed = this.parseDevInspect(response);
-      return this.applyCetusFallback(parsed);
+      const parsed = this.parseSimulation(response);
+      return classifySimulation(parsed);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unknown RPC simulation error';
-      return this.applyCetusFallback({
+      return classifySimulation({
         ok: false,
         error: message,
         gasEstimate: 0,
@@ -46,49 +69,32 @@ export class SimulatorService {
     }
   }
 
-  /** Cetus CLMM stub fails checked_package_version in devInspect; mainnet execute still works. */
-  private applyCetusFallback(result: SimulationResult): SimulationResult {
-    if (result.ok || !isCetusDevInspectVersionAbort(result.error)) {
-      return result;
-    }
+  private parseSimulation(
+    response: Awaited<ReturnType<typeof suiClient.simulateTransaction>>,
+  ): UnclassifiedSimulation {
+    const tx = (
+      response.$kind === 'Transaction' ? response.Transaction : response.FailedTransaction
+    ) as SimulatedTransaction;
+    const ok = response.$kind === 'Transaction' && tx.status.success;
+    const error = ok ? undefined : tx.status.error?.message;
 
-    return {
-      ...result,
-      ok: true,
-      simulatedViaFallback: true,
-      error: undefined,
-      gasEstimate: result.gasEstimate || 2_500_000,
-    };
-  }
-
-  private parseDevInspect(response: Awaited<ReturnType<typeof suiClient.devInspectTransactionBlock>>): SimulationResult {
-    const res = response as Record<string, unknown>;
-    const ok = response.effects.status.status === 'success';
-    const error = ok ? undefined : response.effects.status.error;
-
-    const computationCost = parseInt(response.effects.gasUsed.computationCost, 10);
-    const storageCost = parseInt(response.effects.gasUsed.storageCost, 10);
-    const storageRebate = parseInt(response.effects.gasUsed.storageRebate, 10);
+    const effects = tx.effects;
+    const computationCost = parseInt(effects.gasUsed.computationCost, 10);
+    const storageCost = parseInt(effects.gasUsed.storageCost, 10);
+    const storageRebate = parseInt(effects.gasUsed.storageRebate, 10);
     const gasEstimate = computationCost + Math.max(0, storageCost - storageRebate);
 
-    const balanceChanges = ((res.balanceChanges as Array<Record<string, unknown>>) || []).map((change) => ({
-      owner:
-        typeof change.owner === 'object' &&
-        change.owner &&
-        'AddressOwner' in (change.owner as object)
-          ? String((change.owner as { AddressOwner: string }).AddressOwner)
-          : JSON.stringify(change.owner),
-      coinType: String(change.coinType),
-      amount: String(change.amount),
+    const balanceChanges = (tx.balanceChanges ?? []).map((change) => ({
+      owner: change.address,
+      coinType: change.coinType,
+      amount: change.amount,
     }));
 
-    const objectChanges = ((res.objectChanges as Array<Record<string, unknown>>) || [])
-      .map((change) => ({
-        type: change.type as 'mutated' | 'created' | 'deleted',
-        objectId: String(change.objectId || ''),
-        objectType: String(change.objectType || ''),
-      }))
-      .filter((c) => c.objectId);
+    const objectTypes = tx.objectTypes;
+    const objectChanges = (effects.changedObjects ?? []).flatMap((change) => {
+      const classified = classifyObjectChange(change, objectTypes);
+      return classified ? [classified] : [];
+    });
 
     return { ok, error, gasEstimate, balanceChanges, objectChanges };
   }

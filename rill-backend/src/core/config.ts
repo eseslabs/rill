@@ -1,11 +1,13 @@
-import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from '@mysten/sui/jsonRpc';
+import { SuiGrpcClient } from '@mysten/sui/grpc';
 import dotenv from 'dotenv';
 import { loadAgentWalletFromEnv } from './agent-wallet';
 
 dotenv.config();
 
 const network = (process.env.SUI_NETWORK || 'mainnet') as 'mainnet' | 'testnet';
-const DEFAULT_RPC = getJsonRpcFullnodeUrl(network);
+const DEFAULT_RPC = network === 'testnet'
+  ? 'https://fullnode.testnet.sui.io:443'
+  : 'https://fullnode.mainnet.sui.io:443';
 
 // Rill's own deployed contracts, keyed by network (like an SDK ships known addresses). Env overrides.
 // Mainnet intentionally has no default — deploy + set RILL_GUARD_PACKAGE_ID before going live there.
@@ -17,10 +19,8 @@ export const config = {
   port: parseInt(process.env.PORT || '3000', 10),
   network,
   suiRpcUrl: process.env.SUI_RPC_URL || DEFAULT_RPC,
-  mainnetRpcUrl: process.env.SUI_MAINNET_RPC_URL || getJsonRpcFullnodeUrl('mainnet'),
+  mainnetRpcUrl: process.env.SUI_MAINNET_RPC_URL || 'https://fullnode.mainnet.sui.io:443',
   publicBaseUrl: process.env.PUBLIC_BASE_URL || `http://localhost:${parseInt(process.env.PORT || '3000', 10)}`,
-  /** Keyless by default — server signing only when explicitly enabled (dev/VPS testing). */
-  devSignEnabled: (process.env.DEV_SIGN_ENABLED || 'false').toLowerCase() === 'true',
   agentWallet: loadAgentWalletFromEnv(),
   /** Published rill_guard package — the on-chain slippage chokepoint (assert_min_value). */
   guardPackageId: process.env.RILL_GUARD_PACKAGE_ID || KNOWN_GUARD_PACKAGE[network],
@@ -35,5 +35,5 @@ export const config = {
     process.env.WALRUS_EXPLORER_BASE || 'https://walruscan.com/testnet/blob',
 };
 
-export const suiClient = new SuiJsonRpcClient({ url: config.suiRpcUrl, network: config.network });
-export const mainnetSuiClient = new SuiJsonRpcClient({ url: config.mainnetRpcUrl, network: 'mainnet' });
+export const suiClient = new SuiGrpcClient({ baseUrl: config.suiRpcUrl, network: config.network });
+export const mainnetSuiClient = new SuiGrpcClient({ baseUrl: config.mainnetRpcUrl, network: 'mainnet' });

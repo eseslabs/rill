@@ -1,201 +1,93 @@
+import { mainnetPools, testnetPools } from '@mysten/deepbook-v3';
+import { digestUnsignedPtb } from '../../../../packages/rill-sdk/src/execution-envelope';
+import type { ExecutionEnvelope } from '../../../../packages/rill-sdk/src/types';
+import type { AgentWalletBinding } from '../../core/agent-wallet';
 import { config } from '../../core/config';
-import { loadAgentWalletFromEnv, type AgentWalletBinding } from '../../core/agent-wallet';
-import {
-  compilerService,
-  type FlowGraph,
-  type CompileOptions,
-} from '../compiler/compiler.service';
+import { ValidationError } from '../../core/errors';
+import { resolveDeepbookOrderConfig } from '../../core/node-config';
+import { compilerService, type FlowGraph } from '../compiler/compiler.service';
 import { previewService } from '../compiler/preview.service';
-import { serializeUnsignedPtb } from '../compiler/ptb.util';
-import { simulatorService, type SimulationResult } from '../compiler/simulator.service';
-import { canExecuteOnChain, loadExecutorKeypair } from './sui-signer';
-import {
-  walrusAuditService,
-  type AuditRecord,
-  type WalrusAuditRef,
-} from '../walrus/audit.service';
-
-export interface SkillRunResult {
-  unsignedPtb: string;
-  preview: string;
-  simulation: SimulationResult;
-  executed: boolean;
-  digest?: string;
-  warnings: string[];
-  agentWalletBound: boolean;
-  /** Backend is keyless — client (Thiny / wallet) must sign unsignedPtb. */
-  signable: true;
-  devSignAvailable: boolean;
-  walrus?: WalrusAuditRef;
-}
+import { inspectTransaction, serializeUnsignedPtb } from '../compiler/ptb.util';
+import { simulatorService } from '../compiler/simulator.service';
 
 export interface RunFlowOptions {
-  execute?: boolean;
-  sender?: string;
-  forceExecute?: boolean;
-  agentWallet?: AgentWalletBinding;
+  actionId: string;
+  sender: string;
+  agentWallet: AgentWalletBinding;
 }
+
+const toMist = (sui: number) => BigInt(Math.round(sui * 1_000_000_000));
 
 export class SkillRunnerService {
   async runFlow(
     flow: FlowGraph,
     params: Record<string, unknown>,
-    options: RunFlowOptions = {},
-  ): Promise<SkillRunResult> {
-    const hydratedFlow = this.applyParams(flow, params);
-    const compileOpts = this.resolveCompileOptions(options);
-    const { transaction, warnings, agentWalletBound } =
-      await compilerService.compileFlow(hydratedFlow, compileOpts);
-
-    const preview = previewService.buildPreview(hydratedFlow, warnings);
-    const unsignedPtb = serializeUnsignedPtb(transaction);
-
-    const simulation = await simulatorService.simulateTransaction(
-      transaction,
-      compileOpts.sender,
-    );
-
-    if (simulation.simulatedViaFallback) {
-      warnings.push(
-        'Cetus devInspect skipped package version check — simulation estimated; mainnet execute should still work.',
+    options: RunFlowOptions,
+  ): Promise<ExecutionEnvelope> {
+    const orderCount = flow.nodes.filter((node) => node.type === 'deepbook_limit_order').length;
+    if (orderCount !== 1) {
+      throw new ValidationError(
+        `Demo Day build requires exactly one DeepBook limit-order node; found ${orderCount}.`,
       );
     }
 
-    const devSignAvailable = config.devSignEnabled && canExecuteOnChain();
-    const wantsExecute = options.execute === true;
-
-    if (!wantsExecute) {
-      return this.finalizeResult(
-        {
-          unsignedPtb,
-          preview,
-          simulation,
-          executed: false,
-          warnings,
-          agentWalletBound,
-          signable: true,
-          devSignAvailable,
-        },
-        hydratedFlow,
-        params,
-        devSignAvailable,
+    const compiled = await compilerService.compileFlow(flow, {
+      sender: options.sender,
+      agentWallet: options.agentWallet,
+    }, params);
+    const orderNode = compiled.resolvedFlow.nodes.find((node) => node.type === 'deepbook_limit_order')!;
+    const order = resolveDeepbookOrderConfig(orderNode).config;
+    if (!order.poolKey || !order.balanceManagerId || !order.tradeCapId || order.price == null || order.quantity == null) {
+      throw new ValidationError(
+        'DeepBook runtime params require poolKey, balanceManagerId, tradeCapId, price, and quantity.',
       );
     }
 
-    if (!devSignAvailable) {
-      throw new Error(
-        'Server-side signing is disabled (keyless mode). Sign unsignedPtb locally via Thiny or set DEV_SIGN_ENABLED=true for dev only.',
-      );
+    const preview = previewService.buildPreview(compiled.resolvedFlow, compiled.warnings);
+    const unsignedPtb = await serializeUnsignedPtb(compiled.transaction);
+    const simulation = await simulatorService.simulateTransaction(compiled.transaction, options.sender);
+    const inspection = inspectTransaction(compiled.transaction);
+    const pools = (config.network === 'testnet' ? testnetPools : mainnetPools) as Record<
+      string,
+      { address: string }
+    >;
+    const pool = pools[order.poolKey];
+    if (!pool) {
+      throw new ValidationError(`Unknown DeepBook poolKey ${order.poolKey} on ${config.network}.`);
     }
 
-    if (!simulation.ok && !options.forceExecute) {
-      throw new Error(`Simulation failed: ${simulation.error ?? 'unknown error'}`);
-    }
-
-    const digest = await this.executeTransaction(transaction, compileOpts.sender);
-    return this.finalizeResult(
-      {
-        unsignedPtb,
-        preview,
-        simulation,
-        executed: true,
-        digest,
-        warnings,
-        agentWalletBound,
-        signable: true,
-        devSignAvailable,
-      },
-      hydratedFlow,
-      params,
-      devSignAvailable,
-    );
-  }
-
-  private resolveCompileOptions(options: RunFlowOptions): CompileOptions {
-    const agentWallet = options.agentWallet ?? loadAgentWalletFromEnv();
-    const sender =
-      options.sender ??
-      process.env.SIMULATE_SENDER ??
-      (canExecuteOnChain() && config.devSignEnabled
-        ? loadExecutorKeypair().getPublicKey().toSuiAddress()
-        : undefined);
-
-    return { sender, agentWallet };
-  }
-
-  private async finalizeResult(
-    result: SkillRunResult,
-    flow: FlowGraph,
-    params: Record<string, unknown>,
-    allowWalrus: boolean,
-  ): Promise<SkillRunResult> {
-    if (!allowWalrus || !config.walrusEnabled) {
-      return result;
-    }
-
-    const audit: AuditRecord = {
-      version: '1',
-      service: 'rill',
-      network: process.env.SUI_NETWORK || 'testnet',
-      timestamp: new Date().toISOString(),
-      flow,
-      params,
-      simulation: result.simulation,
-      executed: result.executed,
-      digest: result.digest,
-      warnings: result.warnings,
-    };
-
-    const walrus = await walrusAuditService.storeAuditTrail(audit);
-    if (!walrus) {
-      result.warnings.push(
-        'Walrus audit upload skipped or failed — enable DEV_SIGN + WALRUS for server uploads, or audit via Thiny.',
-      );
-    }
-
-    return { ...result, walrus };
-  }
-
-  private applyParams(flow: FlowGraph, params: Record<string, unknown>): FlowGraph {
     return {
-      ...flow,
-      nodes: flow.nodes.map((node) => ({
-        ...node,
-        inputs: {
-          ...(node.inputs ?? {}),
-          ...Object.fromEntries(
-            Object.entries(params).filter(([key]) => {
-              if (node.type === 'cetus_swap') {
-                return ['amount_in', 'min_amount_out', 'pool'].includes(key);
-              }
-              if (node.type === 'haedal_stake') {
-                return ['amount'].includes(key);
-              }
-              return false;
-            }),
-          ),
-        },
-      })),
+      version: '1',
+      actionId: options.actionId,
+      actionDigest: await digestUnsignedPtb(unsignedPtb),
+      network: config.network,
+      sender: options.sender,
+      walletPackageId: options.agentWallet.packageId,
+      walletId: options.agentWallet.walletId,
+      agentCapId: options.agentWallet.capId,
+      balanceManagerId: order.balanceManagerId,
+      tradeCapId: order.tradeCapId,
+      resolvedParams: {
+        poolKey: order.poolKey,
+        poolId: pool.address,
+        price: order.price,
+        quantity: order.quantity,
+        isBid: order.isBid,
+        payWithDeep: order.payWithDeep,
+        clientOrderId: order.clientOrderId,
+        depositSui: order.depositSui,
+        spendAmountMist: toMist(order.depositSui).toString(),
+      },
+      allowedTargets: inspection.allowedTargets,
+      requiredObjectIds: inspection.objectIds,
+      requiredGuards: inspection.allowedTargets.filter((target) =>
+        target.endsWith('::guard::assert_min_value')
+      ),
+      unsignedPtb,
+      preview,
+      simulation,
+      expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
     };
-  }
-
-  private async executeTransaction(tx: import('@mysten/sui/transactions').Transaction, sender?: string): Promise<string> {
-    const keypair = loadExecutorKeypair();
-    const address = sender ?? keypair.getPublicKey().toSuiAddress();
-    tx.setSender(address);
-
-    const { suiClient } = await import('../../core/config');
-    const result = await suiClient.signAndExecuteTransaction({
-      signer: keypair,
-      transaction: tx,
-      options: { showEffects: true },
-    });
-
-    if (result.effects?.status.status !== 'success') {
-      throw new Error(result.effects?.status.error ?? 'Transaction execution failed');
-    }
-
-    return result.digest;
   }
 }
 
