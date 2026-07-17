@@ -24,8 +24,18 @@ export interface HaedalStakeNodeConfig {
   minStakeMist: string;
 }
 
+/**
+ * The parameters a published MCP tool exposes to the AGENT at call time.
+ *
+ * These are INTENT, never POLICY. The agent declares how much to swap; the OWNER declares how
+ * much slippage is tolerable, and the floor is derived from that policy against live pool price
+ * (see `applyQuotedFloors`). Neither `min_amount_out` nor `slippageBps` may appear here: a floor
+ * the agent picks is a floor the agent picks as 1, and a tolerance the agent widens to 9999bps is
+ * the same hole wearing a different name. A protection the constrained party can switch off is
+ * not a protection.
+ */
 export const RUNTIME_KEYS: Record<string, readonly string[]> = {
-  cetus_swap: ['amount_in', 'min_amount_out'],
+  cetus_swap: ['amount_in'],
   haedal_stake: ['amount'],
   deepbook_limit_order: [
     'poolKey',
@@ -40,9 +50,17 @@ export const RUNTIME_KEYS: Record<string, readonly string[]> = {
   ],
 };
 
+/**
+ * The parameters the OWNER may set on a node in the published flow (`node.inputs`).
+ *
+ * A superset of RUNTIME_KEYS: the owner authors the flow, so the owner may pin the pool and may
+ * pin an explicit `min_amount_out` instead of declaring `slippageBps` and letting the compiler
+ * derive one. That is policy set by the party the policy protects — the exact opposite of the
+ * agent setting it at call time.
+ */
 const FLOW_INPUT_KEYS: Record<string, readonly string[]> = {
   ...RUNTIME_KEYS,
-  cetus_swap: [...RUNTIME_KEYS.cetus_swap, 'pool'],
+  cetus_swap: [...RUNTIME_KEYS.cetus_swap, 'pool', 'min_amount_out'],
 };
 
 function selectAllowedEntries(
@@ -123,6 +141,28 @@ function pick(node: FlowNode, key: string): unknown {
   return node.config?.[key];
 }
 
+/**
+ * The swap's on-chain floor, or an error. Never a number nobody chose.
+ *
+ * By the time an adapter reads this, `applyQuotedFloors` has already turned any declared
+ * `slippageBps` into a real floor priced against current pool state. So reaching here without one
+ * means no floor exists — no owner policy, no explicit floor — and the only honest answer is to
+ * refuse. The old `'1'` default was a swap that accepted any fill at all, wearing a number so it
+ * looked like a floor; `'0'` would be worse still, since `injectMinOutAssert` no-ops at <= 0 and
+ * would emit no assert whatsoever.
+ */
+function requireFloor(node: FlowNode): string {
+  const raw = pick(node, 'min_amount_out');
+  if (raw == null || raw === '' || BigInt(String(raw)) <= 0n) {
+    throw new ValidationError(
+      `Node ${node.id}: no slippage floor. Set \`slippageBps\` (owner policy — the floor is then ` +
+        `derived from live pool price at compile time) or an explicit positive \`min_amount_out\`. ` +
+        `Refusing to compile a swap that would accept any fill.`,
+    );
+  }
+  return String(raw);
+}
+
 /** Resolve Cetus swap params — FE should pass full config; server defaults are fallback only. */
 export function resolveCetusSwapConfig(
   node: FlowNode,
@@ -136,7 +176,7 @@ export function resolveCetusSwapConfig(
       pool: fallbackString(node, warnings, 'pool', CETUS.defaultPoolId),
       inputCoinType: fallbackString(node, warnings, 'inputCoinType', CETUS.defaultInputCoinType),
       amount_in: fallbackString(node, warnings, 'amount_in', '0'),
-      min_amount_out: fallbackString(node, warnings, 'min_amount_out', '1'),
+      min_amount_out: requireFloor(node),
       minSqrtPrice: fallbackString(node, warnings, 'minSqrtPrice', CETUS.minSqrtPrice),
       maxSqrtPrice: fallbackString(node, warnings, 'maxSqrtPrice', CETUS.maxSqrtPrice),
       by_amount_in: pick(node, 'by_amount_in') !== false,

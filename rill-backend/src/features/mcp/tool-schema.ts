@@ -11,7 +11,8 @@ const SUPPORTED_NODE_TYPES = new Set([...SUPPORTED_ACTION_TYPES, ...WRAPPER_TYPE
 
 const RUNTIME_PARAM_DESCRIPTIONS: Record<string, string> = {
   amount_in: 'Amount of input coin to swap (mist).',
-  min_amount_out: 'Minimum output amount (slippage floor, mist).',
+  // No `min_amount_out`: the slippage floor is owner policy derived from live pool price, never a
+  // parameter the agent supplies. See RUNTIME_KEYS in core/node-config.ts.
   amount: 'Amount of SUI to stake (mist).',
   poolKey: 'Installed DeepBook pool key.',
   balanceManagerId: 'Run-specific pre-provisioned BalanceManager object ID.',

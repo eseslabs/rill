@@ -76,7 +76,9 @@ test('a swap that declares slippageBps compiles to a real floor, not 1 base unit
   expect(flow.nodes[0].config!.min_amount_out).toBe('987525');
 });
 
-test('an explicit min_amount_out is left alone — the caller already chose a floor', async () => {
+// `min_amount_out` is not a RUNTIME_KEY, so an explicit floor can only have come from the owner's
+// published flow — never from the agent's call. See core/node-config.test.ts.
+test('an explicit min_amount_out is left alone — the owner already chose a floor', async () => {
   stubPool();
   const flow = swapFlow({
     pool: '0xpool',

@@ -110,11 +110,32 @@ export function defaultActionConfig(protocolId: string, actionId: string): Actio
   return {};
 }
 
-/** Convert human-readable token amount to mist string. */
-export function toMist(amount: string, fallbackMist: string): string {
+/**
+ * Human-readable token amount → raw base units.
+ *
+ * `decimals` is a property of the coin, not a constant: SUI has 9 and USDC has 6. Scaling every
+ * amount by 1e9 turns "1 USDC" into 1_000_000_000 base units — a swap of 1000 USDC. Callers must
+ * pass `TOKEN_DECIMALS[symbol]` for anything whose coin type isn't fixed at SUI.
+ *
+ * Scales by digit concatenation rather than `n * 10 ** decimals`, because that multiply is float
+ * math on a money value (0.07 * 1e9 is 70000000.00000001 in IEEE754). `toFixed` with a few digits
+ * of headroom normalizes exponent notation and absorbs float representation error (0.29 is really
+ * 0.28999999999999998); the surplus digits are then cut, not rounded, so excess precision can only
+ * move the amount down — never above what the user typed.
+ */
+export function toBaseUnits(amount: string, fallbackRaw: string, decimals: number): string {
   const n = parseFloat(amount);
-  if (!Number.isFinite(n) || n <= 0) return fallbackMist;
-  return String(Math.round(n * 1e9));
+  if (!Number.isFinite(n) || n <= 0) return fallbackRaw;
+
+  const [whole, frac = ""] = n.toFixed(Math.min(decimals + 6, 100)).split(".");
+  const raw = `${whole}${frac.slice(0, decimals)}`.replace(/^0+(?=\d)/, "");
+  // Below the coin's smallest unit: there is no amount to send, so fall back rather than invent one.
+  return raw === "0" ? fallbackRaw : raw;
+}
+
+/** SUI amount → mist. Mist is SUI's base unit; use `toBaseUnits` for any other coin. */
+export function toMist(amount: string, fallbackMist: string): string {
+  return toBaseUnits(amount, fallbackMist, TOKEN_DECIMALS.SUI);
 }
 
 export function otherSwapToken(symbol: SwapTokenSymbol): SwapTokenSymbol {
@@ -138,7 +159,12 @@ export function buildCetusSwapFlowConfig(cfg: ActionConfig) {
     pool: m.defaultPoolId,
     inputCoinType: TOKEN_COIN_TYPE[tokenIn] ?? TOKEN_COIN_TYPE.SUI,
     outputCoinType: TOKEN_COIN_TYPE[otherSwapToken(tokenIn)],
-    amount_in: toMist(String(cfg.amount ?? "0.1"), "100000000"),
+    // Scaled by the *input* coin's decimals — a USDC-in swap is 1e6, not mist.
+    amount_in: toBaseUnits(
+      String(cfg.amount ?? "0.1"),
+      "100000000",
+      TOKEN_DECIMALS[tokenIn] ?? TOKEN_DECIMALS.SUI,
+    ),
     slippageBps: String(toSlippageBps(String(cfg.slippage ?? DEFAULT_SLIPPAGE_PCT))),
     minSqrtPrice: m.minSqrtPrice,
     maxSqrtPrice: m.maxSqrtPrice,

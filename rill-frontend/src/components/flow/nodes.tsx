@@ -12,12 +12,13 @@ import {
   formatRawAmount,
   isA2B,
   otherSwapToken,
-  toMist,
+  toBaseUnits,
   toSlippageBps,
   DEEPBOOK_PAIRS,
   DEFAULT_SLIPPAGE_PCT,
   MAX_SLIPPAGE_PCT,
   TESTNET_MANIFEST,
+  TOKEN_DECIMALS,
   type ActionConfig,
   type SwapTokenSymbol,
   type DeepbookPairKey,
@@ -75,7 +76,12 @@ function useSwapQuote(enabled: boolean, tokenIn: SwapTokenSymbol, amount: string
   const [quote, setQuote] = useState<Quote | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const amountIn = enabled ? toMist(amount, "0") : "0";
+  // Scaled exactly as `buildCetusSwapFlowConfig` scales it, by the input coin's own decimals. If
+  // this readout and the compiled swap disagreed on what "1" means, the quote would describe a
+  // different trade than the one the user is about to sign.
+  const amountIn = enabled
+    ? toBaseUnits(amount, "0", TOKEN_DECIMALS[tokenIn] ?? TOKEN_DECIMALS.SUI)
+    : "0";
   const slippageBps = toSlippageBps(slippage);
 
   useEffect(() => {

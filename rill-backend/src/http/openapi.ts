@@ -36,7 +36,8 @@ const flowSchema = {
             description:
               'Node config. For cetus_swap, pass `slippageBps` and let the compiler derive the ' +
               '`min_amount_out` floor from live pool state — an explicit `min_amount_out` is honoured ' +
-              'as-is and is only correct if you priced it yourself, just now.',
+              'as-is and is only correct if you priced it yourself, just now. A cetus_swap with ' +
+              'neither is rejected: there is no permissive default floor.',
             example: { amount_in: '100000000', slippageBps: '100' },
           },
           inputs: { type: 'object', additionalProperties: true },

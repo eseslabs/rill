@@ -137,7 +137,12 @@ export async function applyQuotedFloors(flow: FlowGraph, warnings: string[]): Pr
 
     const config = node.config;
     const slippageRaw = config?.slippageBps;
-    // No declared tolerance, or the caller pinned its own floor: nothing to derive.
+    // No declared tolerance, or a floor is already pinned: nothing to derive.
+    //
+    // Skipping a pinned floor is only safe because `min_amount_out` is not a RUNTIME_KEY — it can
+    // reach config solely through the owner's flow, never through the agent's call. If the agent
+    // could set it, this `continue` would be the whole hole: the agent pins 1, and the derivation
+    // meant to constrain it never runs.
     if (config == null || slippageRaw == null || slippageRaw === '') continue;
     if (config.min_amount_out != null && config.min_amount_out !== '') continue;
 
