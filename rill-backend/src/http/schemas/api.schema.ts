@@ -2,12 +2,30 @@ import { z } from 'zod';
 import { isHeroActionFlow } from '../../features/mcp/tool-schema';
 import { findFlowStructureIssues } from '../../features/protocols/handles';
 
+/**
+ * A Sui address/object id: `0x` + 1-64 hex chars (U4, R13). Sui accepts both the short form (e.g.
+ * `0x2` for the Framework package) and the normalized 32-byte form (64 hex chars), so this matches
+ * any length in between rather than forcing exactly 64 — the same range `@mysten/sui` itself treats
+ * as a valid (if non-normalized) address. Garbage input (`"zz"`, no `0x` prefix, non-hex
+ * characters, empty) fails Zod validation up front with a 422 instead of reaching a raw RPC call or
+ * PTB argument and surfacing as an opaque downstream failure.
+ */
+const SUI_ADDRESS_PATTERN = /^0x[0-9a-fA-F]{1,64}$/;
+
+/** Builds a Sui-address-shaped Zod string schema; `label` is echoed into the error message so a
+ *  422 names exactly which field was malformed. */
+function suiAddress(label: string) {
+  return z
+    .string()
+    .regex(SUI_ADDRESS_PATTERN, `${label} must be a 0x-prefixed hex Sui address (e.g. "0x2" or a 64-char object id).`);
+}
+
 export const IntrospectSchema = z.object({
-  packageId: z.string().min(4, 'Invalid Sui Package ID'),
+  packageId: suiAddress('packageId'),
 });
 
 export const ResolveSchema = z.object({
-  packageId: z.string().min(4, 'Invalid Sui Package ID'),
+  packageId: suiAddress('packageId'),
   moduleName: z.string().min(1, 'Module name is required'),
   functionName: z.string().min(1, 'Function name is required'),
 });
@@ -27,9 +45,9 @@ export const FlowNodeSchema = z.object({
 });
 
 export const AgentWalletSchema = z.object({
-  packageId: z.string().min(4),
-  walletId: z.string().min(4),
-  capId: z.string().min(4),
+  packageId: suiAddress('agentWallet.packageId'),
+  walletId: suiAddress('agentWallet.walletId'),
+  capId: suiAddress('agentWallet.capId'),
   coinType: z.string().optional(),
 });
 
@@ -53,13 +71,13 @@ export const FlowSchema = z.object({
 
 export const CompileSchema = z.object({
   flow: FlowSchema,
-  sender: z.string().optional(),
+  sender: suiAddress('sender').optional(),
   agentWallet: AgentWalletSchema.optional(),
 }).strict();
 
 export const SimulateSchema = z.object({
   flow: FlowSchema,
-  sender: z.string().optional(),
+  sender: suiAddress('sender').optional(),
   agentWallet: AgentWalletSchema.optional(),
 }).strict();
 
@@ -77,13 +95,13 @@ export const PublishSchema = z.object({
 export const ExecuteSchema = z.object({
   skillId: z.string().min(1),
   params: z.record(z.string(), z.unknown()).default({}),
-  sender: z.string().min(4),
+  sender: suiAddress('sender'),
   agentWallet: AgentWalletSchema,
 }).strict();
 
 export const SetupPrepareSchema = z.object({
   skillId: z.string().min(1),
-  sender: z.string().min(4),
+  sender: suiAddress('sender'),
   budgetMist: z.string().regex(/^\d+$/, 'budgetMist must be a decimal u64 string.'),
   perTxMist: z.string().regex(/^\d+$/, 'perTxMist must be a decimal u64 string.'),
   minimumRemainingMist: z.string().regex(/^\d+$/, 'minimumRemainingMist must be a decimal u64 string.').optional(),

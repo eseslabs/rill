@@ -2,7 +2,7 @@ import type { Transaction } from '@mysten/sui/transactions';
 import { SUI_COIN_TYPE } from '../../core/agent-wallet';
 import { SUI_CLOCK_ID } from '../../core/protocols';
 import { suiClient } from '../../core/config';
-import { resolveCetusSwapConfig } from '../../core/node-config';
+import { parseConfigU128, parseConfigU64, resolveCetusSwapConfig } from '../../core/node-config';
 import { ValidationError } from '../../core/errors';
 import { pickSwapFunction, resolvePoolTypeArgs } from '../compiler/pool-resolver';
 import { injectMinOutAssert } from './guard';
@@ -75,7 +75,7 @@ export const cetusAdapter: ProtocolAdapter = {
     if (hasCoinEdge) return 0n;
     const { config } = resolveCetusSwapConfig(node);
     if (config.inputCoinType !== SUI_COIN_TYPE) return 0n;
-    return BigInt(config.amount_in);
+    return parseConfigU64(config.amount_in, `Node ${node.id}: config.amount_in`);
   },
 
   async build(ctx: AdapterCtx): Promise<void> {
@@ -83,7 +83,7 @@ export const cetusAdapter: ProtocolAdapter = {
     const { config: swapCfg, warnings: cfgWarnings } = resolveCetusSwapConfig(node);
     warnings.push(...cfgWarnings);
 
-    const amountIn = BigInt(swapCfg.amount_in);
+    const amountIn = parseConfigU64(swapCfg.amount_in, `Node ${node.id}: config.amount_in`);
     const poolId = swapCfg.pool;
     const inputCoinType = swapCfg.inputCoinType;
 
@@ -145,6 +145,25 @@ export const cetusAdapter: ProtocolAdapter = {
       );
     }
 
+    // R7: min_amount_out has no server default — a 1-mist "floor" is not real slippage protection.
+    // It's only safe to omit when a downstream guardrail node will assert its own floor on this
+    // swap's output coin (same handle contract as `feedsHaedal` above, so this can never disagree
+    // with what the guardrail adapter actually consumes).
+    const feedsGuardrail = flow.edges.some(
+      (e) =>
+        e.source === node.id &&
+        e.sourceHandle === 'coin_out' &&
+        flow.nodes.some((n) => n.id === e.target && n.type === 'guardrail'),
+    );
+    if (!swapCfg.min_amount_out && !feedsGuardrail) {
+      throw new ValidationError(
+        `Node ${node.id}: config.min_amount_out is required — Cetus swaps need an explicit slippage `
+          + `floor unless the output coin (coin_out) is wired into a downstream guardrail node that `
+          + `asserts its own minimum. Set config.min_amount_out, or wire coin_out → a guardrail's `
+          + `"in" handle.`,
+      );
+    }
+
     // router::swap consumes both A and B inputs; the side we're not funding gets a zero coin.
     // Create ONLY the zero coin we actually pass — an extra unused zero aborts execute
     // (UnusedValueWithoutDrop), which devInspect does not catch.
@@ -165,7 +184,12 @@ export const cetusAdapter: ProtocolAdapter = {
         tx.pure.bool(swap.a2b),
         tx.pure.bool(swapCfg.by_amount_in ?? true),
         tx.pure.u64(amountIn),
-        tx.pure.u128(BigInt(swapCfg.sqrt_price_limit ?? swap.sqrtPriceLimit)),
+        tx.pure.u128(
+          parseConfigU128(
+            swapCfg.sqrt_price_limit ?? swap.sqrtPriceLimit,
+            `Node ${node.id}: config.sqrt_price_limit`,
+          ),
+        ),
         tx.pure.bool(false),
         tx.object(SUI_CLOCK_ID),
       ],
@@ -176,8 +200,13 @@ export const cetusAdapter: ProtocolAdapter = {
     const leftoverType = swap.a2b ? poolTypes.coinTypeA : poolTypes.coinTypeB;
 
     // On-chain slippage floor: abort if the swap output is below min_amount_out (borrows the coin,
-    // so it stays usable below). Deterministic backstop against bad fills / sandwich MEV.
-    injectMinOutAssert(tx, outputCoin, swap.outputCoinType, BigInt(swapCfg.min_amount_out), warnings);
+    // so it stays usable below). Deterministic backstop against bad fills / sandwich MEV. Absent
+    // here only when `feedsGuardrail` is true (checked above) — the downstream guardrail asserts its
+    // own floor on this exact coin later in the same PTB, so skipping a redundant assert here is safe.
+    if (swapCfg.min_amount_out) {
+      const minAmountOut = parseConfigU64(swapCfg.min_amount_out, `Node ${node.id}: config.min_amount_out`);
+      injectMinOutAssert(tx, outputCoin, swap.outputCoinType, minAmountOut, warnings);
+    }
 
     // Single owner of settlement is the compiler's sweep (KTD-3) — this adapter only ever RECORDS
     // coins it produces, never merges/transfers them itself:

@@ -1,4 +1,4 @@
-import { resolveHaedalStakeConfig } from '../../core/node-config';
+import { parseConfigU64, resolveHaedalStakeConfig } from '../../core/node-config';
 import { ValidationError } from '../../core/errors';
 import type { AdapterCtx, FlowGraph, FlowNode, ProtocolAdapter } from './types';
 
@@ -12,7 +12,7 @@ export const haedalAdapter: ProtocolAdapter = {
     );
     if (hasCoinEdge) return 0n;
     const { config } = resolveHaedalStakeConfig(node);
-    return BigInt(config.amount);
+    return parseConfigU64(config.amount, `Node ${node.id}: config.amount`);
   },
 
   async build(ctx: AdapterCtx): Promise<void> {
@@ -20,8 +20,8 @@ export const haedalAdapter: ProtocolAdapter = {
     const { config: stakeCfg, warnings: cfgWarnings } = resolveHaedalStakeConfig(node);
     warnings.push(...cfgWarnings);
 
-    const amount = BigInt(stakeCfg.amount);
-    const minStake = BigInt(stakeCfg.minStakeMist);
+    const amount = parseConfigU64(stakeCfg.amount, `Node ${node.id}: config.amount`);
+    const minStake = parseConfigU64(stakeCfg.minStakeMist, `Node ${node.id}: config.minStakeMist`);
     if (amount < minStake) {
       throw new ValidationError(`Haedal minimum stake is ${minStake} mist. Got ${amount}.`);
     }

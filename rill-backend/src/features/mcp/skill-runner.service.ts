@@ -4,7 +4,7 @@ import type { ExecutionEnvelope } from '../../../../packages/rill-sdk/src/types'
 import type { AgentWalletBinding } from '../../core/agent-wallet';
 import { config } from '../../core/config';
 import { ValidationError } from '../../core/errors';
-import { resolveDeepbookOrderConfig } from '../../core/node-config';
+import { resolveDeepbookOrderConfig, suiToMist } from '../../core/node-config';
 import { compilerService, type FlowGraph } from '../compiler/compiler.service';
 import { previewService } from '../compiler/preview.service';
 import { inspectTransaction, serializeUnsignedPtb } from '../compiler/ptb.util';
@@ -15,8 +15,6 @@ export interface RunFlowOptions {
   sender: string;
   agentWallet: AgentWalletBinding;
 }
-
-const toMist = (sui: number) => BigInt(Math.round(sui * 1_000_000_000));
 
 export class SkillRunnerService {
   async runFlow(
@@ -76,7 +74,7 @@ export class SkillRunnerService {
         payWithDeep: order.payWithDeep,
         clientOrderId: order.clientOrderId,
         depositSui: order.depositSui,
-        spendAmountMist: toMist(order.depositSui).toString(),
+        spendAmountMist: suiToMist(order.depositSui, 'config.depositSui').toString(),
       },
       allowedTargets: inspection.allowedTargets,
       requiredObjectIds: inspection.objectIds,
