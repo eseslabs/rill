@@ -53,7 +53,11 @@ export const EXECUTION_ENVELOPE_RESOLVED_PARAM_REQUIRED_FIELDS = [
   ...EXECUTION_ENVELOPE_RESOLVED_PARAM_NUMBER_FIELDS,
   ...EXECUTION_ENVELOPE_RESOLVED_PARAM_BOOLEAN_FIELDS,
 ] as const;
-export const EXECUTION_ENVELOPE_SIMULATION_VERIFICATIONS = ['verified', 'unverified'] as const;
+export const EXECUTION_ENVELOPE_SIMULATION_VERIFICATIONS = [
+  'verified',
+  'unverified',
+  'failed',
+] as const;
 export const EXECUTION_ENVELOPE_OBJECT_CHANGE_TYPES = ['mutated', 'created', 'deleted'] as const;
 export const EXECUTION_ENVELOPE_SIMULATION_REQUIRED_FIELDS = [
   'ok',

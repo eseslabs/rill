@@ -305,7 +305,7 @@ test('simulate and publish OpenAPI expose their actual request and response fiel
   expect(simulationSchema.required).toContain('verification');
   expect(simulationSchema.properties.verification).toEqual({
     type: 'string',
-    enum: ['verified', 'unverified'],
+    enum: ['verified', 'unverified', 'failed'],
   });
   expect(simulationSchema.properties).not.toHaveProperty('simulatedViaFallback');
   const publishSchema = responseSchema('/publish');

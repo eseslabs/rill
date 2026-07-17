@@ -10,10 +10,10 @@ export type SimulationResult = StrictSimulationResult;
 type UnclassifiedSimulation = Omit<SimulationResult, 'verification'>;
 
 export function classifySimulation(result: UnclassifiedSimulation): SimulationResult {
+  if (result.ok) return { ...result, verification: 'verified' };
   return {
     ...result,
-    verification:
-      !result.ok && isCetusDevInspectVersionAbort(result.error) ? 'unverified' : 'verified',
+    verification: isCetusDevInspectVersionAbort(result.error) ? 'unverified' : 'failed',
   };
 }
 

@@ -56,7 +56,14 @@ export type RillNetwork = 'testnet' | 'mainnet';
 
 export interface StrictSimulationResult {
   ok: boolean;
-  verification: 'verified' | 'unverified';
+  /**
+   * 'verified'   — devInspect ran and the transaction succeeded.
+   * 'unverified' — a known devInspect false negative (Cetus checked_package_version on testnet);
+   *                the transaction is expected to succeed on-chain but we did not prove it.
+   * 'failed'     — devInspect ran and the transaction aborted, or simulation could not run at all.
+   * Consumers must treat anything other than 'verified' as fail-closed.
+   */
+  verification: 'verified' | 'unverified' | 'failed';
   error?: string;
   gasEstimate: number;
   balanceChanges: {
