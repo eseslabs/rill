@@ -201,10 +201,14 @@ async function requestFaucet(signer: Signer, allowTestnetFaucet: boolean) {
   };
 }
 
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
 function isRunSetTemplate(value: unknown): value is RunSet {
   if (!value || typeof value !== 'object') return false;
   const record = value as Record<string, unknown>;
-  return (
+  const hasRequired =
     typeof record.version === 'string' &&
     typeof record.label === 'string' &&
     typeof record.actionId === 'string' &&
@@ -213,12 +217,16 @@ function isRunSetTemplate(value: unknown): value is RunSet {
     typeof record.walletPackageId === 'string' &&
     typeof record.walletId === 'string' &&
     typeof record.agentCapId === 'string' &&
-    typeof record.balanceManagerId === 'string' &&
-    typeof record.tradeCapId === 'string' &&
-    typeof record.poolId === 'string' &&
+    isStringArray(record.allowedTargets) &&
+    isStringArray(record.requiredObjectIds) &&
+    isStringArray(record.requiredGuards) &&
     typeof record.maxAmountMist === 'string' &&
-    typeof record.minimumRemainingMist === 'string'
-  );
+    typeof record.minimumRemainingMist === 'string';
+  if (!hasRequired) return false;
+  if (record.balanceManagerId !== undefined && typeof record.balanceManagerId !== 'string') return false;
+  if (record.tradeCapId !== undefined && typeof record.tradeCapId !== 'string') return false;
+  if (record.poolId !== undefined && typeof record.poolId !== 'string') return false;
+  return true;
 }
 
 function patchTradeCapPtb(base64Ptb: string, balanceManagerId: string): string {
@@ -312,12 +320,22 @@ async function createRunSet(
   const tradeCapResult = await signAndExecutePtb(patchedTradeCapPtb, signer, cfg);
   const tradeCapId = extractCreatedObjectId(tradeCapResult.effects as never, '::balance_manager::TradeCap');
 
+  const requiredObjectIds = [
+    walletId,
+    agentCapId,
+    balanceManagerId,
+    tradeCapId,
+    plan.runSetTemplate.poolId,
+    '0x6',
+  ].filter((id): id is string => typeof id === 'string' && id.length > 2 && !/^0x0+$/.test(id));
+
   const runSet: RunSet = {
     ...plan.runSetTemplate,
     walletId,
     agentCapId,
     balanceManagerId,
     tradeCapId,
+    requiredObjectIds,
   };
   const label = runSet.label || `${runSet.actionId}_${Date.now()}`;
   saveRunSet(label, runSet);

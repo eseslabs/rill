@@ -10,12 +10,11 @@ export const EXECUTION_ENVELOPE_REQUIRED_STRING_FIELDS = [
   'actionDigest',
   'network',
   'sender',
-  'balanceManagerId',
-  'tradeCapId',
   'unsignedPtb',
   'preview',
   'expiresAt',
 ] as const;
+export const EXECUTION_ENVELOPE_OPTIONAL_STRING_FIELDS = ['balanceManagerId', 'tradeCapId'] as const;
 export const EXECUTION_ENVELOPE_REQUIRED_ARRAY_FIELDS = [
   'allowedTargets',
   'requiredObjectIds',
@@ -30,8 +29,6 @@ export const EXECUTION_ENVELOPE_REQUIRED_FIELDS = [
   'walletPackageId',
   'walletId',
   'agentCapId',
-  'balanceManagerId',
-  'tradeCapId',
   'resolvedParams',
   ...EXECUTION_ENVELOPE_REQUIRED_ARRAY_FIELDS,
   'unsignedPtb',
@@ -120,6 +117,11 @@ export function assertExecutionEnvelope(value: unknown): ExecutionEnvelope {
   for (const key of EXECUTION_ENVELOPE_REQUIRED_STRING_FIELDS) {
     requireString(value, key);
   }
+  for (const key of EXECUTION_ENVELOPE_OPTIONAL_STRING_FIELDS) {
+    if (value[key] !== undefined) {
+      requireString(value, key);
+    }
+  }
   if (!isOneOf(EXECUTION_ENVELOPE_NETWORKS, value.network)) {
     throw new Error('ExecutionEnvelope.network is invalid');
   }
@@ -130,15 +132,6 @@ export function assertExecutionEnvelope(value: unknown): ExecutionEnvelope {
 
   if (!isRecord(value.resolvedParams)) {
     throw new Error('ExecutionEnvelope.resolvedParams must be an object');
-  }
-  for (const key of EXECUTION_ENVELOPE_RESOLVED_PARAM_STRING_FIELDS) {
-    requireString(value.resolvedParams, key, 'ExecutionEnvelope.resolvedParams');
-  }
-  for (const key of EXECUTION_ENVELOPE_RESOLVED_PARAM_NUMBER_FIELDS) {
-    requireFiniteNumber(value.resolvedParams, key, 'ExecutionEnvelope.resolvedParams');
-  }
-  for (const key of EXECUTION_ENVELOPE_RESOLVED_PARAM_BOOLEAN_FIELDS) {
-    requireBoolean(value.resolvedParams, key, 'ExecutionEnvelope.resolvedParams');
   }
 
   if (!isRecord(value.simulation)) {

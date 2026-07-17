@@ -94,9 +94,9 @@ export interface ExecutionEnvelope {
   walletPackageId: string;
   walletId: string;
   agentCapId: string;
-  balanceManagerId: string;
-  tradeCapId: string;
-  resolvedParams: DeepBookResolvedParams;
+  balanceManagerId?: string;
+  tradeCapId?: string;
+  resolvedParams: DeepBookResolvedParams | Record<string, unknown>;
   allowedTargets: string[];
   requiredObjectIds: string[];
   requiredGuards: string[];

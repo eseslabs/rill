@@ -113,19 +113,22 @@ apiRouter.post('/simulate', zValidator('json', SimulateSchema), async (c) => {
 
 apiRouter.post('/publish', zValidator('json', PublishSchema), async (c) => {
   const { flow, policyId } = c.req.valid('json');
-  const warnings = [
-    'Published metadata only; build_action requires run-specific wallet, BalanceManager, TradeCap, sender, and runtime order params.',
-  ];
-
   const skillId = `skill_${crypto.randomUUID().replace(/-/g, '').slice(0, 10)}`;
   const toolDefs = buildToolDefs(flow, skillId);
+  const nodeTypes = flow.nodes.map((n) => n.type).join(' → ');
+  const name = `Rill flow: ${nodeTypes}`;
+  const description = toolDefs.description;
+  const warnings = [
+    'Published metadata only; build_action requires run-specific wallet, sender, and the runtime params listed in the tool schema.',
+  ];
+
   const mcpUrl = `${config.publicBaseUrl}/api/mcp/${skillId}`;
   const skillUrl = `${config.publicBaseUrl}/api/skills/${skillId}/skill.md`;
 
   skillsStore.save({
     id: skillId,
-    name: HERO_ACTION_NAME,
-    description: HERO_ACTION_DESCRIPTION,
+    name,
+    description,
     flow,
     toolDefs,
     policyId,
@@ -136,8 +139,8 @@ apiRouter.post('/publish', zValidator('json', PublishSchema), async (c) => {
     success: true,
     data: {
       skillId,
-      name: HERO_ACTION_NAME,
-      description: HERO_ACTION_DESCRIPTION,
+      name,
+      description,
       mcpUrl,
       skillUrl,
       toolDefs,

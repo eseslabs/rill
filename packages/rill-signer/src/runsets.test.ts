@@ -34,6 +34,7 @@ const runSet = {
   tradeCapId: id(6),
   poolId: id(7),
   allowedTargets: [],
+  requiredObjectIds: [],
   requiredGuards: [],
   maxAmountMist: '10000000',
   minimumRemainingMist: '20000000',

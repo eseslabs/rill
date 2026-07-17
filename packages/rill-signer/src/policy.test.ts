@@ -30,6 +30,14 @@ const policy: LocalSignerPolicy = {
     `${deepbookPackageId}::balance_manager::generate_proof_as_trader`,
     `${deepbookPackageId}::pool::place_limit_order`,
   ],
+  requiredObjectIds: [
+    id(4),
+    id(5),
+    id(16),
+    id(7),
+    id(8),
+    '0x6',
+  ],
   requiredGuards: [],
   maxAmountMist: '10000000',
   minimumRemainingMist: '20000000',
@@ -73,7 +81,7 @@ async function envelope(options: {
   order?: Partial<LocalSignerPolicy['onChainOrder']>;
 } = {}): Promise<ExecutionEnvelope> {
   const amount = options.amount ?? 6_000_000n;
-  const order = { ...policy.onChainOrder, ...options.order };
+  const order = { ...policy.onChainOrder!, ...options.order };
   const tx = new Transaction();
   tx.setSender(sender);
   if (options.extraObjectId) tx.object(options.extraObjectId);
@@ -100,7 +108,7 @@ async function envelope(options: {
     target: `${deepbookPackageId}::balance_manager::deposit`,
     typeArguments: ['0x2::sui::SUI'],
     arguments: [
-      tx.object(policy.balanceManagerId),
+      tx.object(policy.balanceManagerId!),
       coin,
       ...(options.callShape === 'deposit-extra' ? [tx.pure.u8(0)] : []),
     ],
@@ -108,8 +116,8 @@ async function envelope(options: {
   const proof = tx.moveCall({
     target: `${deepbookPackageId}::balance_manager::generate_proof_as_trader`,
     arguments: [
-      tx.object(policy.balanceManagerId),
-      tx.object(policy.tradeCapId),
+      tx.object(policy.balanceManagerId!),
+      tx.object(policy.tradeCapId!),
       ...(options.callShape === 'proof-extra' ? [tx.pure.u8(0)] : []),
     ],
   });
@@ -117,17 +125,17 @@ async function envelope(options: {
     target: options.target ?? `${deepbookPackageId}::pool::place_limit_order`,
     typeArguments: ['0x2::sui::SUI', id(9)],
     arguments: [
-      tx.object(policy.poolId),
-      tx.object(policy.balanceManagerId),
+      tx.object(policy.poolId!),
+      tx.object(policy.balanceManagerId!),
       proof,
-      tx.pure.u64(BigInt(order.clientOrderId)),
-      tx.pure.u8(Number(order.orderType)),
-      tx.pure.u8(Number(order.selfMatchingOption)),
-      tx.pure.u64(BigInt(order.price)),
-      tx.pure.u64(BigInt(order.quantity)),
-      tx.pure.bool(order.isBid),
-      tx.pure.bool(order.payWithDeep),
-      tx.pure.u64(BigInt(order.expiration)),
+      tx.pure.u64(BigInt(order.clientOrderId!)),
+      tx.pure.u8(Number(order.orderType!)),
+      tx.pure.u8(Number(order.selfMatchingOption!)),
+      tx.pure.u64(BigInt(order.price!)),
+      tx.pure.u64(BigInt(order.quantity!)),
+      tx.pure.bool(order.isBid!),
+      tx.pure.bool(order.payWithDeep!),
+      tx.pure.u64(BigInt(order.expiration!)),
       ...(options.callShape === 'order-missing-clock'
         ? []
         : [tx.object(options.orderClockId ?? '0x6')]),
@@ -152,11 +160,11 @@ async function envelope(options: {
     walletPackageId,
     walletId: policy.walletId,
     agentCapId: policy.agentCapId,
-    balanceManagerId: policy.balanceManagerId,
-    tradeCapId: policy.tradeCapId,
+    balanceManagerId: policy.balanceManagerId!,
+    tradeCapId: policy.tradeCapId!,
     resolvedParams: {
       poolKey: 'SUI_DBUSDC',
-      poolId: policy.poolId,
+      poolId: policy.poolId!,
       price: 1,
       quantity: 0.005,
       isBid: false,
@@ -169,9 +177,9 @@ async function envelope(options: {
     requiredObjectIds: [
       policy.walletId,
       policy.agentCapId,
-      policy.balanceManagerId,
-      policy.tradeCapId,
-      policy.poolId,
+      policy.balanceManagerId!,
+      policy.tradeCapId!,
+      policy.poolId!,
       '0x6',
       ...(options.spendClockId && options.spendClockId !== '0x6' ? [options.spendClockId] : []),
       ...(options.orderClockId && options.orderClockId !== '0x6' ? [options.orderClockId] : []),
@@ -528,7 +536,7 @@ test('revoked TradeCap is rejected before signing', async () => {
 
 test('TradeCap held by another address is rejected before signing', async () => {
   await expect(assertCapabilitiesActive(
-    liveReader({ ownerOverrides: { [policy.tradeCapId]: id(99) } }) as never,
+    liveReader({ ownerOverrides: { [policy.tradeCapId!]: id(99) } }) as never,
     policy,
     5_000_000n,
   )).rejects.toThrow('TradeCap is not held');

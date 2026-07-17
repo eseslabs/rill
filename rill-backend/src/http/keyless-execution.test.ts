@@ -361,7 +361,7 @@ test('publish rejects unknown fields and documents a strict request body', async
 });
 
 test('build-action OpenAPI exposes only the canonical ExecutionEnvelope', () => {
-  const fields = [
+  const properties = [
     'actionDigest',
     'actionId',
     'agentCapId',
@@ -381,11 +381,12 @@ test('build-action OpenAPI exposes only the canonical ExecutionEnvelope', () => 
     'walletId',
     'walletPackageId',
   ];
+  const required = properties.filter((f) => f !== 'balanceManagerId' && f !== 'tradeCapId');
   const schema = responseSchema('/execute');
   const simulation = schema.properties.simulation as ObjectSchema;
 
-  expect(schema.required?.slice().sort()).toEqual(fields);
-  expect(Object.keys(schema.properties).sort()).toEqual(fields);
+  expect(schema.required?.slice().sort()).toEqual(required);
+  expect(Object.keys(schema.properties).sort()).toEqual(properties);
   expect(simulation.required?.slice().sort()).toEqual([
     'balanceChanges',
     'gasEstimate',

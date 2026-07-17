@@ -98,6 +98,8 @@ test('builds the minimal DeepBook ExecutionEnvelope without signing', async () =
     expect(envelope.resolvedParams).toEqual({
       poolKey,
       poolId: pools[poolKey].address,
+      balanceManagerId,
+      tradeCapId,
       price: 1,
       quantity: 0.01,
       isBid: false,
@@ -139,7 +141,7 @@ test('rejects action builds without a DeepBook limit order', async () => {
         coinType: '0x2::sui::SUI',
       },
     },
-  )).rejects.toThrow('requires exactly one DeepBook limit-order node');
+  )).rejects.toThrow('Cannot build an empty flow.');
 });
 
 test('rejects action builds with multiple DeepBook limit orders', async () => {
@@ -162,5 +164,5 @@ test('rejects action builds with multiple DeepBook limit orders', async () => {
         coinType: '0x2::sui::SUI',
       },
     },
-  )).rejects.toThrow('requires exactly one DeepBook limit-order node; found 2');
+  )).rejects.toThrow('pre-provisioned BalanceManager');
 });

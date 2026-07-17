@@ -24,7 +24,7 @@ export interface HaedalStakeNodeConfig {
   minStakeMist: string;
 }
 
-const RUNTIME_KEYS: Record<string, readonly string[]> = {
+export const RUNTIME_KEYS: Record<string, readonly string[]> = {
   cetus_swap: ['amount_in', 'min_amount_out'],
   haedal_stake: ['amount'],
   deepbook_limit_order: [

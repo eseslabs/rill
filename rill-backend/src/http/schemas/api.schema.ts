@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { isHeroActionFlow } from '../../features/mcp/tool-schema';
+import { isSupportedFlow } from '../../features/mcp/tool-schema';
 
 export const IntrospectSchema = z.object({
   packageId: z.string().min(4, 'Invalid Sui Package ID'),
@@ -53,9 +53,9 @@ export const PublishSchema = z.object({
   flow: FlowSchema,
   policyId: z.string().optional(),
 }).strict().refine(
-  ({ flow }) => isHeroActionFlow(flow),
+  ({ flow }) => isSupportedFlow(flow),
   {
-    message: 'Publish supports exactly one deepbook_limit_order node with no edges.',
+    message: 'Publish supports composed flows of supported action nodes (cetus_swap, haedal_stake, deepbook_limit_order) plus ptb/guardrail wrappers.',
     path: ['flow'],
   },
 );

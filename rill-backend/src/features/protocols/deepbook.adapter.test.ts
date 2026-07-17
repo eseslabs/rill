@@ -175,6 +175,7 @@ test('wallet-bound DeepBook envelope passes the local signer policy', async () =
         `${packageIds.DEEPBOOK_PACKAGE_ID}::pool::place_limit_order`,
       ],
       requiredGuards: [],
+      requiredObjectIds: envelope.requiredObjectIds,
       maxAmountMist: '6000000',
       minimumRemainingMist: '0',
       demoParams: {

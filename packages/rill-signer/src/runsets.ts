@@ -36,10 +36,14 @@ export function saveRunSet(label: string, data: RunSet): RunSet {
   return data;
 }
 
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
 function isRunSet(value: unknown): value is RunSet {
   if (!value || typeof value !== 'object') return false;
   const record = value as Record<string, unknown>;
-  return (
+  const hasRequired =
     typeof record.version === 'string' &&
     typeof record.label === 'string' &&
     typeof record.actionId === 'string' &&
@@ -48,10 +52,14 @@ function isRunSet(value: unknown): value is RunSet {
     typeof record.walletPackageId === 'string' &&
     typeof record.walletId === 'string' &&
     typeof record.agentCapId === 'string' &&
-    typeof record.balanceManagerId === 'string' &&
-    typeof record.tradeCapId === 'string' &&
-    typeof record.poolId === 'string' &&
+    isStringArray(record.allowedTargets) &&
+    isStringArray(record.requiredObjectIds) &&
+    isStringArray(record.requiredGuards) &&
     typeof record.maxAmountMist === 'string' &&
-    typeof record.minimumRemainingMist === 'string'
-  );
+    typeof record.minimumRemainingMist === 'string';
+  if (!hasRequired) return false;
+  if (record.balanceManagerId !== undefined && typeof record.balanceManagerId !== 'string') return false;
+  if (record.tradeCapId !== undefined && typeof record.tradeCapId !== 'string') return false;
+  if (record.poolId !== undefined && typeof record.poolId !== 'string') return false;
+  return true;
 }

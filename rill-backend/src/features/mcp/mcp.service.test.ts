@@ -265,11 +265,11 @@ test('publishing stores metadata without compiling runtime objects', async () =>
 
     expect(response.status).toBe(200);
     expect(body.data.warnings).toEqual([
-      'Published metadata only; build_action requires run-specific wallet, BalanceManager, TradeCap, sender, and runtime order params.',
+      'Published metadata only; build_action requires run-specific wallet, sender, and the runtime params listed in the tool schema.',
     ]);
     expect(published?.flow).toEqual(skill.flow);
     if (!published) throw new Error('expected published metadata');
-    expect(published?.name).toBe('DeepBook limit order');
+    expect(published?.name).toBe('Rill flow: deepbook_limit_order');
     expect(published?.name).not.toBe(published?.toolDefs.name);
     expect(body.data.name).toBe(published.name);
     expect(body.data.description).toBe(published.description);
@@ -279,7 +279,7 @@ test('publishing stores metadata without compiling runtime objects', async () =>
   }
 });
 
-test('publishing rejects anything except one edge-free DeepBook hero node', async () => {
+test('publishing rejects unsupported or invalid flows', async () => {
   const save = skillsStore.save;
   let saved = false;
   skillsStore.save = () => { saved = true; };
@@ -287,14 +287,7 @@ test('publishing rejects anything except one edge-free DeepBook hero node', asyn
   try {
     const invalidFlows = [
       { nodes: [], edges: [] },
-      { nodes: [{ id: 'swap', type: 'cetus_swap' }], edges: [] },
-      {
-        nodes: [
-          { id: 'order-1', type: 'deepbook_limit_order' },
-          { id: 'order-2', type: 'deepbook_limit_order' },
-        ],
-        edges: [],
-      },
+      { nodes: [{ id: 'x', type: 'unknown_protocol' }], edges: [] },
       {
         nodes: [{ id: 'order', type: 'deepbook_limit_order' }],
         edges: [{ source: 'order', sourceHandle: 'out', target: 'order', targetHandle: 'in' }],
