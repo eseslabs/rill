@@ -33,7 +33,11 @@ const flowSchema = {
           config: {
             type: 'object',
             additionalProperties: true,
-            example: { amount_in: '100000000', min_amount_out: '1' },
+            description:
+              'Node config. For cetus_swap, pass `slippageBps` and let the compiler derive the ' +
+              '`min_amount_out` floor from live pool state — an explicit `min_amount_out` is honoured ' +
+              'as-is and is only correct if you priced it yourself, just now.',
+            example: { amount_in: '100000000', slippageBps: '100' },
           },
           inputs: { type: 'object', additionalProperties: true },
         },
@@ -189,7 +193,9 @@ const exampleSwapStakeFlow = {
     {
       id: 'swap1',
       type: 'cetus_swap',
-      config: { amount_in: '100000000', min_amount_out: '1' },
+      // slippageBps, not min_amount_out: the floor is derived from pool state at compile time, so
+      // it is priced when the swap is built rather than frozen when the flow was authored.
+      config: { amount_in: '100000000', slippageBps: '100' },
     },
     {
       id: 'stake1',
@@ -325,6 +331,82 @@ export function buildOpenApiDocument(publicBaseUrl: string) {
                   }),
                 },
               },
+            },
+          },
+        },
+      },
+      '/quote': {
+        post: {
+          tags: ['Compiler'],
+          summary: 'Spot-quote a Cetus swap from pool state (no devInspect)',
+          description:
+            'Reads the pool object\'s current_sqrt_price (Q64.64) and fee_rate and computes the expected ' +
+            'output with exact integer math, then applies slippageBps to derive the on-chain floor passed to ' +
+            'rill_guard::assert_min_value. Deliberately avoids devInspect/simulateTransaction: Cetus aborts in ' +
+            'checked_package_version on testnet.\n\n' +
+            '**Limit:** this is a spot quote — it ignores price impact and tick crossing. Against thin liquidity ' +
+            'the real fill is lower than expectedOut, so minAmountOut can be too high and the swap reverts. ' +
+            'That is fail-closed: a reverted swap is safe, an unprotected one is not.',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['poolId', 'amountIn', 'a2b', 'slippageBps'],
+                  properties: {
+                    poolId: { type: 'string', description: 'Cetus CLMM pool object id' },
+                    amountIn: { type: 'string', description: 'Raw base units of the input coin (u64 string)' },
+                    a2b: {
+                      type: 'boolean',
+                      description: 'true = coinTypeA → coinTypeB; false = B → A (e.g. SUI → USDC on a USDC/SUI pool)',
+                    },
+                    slippageBps: {
+                      type: 'integer',
+                      minimum: 0,
+                      maximum: 9999,
+                      description: 'Slippage tolerance in basis points. 10000 is rejected — it would leave no floor.',
+                    },
+                  },
+                },
+                example: {
+                  poolId: '0x2603c08065a848b719f5f465e40dbef485ec4fd9c967ebe83a7565269a74a2b2',
+                  amountIn: '100000000',
+                  a2b: false,
+                  slippageBps: 100,
+                },
+              },
+            },
+          },
+          responses: {
+            '200': {
+              description: 'Spot quote and the derived on-chain floor',
+              content: {
+                'application/json': {
+                  schema: successEnvelope({
+                    type: 'object',
+                    required: ['expectedOut', 'minAmountOut', 'sqrtPriceX64', 'feeRate', 'ignoresPriceImpact', 'note'],
+                    properties: {
+                      expectedOut: { type: 'string', description: 'Expected raw output at the current spot price' },
+                      minAmountOut: {
+                        type: 'string',
+                        description: 'expectedOut reduced by slippageBps — the floor asserted on chain',
+                      },
+                      sqrtPriceX64: { type: 'string', description: 'Pool current_sqrt_price (Q64.64) the quote used' },
+                      feeRate: { type: 'string', description: 'Pool fee_rate in millionths (2500 = 0.25%)' },
+                      ignoresPriceImpact: {
+                        type: 'boolean',
+                        description: 'Always true — spot quote, not a simulation. Do not hide this from users.',
+                      },
+                      note: { type: 'string', description: 'Human-readable statement of the above caveat' },
+                    },
+                  }),
+                },
+              },
+            },
+            '422': {
+              description: 'Pool unreadable, paused, not a CLMM pool, or slippageBps leaves no floor',
             },
           },
         },

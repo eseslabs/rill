@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { Handle, Position, type NodeProps, useReactFlow, useEdges, useNodes } from "reactflow";
 import { motion } from "framer-motion";
 import { Shield, Layers, FileCode2, MessageSquareText, Plug, Wallet } from "lucide-react";
@@ -9,12 +9,20 @@ import { ProtocolLogo } from "@/components/flow/protocol-logo";
 import { WIRE_IN, WIRE_OUT } from "@/lib/wire-inference";
 import {
   defaultActionConfig,
+  formatRawAmount,
+  isA2B,
   otherSwapToken,
+  toMist,
+  toSlippageBps,
   DEEPBOOK_PAIRS,
+  DEFAULT_SLIPPAGE_PCT,
+  MAX_SLIPPAGE_PCT,
+  TESTNET_MANIFEST,
   type ActionConfig,
   type SwapTokenSymbol,
   type DeepbookPairKey,
 } from "@/lib/action-config";
+import { rillApi, type Quote } from "@/lib/rill-api";
 import {
   Select,
   SelectContent,
@@ -56,6 +64,56 @@ const roleBadge: Partial<Record<NonNullable<Port["role"]>, string>> = {
   id: "bg-muted text-muted-foreground",
 };
 
+/**
+ * Live spot quote for the swap node's current settings — advisory only.
+ *
+ * Shows the user the floor their slippage setting implies before they commit. The floor actually
+ * asserted on chain is re-derived by the backend at compile time, so a stale or failed quote here
+ * can never widen the real guard; it only means this readout goes quiet.
+ */
+function useSwapQuote(enabled: boolean, tokenIn: SwapTokenSymbol, amount: string, slippage: string) {
+  const [quote, setQuote] = useState<Quote | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const amountIn = enabled ? toMist(amount, "0") : "0";
+  const slippageBps = toSlippageBps(slippage);
+
+  useEffect(() => {
+    if (!enabled || amountIn === "0") {
+      setQuote(null);
+      setError(null);
+      return;
+    }
+    let cancelled = false;
+    // Debounced: the amount field fires this on every keystroke.
+    const timer = setTimeout(() => {
+      rillApi
+        .quote({
+          poolId: TESTNET_MANIFEST.cetus_swap.defaultPoolId,
+          amountIn,
+          a2b: isA2B(tokenIn),
+          slippageBps,
+        })
+        .then((q) => {
+          if (cancelled) return;
+          setQuote(q);
+          setError(null);
+        })
+        .catch((err: unknown) => {
+          if (cancelled) return;
+          setQuote(null);
+          setError(err instanceof Error ? err.message : "Quote unavailable");
+        });
+    }, 350);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [enabled, amountIn, slippageBps, tokenIn]);
+
+  return { quote, error };
+}
+
 function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
   const c = colorMap[data.color] ?? colorMap.mint;
   const ports = data.ports;
@@ -94,6 +152,14 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
     ),
     ...data.config,
   };
+
+  const swapTokenIn = (cfg.tokenIn ?? "SUI") as SwapTokenSymbol;
+  const { quote, error: quoteError } = useSwapQuote(
+    isCetusSwap,
+    swapTokenIn,
+    String(cfg.amount ?? "0.1"),
+    String(cfg.slippage ?? DEFAULT_SLIPPAGE_PCT),
+  );
 
   const fieldCls =
     "nodrag nowheel w-full rounded-md border border-border bg-background px-2 py-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-primary/40";
@@ -172,9 +238,57 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
                   value={cfg.amount ?? "0.1"}
                   onChange={(e) => patchConfig({ amount: e.target.value })}
                 />
-                <TokenBadge symbol={(cfg.tokenIn ?? "SUI") as SwapTokenSymbol} />
+                <TokenBadge symbol={swapTokenIn} />
               </div>
             </label>
+            <label className="block">
+              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">
+                Max slippage
+              </span>
+              <div className="mt-0.5 flex items-center gap-1.5">
+                <input
+                  type="number"
+                  min="0"
+                  max={MAX_SLIPPAGE_PCT}
+                  step="0.1"
+                  className={fieldCls}
+                  value={cfg.slippage ?? DEFAULT_SLIPPAGE_PCT}
+                  onChange={(e) => patchConfig({ slippage: e.target.value })}
+                />
+                <span className="text-[11px] text-muted-foreground">%</span>
+              </div>
+            </label>
+
+            <div className="rounded-md border border-border/60 bg-muted/30 px-2 py-1.5">
+              {quote ? (
+                <>
+                  <div className="flex items-baseline justify-between gap-2 text-[11px]">
+                    <span className="text-muted-foreground">Expected</span>
+                    <span className="font-mono text-foreground">
+                      ≈ {formatRawAmount(quote.expectedOut, otherSwapToken(swapTokenIn))}{" "}
+                      {otherSwapToken(swapTokenIn)}
+                    </span>
+                  </div>
+                  <div className="mt-0.5 flex items-baseline justify-between gap-2 text-[11px]">
+                    <span className="text-muted-foreground">Floor (on chain)</span>
+                    <span className="font-mono text-foreground">
+                      {formatRawAmount(quote.minAmountOut, otherSwapToken(swapTokenIn))}{" "}
+                      {otherSwapToken(swapTokenIn)}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[9px] leading-tight text-muted-foreground">
+                    Spot price · ignores price impact. rill_guard aborts the swap below the floor.
+                  </p>
+                </>
+              ) : quoteError ? (
+                <p className="text-[10px] leading-tight text-muted-foreground">
+                  No quote: {quoteError}. The floor is set at compile time — without a quote the
+                  compile fails rather than swapping unguarded.
+                </p>
+              ) : (
+                <p className="text-[10px] text-muted-foreground">Quoting…</p>
+              )}
+            </div>
           </div>
         )}
 

@@ -5,6 +5,9 @@ export const TESTNET_MANIFEST = {
     integratePackageId: "0xab2d58dd28ff0dc19b18ab2c634397b785a38c342a8f5065ade5f53f9dbffa1c",
     globalConfigId: "0xc6273f844b4bc258952c4e477697aa12c918c8e08106fac6b934811298c9820a",
     defaultPoolId: "0x2603c08065a848b719f5f465e40dbef485ec4fd9c967ebe83a7565269a74a2b2",
+    /** Coin A of the curated pool (Pool<USDC, SUI>) — decides swap direction. Mirrors the backend registry. */
+    coinTypeA:
+      "0x14a71d857b34677a7d57e0feb303df1adb515a37780645ab763d42ce8d1a5e48::usdc::USDC",
     minSqrtPrice: "4295048016",
     maxSqrtPrice: "79226673515401279992447579055",
   },
@@ -43,11 +46,50 @@ export const TOKEN_COIN_TYPE: Record<SwapTokenSymbol, string> = Object.fromEntri
   SWAP_TOKENS.map((t) => [t.symbol, t.coinType]),
 ) as Record<SwapTokenSymbol, string>;
 
+/** Raw base units per whole token. Cetus quotes in raw units, so display needs these to be honest. */
+export const TOKEN_DECIMALS: Record<SwapTokenSymbol, number> = { SUI: 9, USDC: 6 };
+
+/** Format a raw base-unit amount for display. Trims trailing zeros; never rounds up. */
+export function formatRawAmount(raw: string, symbol: SwapTokenSymbol): string {
+  const decimals = TOKEN_DECIMALS[symbol] ?? 9;
+  const padded = raw.padStart(decimals + 1, "0");
+  const whole = padded.slice(0, padded.length - decimals);
+  const frac = padded.slice(padded.length - decimals).replace(/0+$/, "");
+  return frac ? `${whole}.${frac}` : whole;
+}
+
+/**
+ * True when `tokenIn` is the pool's coin A. The curated pool is Pool<USDC, SUI>, so SUI → USDC is
+ * b2a. Getting this backwards inverts the quote, which would show a confidently wrong price.
+ */
+export function isA2B(tokenIn: SwapTokenSymbol): boolean {
+  return TOKEN_COIN_TYPE[tokenIn] === TESTNET_MANIFEST.cetus_swap.coinTypeA;
+}
+
 export type ActionConfig = Record<string, string>;
+
+/** Slippage tolerance the swap node ships with, in percent. */
+export const DEFAULT_SLIPPAGE_PCT = "1.0";
+/** Beyond this a "floor" stops being one; the backend rejects anything at or above 100%. */
+export const MAX_SLIPPAGE_PCT = 50;
+
+/**
+ * Percent → basis points for the on-chain floor.
+ *
+ * Unparseable input falls back to the default tolerance rather than to no tolerance. That is not a
+ * permissive default: a *tight* floor can only cause a revert, while a missing one is the
+ * `min_amount_out: "1"` bug — a swap that accepts any fill at all.
+ */
+export function toSlippageBps(percent: string): number {
+  const n = parseFloat(percent);
+  const fallback = Math.round(parseFloat(DEFAULT_SLIPPAGE_PCT) * 100);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return Math.min(Math.round(n * 100), MAX_SLIPPAGE_PCT * 100);
+}
 
 export function defaultActionConfig(protocolId: string, actionId: string): ActionConfig {
   if (protocolId === "cetus" && actionId === "swap") {
-    return { tokenIn: "SUI", tokenOut: "USDC", amount: "0.1" };
+    return { tokenIn: "SUI", tokenOut: "USDC", amount: "0.1", slippage: DEFAULT_SLIPPAGE_PCT };
   }
   if (protocolId === "haedal" && actionId === "stake") {
     return { amount: "1" };
@@ -79,7 +121,14 @@ export function otherSwapToken(symbol: SwapTokenSymbol): SwapTokenSymbol {
   return symbol === "SUI" ? "USDC" : "SUI";
 }
 
-/** Build backend flow node config — FE owns protocol addresses, BE compiles from this payload. */
+/**
+ * Build backend flow node config — FE owns protocol addresses, BE compiles from this payload.
+ *
+ * Carries `slippageBps` (the user's tolerance) and *not* `min_amount_out` (the floor). The backend
+ * derives the floor from live pool state at compile time, so a flow published today still gets a
+ * floor priced against today's pool when an agent runs it next week. A floor computed here would be
+ * frozen at build time — stale, and stale in the unsafe direction once the price rises.
+ */
 export function buildCetusSwapFlowConfig(cfg: ActionConfig) {
   const tokenIn = (cfg.tokenIn as SwapTokenSymbol) || "SUI";
   const m = TESTNET_MANIFEST.cetus_swap;
@@ -90,7 +139,7 @@ export function buildCetusSwapFlowConfig(cfg: ActionConfig) {
     inputCoinType: TOKEN_COIN_TYPE[tokenIn] ?? TOKEN_COIN_TYPE.SUI,
     outputCoinType: TOKEN_COIN_TYPE[otherSwapToken(tokenIn)],
     amount_in: toMist(String(cfg.amount ?? "0.1"), "100000000"),
-    min_amount_out: "1",
+    slippageBps: String(toSlippageBps(String(cfg.slippage ?? DEFAULT_SLIPPAGE_PCT))),
     minSqrtPrice: m.minSqrtPrice,
     maxSqrtPrice: m.maxSqrtPrice,
   };

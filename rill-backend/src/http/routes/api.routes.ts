@@ -8,6 +8,7 @@ import { resolverService } from '../../features/introspect/resolver.service';
 import { compilerService } from '../../features/compiler/compiler.service';
 import { previewService } from '../../features/compiler/preview.service';
 import { serializeUnsignedPtb } from '../../features/compiler/ptb.util';
+import { quoteService } from '../../features/compiler/quote.service';
 import { simulatorService } from '../../features/compiler/simulator.service';
 import { skillsStore } from '../../features/mcp/skills.store';
 import { skillRunnerService } from '../../features/mcp/skill-runner.service';
@@ -27,6 +28,7 @@ import {
   SimulateSchema,
   PublishSchema,
   ExecuteSchema,
+  QuoteSchema,
   SetupPrepareSchema,
 } from '../schemas/api.schema';
 
@@ -117,6 +119,17 @@ apiRouter.post('/simulate', zValidator('json', SimulateSchema), async (c) => {
       agentWalletBound: compileResult.agentWalletBound,
     },
   });
+});
+
+/**
+ * Spot quote for a Cetus swap, read from pool state — never devInspect, which aborts on
+ * Cetus's `checked_package_version` on testnet. The `note`/`ignoresPriceImpact` fields are
+ * part of the contract: callers must know this is a spot rate, not a simulated fill.
+ */
+apiRouter.post('/quote', zValidator('json', QuoteSchema), async (c) => {
+  const { poolId, amountIn, a2b, slippageBps } = c.req.valid('json');
+  const quote = await quoteService.quoteCetus(poolId, BigInt(amountIn), a2b, BigInt(slippageBps));
+  return c.json({ success: true, data: quote });
 });
 
 apiRouter.post('/publish', zValidator('json', PublishSchema), async (c) => {

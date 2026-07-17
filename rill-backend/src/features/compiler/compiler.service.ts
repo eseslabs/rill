@@ -6,6 +6,7 @@ import { SUI_CLOCK_ID } from '../../core/protocols';
 import { getAdapter } from '../protocols/registry';
 import { injectMinOutAssert } from '../protocols/guard';
 import { deriveCallManifest, type ManifestCall } from './manifest';
+import { applyQuotedFloors } from './quote.service';
 import type {
   CompileOptions,
   CompileResult,
@@ -42,6 +43,11 @@ export class CompilerService {
     const resolvedFlow = resolveEffectiveFlow(flow, runtimeParams);
     const tx = new Transaction();
     const warnings: string[] = [];
+
+    // Turn declared slippage tolerance into a real on-chain floor against current pool state,
+    // before any adapter reads min_amount_out. Throws rather than compiling an unguarded swap.
+    await applyQuotedFloors(resolvedFlow, warnings);
+
     const orderedNodes = this.topologicalSort(resolvedFlow.nodes, resolvedFlow.edges);
     const nodeOutputs: Record<string, unknown> = {};
 

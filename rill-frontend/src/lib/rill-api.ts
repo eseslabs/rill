@@ -40,6 +40,19 @@ export type SimulationResult = {
   objectChanges?: unknown[];
 };
 
+export type Quote = {
+  /** Raw base units expected out at the pool's current spot price. */
+  expectedOut: string;
+  /** expectedOut minus slippage — the floor rill_guard::assert_min_value enforces on chain. */
+  minAmountOut: string;
+  sqrtPriceX64: string;
+  /** Pool fee in millionths (2500 = 0.25%). */
+  feeRate: string;
+  /** Always true — a spot quote, not a simulated fill. Show it; do not quietly drop it. */
+  ignoresPriceImpact: true;
+  note: string;
+};
+
 export type PublishResult = {
   skillId: string;
   name: string;
@@ -137,6 +150,15 @@ export const rillApi = {
 
   introspect(packageId: string) {
     return post<BackendFunction[]>("/introspect", { packageId });
+  },
+
+  /**
+   * Spot-quote a Cetus swap from pool state. Read-only and advisory: the floor actually compiled
+   * into the PTB is re-derived server-side at compile time, so this can never be the stale number
+   * a swap is judged against.
+   */
+  quote(input: { poolId: string; amountIn: string; a2b: boolean; slippageBps: number }) {
+    return post<Quote>("/quote", input);
   },
 
   simulate(flow: FlowGraph) {

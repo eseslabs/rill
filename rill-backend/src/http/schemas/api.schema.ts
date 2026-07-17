@@ -67,6 +67,17 @@ export const ExecuteSchema = z.object({
   agentWallet: AgentWalletSchema,
 }).strict();
 
+/**
+ * A Cetus spot quote request. `slippageBps` stops at 9999 deliberately: 10000 bps would put the
+ * floor at zero, which is the `min_amount_out: "1"` bug this endpoint exists to remove.
+ */
+export const QuoteSchema = z.object({
+  poolId: z.string().min(4, 'poolId must be a Sui object id.'),
+  amountIn: z.string().regex(/^\d+$/, 'amountIn must be a decimal u64 string (raw base units).'),
+  a2b: z.boolean(),
+  slippageBps: z.number().int().min(0).max(9999),
+}).strict();
+
 export const SetupPrepareSchema = z.object({
   skillId: z.string().min(1),
   sender: z.string().min(4),
