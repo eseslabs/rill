@@ -51,19 +51,26 @@ export function pickSwapFunction(
   };
 }
 
-export function pickSwapFunctionLegacy(inputCoinType: string, pool: PoolTypeArgs): SwapPlan {
-  const a2b = inputCoinType === pool.coinTypeA;
-  return {
-    module: 'pool_script',
-    function: a2b ? 'swap_a2b' : 'swap_b2a',
-    typeArguments: [pool.coinTypeA, pool.coinTypeB],
-    sqrtPriceLimit: a2b ? CETUS.minSqrtPrice : CETUS.maxSqrtPrice,
-    a2b,
-    outputCoinType: a2b ? pool.coinTypeB : pool.coinTypeA,
-  };
-}
+/**
+ * Cetus CLMM devInspect hits a stub package-version check (`checked_package_version`) that real
+ * mainnet transactions don't — that's the ONE known false-abort devInspect produces, so the
+ * `/simulate` classifier reports it as `verification: 'unverified'` instead of a hard failure.
+ *
+ * R3: matches the Cetus package id + the `checked_package_version` context together, not a bare
+ * substring — an unrelated abort from some other package that happens to mention
+ * "checked_package_version" in its own error text (e.g. a lookalike/malicious devInspect response,
+ * or a different protocol with a similarly-named guard) must NOT be misclassified as this specific,
+ * known-safe Cetus quirk. All three network-specific Cetus package ids are checked because the
+ * version guard can be raised from the CLMM package, the legacy script package, or the integrate
+ * package depending on which module the abort unwound through.
+ */
+const CETUS_VERSION_CHECK_PACKAGE_IDS = [
+  CETUS.integratePackageId,
+  CETUS.clmmPackageId,
+  CETUS.scriptPackageId,
+];
 
-/** Cetus CLMM devInspect hits stub package version check — real mainnet txs still succeed. */
 export function isCetusDevInspectVersionAbort(error?: string): boolean {
-  return Boolean(error?.includes('checked_package_version'));
+  if (!error || !error.includes('checked_package_version')) return false;
+  return CETUS_VERSION_CHECK_PACKAGE_IDS.some((packageId) => error.includes(packageId));
 }

@@ -385,3 +385,257 @@ test('build_action rejects fields outside the public AgentWallet binding', async
   });
   expect(called).toBe(false);
 });
+
+test('build_action surfaces a failed-simulation refusal as an MCP tool error, not an envelope (R3/KTD-4)', async () => {
+  const refusal = {
+    refused: true,
+    actionId: skill.id,
+    reason: 'Rill never hands out a signable ExecutionEnvelope for a transaction that failed strict simulation: MoveAbort',
+    simulation: { ok: false, verification: 'verified', error: 'MoveAbort', gasEstimate: 0, balanceChanges: [], objectChanges: [] },
+  };
+  const response = await handleMcpJsonRpc('skill_deepbook', {
+    jsonrpc: '2.0',
+    id: 9,
+    method: 'tools/call',
+    params: {
+      name: 'build_action',
+      arguments: {
+        actionId: skill.id,
+        sender: '0x1',
+        agentWallet: { packageId: '0x2', walletId: '0x3', capId: '0x6' },
+        params: {
+          poolKey: 'SUI_DBUSDC',
+          balanceManagerId: '0x4',
+          tradeCapId: '0x5',
+          price: 1,
+          quantity: 0.005,
+          isBid: false,
+          payWithDeep: false,
+          clientOrderId: '71601',
+          depositSui: 0.006,
+        },
+      },
+    },
+  }, {
+    getSkill: () => skill,
+    runFlow: async () => refusal as never,
+  });
+  const result = response?.result as { content: [{ text: string }]; isError: boolean; structuredContent: unknown };
+
+  expect(result.isError).toBe(true);
+  expect(result.structuredContent).toEqual(refusal);
+  expect(JSON.parse(result.content[0].text)).toEqual(refusal);
+});
+
+// --- JSON-RPC spec correctness (R14) --------------------------------------------------------
+
+test('a non-notification request without an id returns a JSON-RPC -32600 Invalid Request', async () => {
+  const response = await handleMcpJsonRpc('skill_deepbook', {
+    jsonrpc: '2.0',
+    method: 'tools/list',
+  }, {
+    getSkill: () => skill,
+    runFlow: async () => { throw new Error('not called'); },
+  });
+
+  expect(response).toEqual({
+    jsonrpc: '2.0',
+    id: null,
+    error: { code: -32600, message: 'Invalid Request: "id" is required for a non-notification request.' },
+  });
+});
+
+test('a notifications/* method still gets no response even though it has no id (unchanged)', async () => {
+  const response = await handleMcpJsonRpc('skill_deepbook', {
+    jsonrpc: '2.0',
+    method: 'notifications/initialized',
+  }, {
+    getSkill: () => skill,
+    runFlow: async () => { throw new Error('not called'); },
+  });
+
+  expect(response).toBeNull();
+});
+
+test('an explicit id: null on a non-notification request still gets a correlated response', async () => {
+  const response = await handleMcpJsonRpc('skill_deepbook', {
+    jsonrpc: '2.0',
+    id: null,
+    method: 'ping',
+  }, {
+    getSkill: () => skill,
+    runFlow: async () => { throw new Error('not called'); },
+  });
+
+  expect(response).toEqual({ jsonrpc: '2.0', id: null, result: {} });
+});
+
+test('POST /mcp/:skillId handles a JSON-RPC batch and returns an array of responses', async () => {
+  const get = skillsStore.get;
+  skillsStore.get = () => skill;
+  try {
+    const response = await apiRouter.request(`/mcp/${skill.id}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify([
+        { jsonrpc: '2.0', id: 1, method: 'ping' },
+        { jsonrpc: '2.0', id: 2, method: 'tools/list' },
+      ]),
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json() as Array<{ id: number }>;
+    expect(Array.isArray(body)).toBe(true);
+    expect(body).toHaveLength(2);
+    expect(body.map((entry) => entry.id)).toEqual([1, 2]);
+  } finally {
+    skillsStore.get = get;
+  }
+});
+
+test('POST /mcp/:skillId batch omits notification entries and returns only real responses', async () => {
+  const get = skillsStore.get;
+  skillsStore.get = () => skill;
+  try {
+    const response = await apiRouter.request(`/mcp/${skill.id}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify([
+        { jsonrpc: '2.0', method: 'notifications/initialized' },
+        { jsonrpc: '2.0', id: 1, method: 'ping' },
+      ]),
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json() as Array<{ id: number }>;
+    expect(body).toHaveLength(1);
+    expect(body[0].id).toBe(1);
+  } finally {
+    skillsStore.get = get;
+  }
+});
+
+test('POST /mcp/:skillId rejects an empty batch with -32600', async () => {
+  const get = skillsStore.get;
+  skillsStore.get = () => skill;
+  try {
+    const response = await apiRouter.request(`/mcp/${skill.id}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify([]),
+    });
+    expect(response.status).toBe(400);
+    const body = await response.json() as { error: { code: number } };
+    expect(body.error.code).toBe(-32600);
+  } finally {
+    skillsStore.get = get;
+  }
+});
+
+// --- Origin allowlist, exact match only (R14) -----------------------------------------------
+
+test('POST /mcp/:skillId rejects a foreign Origin with 403', async () => {
+  const get = skillsStore.get;
+  skillsStore.get = () => skill;
+  try {
+    const response = await apiRouter.request(`/mcp/${skill.id}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Origin: 'https://evil.example.com' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
+    });
+    expect(response.status).toBe(403);
+  } finally {
+    skillsStore.get = get;
+  }
+});
+
+test('POST /mcp/:skillId rejects a lookalike origin (substring "localhost", not an exact host) with 403', async () => {
+  const get = skillsStore.get;
+  skillsStore.get = () => skill;
+  try {
+    const response = await apiRouter.request(`/mcp/${skill.id}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Origin: 'http://notlocalhost.evil.com' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
+    });
+    expect(response.status).toBe(403);
+  } finally {
+    skillsStore.get = get;
+  }
+});
+
+test('POST /mcp/:skillId allows an exact localhost origin', async () => {
+  const get = skillsStore.get;
+  skillsStore.get = () => skill;
+  try {
+    const response = await apiRouter.request(`/mcp/${skill.id}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Origin: 'http://localhost:5173' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
+    });
+    expect(response.status).toBe(200);
+  } finally {
+    skillsStore.get = get;
+  }
+});
+
+test('POST /mcp/:skillId allows requests with no Origin header at all (non-browser clients)', async () => {
+  const get = skillsStore.get;
+  skillsStore.get = () => skill;
+  try {
+    const response = await apiRouter.request(`/mcp/${skill.id}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
+    });
+    expect(response.status).toBe(200);
+  } finally {
+    skillsStore.get = get;
+  }
+});
+
+// --- Publish stored-skill capacity (R13) ----------------------------------------------------
+
+test('publish rejects new skills when the store is at capacity — no eviction', async () => {
+  const list = skillsStore.list;
+  const save = skillsStore.save;
+  let saved = false;
+  skillsStore.list = () => Array.from({ length: 500 }, (_, i) => ({ id: `skill_${i}` } as PublishedSkill));
+  skillsStore.save = () => { saved = true; };
+
+  try {
+    const response = await apiRouter.request('/publish', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ flow: skill.flow }),
+    });
+    const body = await response.json() as { success: boolean; type: string };
+
+    expect(response.status).toBe(507);
+    expect(body.success).toBe(false);
+    expect(body.type).toBe('SkillCapacityReached');
+    expect(saved).toBe(false);
+  } finally {
+    skillsStore.list = list;
+    skillsStore.save = save;
+  }
+});
+
+test('publish still succeeds when the store is below capacity', async () => {
+  const list = skillsStore.list;
+  const save = skillsStore.save;
+  let saved = false;
+  skillsStore.list = () => Array.from({ length: 3 }, (_, i) => ({ id: `skill_${i}` } as PublishedSkill));
+  skillsStore.save = () => { saved = true; };
+
+  try {
+    const response = await apiRouter.request('/publish', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ flow: skill.flow }),
+    });
+    expect(response.status).toBe(200);
+    expect(saved).toBe(true);
+  } finally {
+    skillsStore.list = list;
+    skillsStore.save = save;
+  }
+});

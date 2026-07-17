@@ -102,3 +102,20 @@ test('IntrospectSchema rejects a garbage packageId', () => {
 test('IntrospectSchema accepts a well-formed packageId', () => {
   expect(IntrospectSchema.safeParse({ packageId: `0x${'a'.repeat(64)}` }).success).toBe(true);
 });
+
+// --- useServerWallet opt-in flag (R13) --------------------------------------------------------
+
+test('CompileSchema and SimulateSchema accept an optional useServerWallet flag', () => {
+  expect(CompileSchema.safeParse({ flow: { nodes: [], edges: [] }, useServerWallet: true }).success).toBe(true);
+  expect(SimulateSchema.safeParse({ flow: { nodes: [], edges: [] }, useServerWallet: false }).success).toBe(true);
+});
+
+test('CompileSchema and SimulateSchema still accept an absent (optional) useServerWallet', () => {
+  expect(CompileSchema.safeParse({ flow: { nodes: [], edges: [] } }).success).toBe(true);
+  expect(SimulateSchema.safeParse({ flow: { nodes: [], edges: [] } }).success).toBe(true);
+});
+
+test('CompileSchema rejects a non-boolean useServerWallet', () => {
+  const result = CompileSchema.safeParse({ flow: { nodes: [], edges: [] }, useServerWallet: 'true' });
+  expect(result.success).toBe(false);
+});

@@ -69,16 +69,23 @@ export const FlowSchema = z.object({
   }
 });
 
+/** R13: opts an anonymous request into binding the operator's configured server wallet
+ *  (`config.agentWallet`) — see `api.routes.ts`'s `resolveAgentWallet`. Without this flag (and
+ *  without an explicit `agentWallet`), /compile and /simulate never bind any wallet. */
+const useServerWallet = z.boolean().optional();
+
 export const CompileSchema = z.object({
   flow: FlowSchema,
   sender: suiAddress('sender').optional(),
   agentWallet: AgentWalletSchema.optional(),
+  useServerWallet,
 }).strict();
 
 export const SimulateSchema = z.object({
   flow: FlowSchema,
   sender: suiAddress('sender').optional(),
   agentWallet: AgentWalletSchema.optional(),
+  useServerWallet,
 }).strict();
 
 export const PublishSchema = z.object({

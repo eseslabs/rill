@@ -1,5 +1,6 @@
 import { DiscoveredFunction, MoveParameter } from './types';
 import { CETUS, HAEDAL, SUI_CLOCK_ID } from '../../core/protocols';
+import { introspectService } from './introspect.service';
 
 export interface ResolvedParameter extends MoveParameter {
   role: string | null;
@@ -31,10 +32,14 @@ export interface ResolvedManifest {
 }
 
 const CURATED_MANIFESTS: Record<string, ResolvedManifest> = {
+  // R15: `pool_script::swap_a2b` is deprecated (fails Cetus's own devInspect package-version check
+  // — see `CETUS.scriptPackageId`'s `@deprecated` note in `core/protocols.ts`); the manifest now
+  // describes what `cetus.adapter.ts` actually calls: `router::swap` (zero-coin pattern, both sides
+  // passed every call — the unfunded side is a `0x2::coin::zero` coin, see `cetus.adapter.ts`).
   'cetus_swap': {
     packageId: CETUS.integratePackageId,
-    module: 'pool_script',
-    functionName: 'swap_a2b',
+    module: 'router',
+    functionName: 'swap',
     packageVersion: '1',
     resolvedAt: new Date().toISOString(),
     typeParameters: [
@@ -70,10 +75,10 @@ const CURATED_MANIFESTS: Record<string, ResolvedManifest> = {
       },
       {
         index: 2,
-        name: 'coin_inputs',
-        moveType: 'vector<0x2::coin::Coin<T0>>',
-        class: 'vector',
-        role: 'coin_in',
+        name: 'coin_a',
+        moveType: '0x2::coin::Coin<T0>',
+        class: 'coin',
+        role: 'coin_in_a',
         boundType: 'none',
         boundOf: null,
         exposure: 'agent_input',
@@ -83,6 +88,32 @@ const CURATED_MANIFESTS: Record<string, ResolvedManifest> = {
       },
       {
         index: 3,
+        name: 'coin_b',
+        moveType: '0x2::coin::Coin<T1>',
+        class: 'coin',
+        role: 'coin_in_b',
+        boundType: 'none',
+        boundOf: null,
+        exposure: 'agent_input',
+        default: null,
+        confidence: 1.0,
+        provenance: 'type'
+      },
+      {
+        index: 4,
+        name: 'a2b',
+        moveType: 'bool',
+        class: 'pure',
+        role: 'direction_a_to_b',
+        boundType: 'none',
+        boundOf: null,
+        exposure: 'fixed',
+        default: true,
+        confidence: 1.0,
+        provenance: 'source'
+      },
+      {
+        index: 5,
         name: 'by_amount_in',
         moveType: 'bool',
         class: 'pure',
@@ -95,8 +126,8 @@ const CURATED_MANIFESTS: Record<string, ResolvedManifest> = {
         provenance: 'source'
       },
       {
-        index: 4,
-        name: 'amount_in',
+        index: 6,
+        name: 'amount',
         moveType: 'u64',
         class: 'pure',
         role: 'amount_in',
@@ -108,20 +139,7 @@ const CURATED_MANIFESTS: Record<string, ResolvedManifest> = {
         provenance: 'event'
       },
       {
-        index: 5,
-        name: 'amount_limit',
-        moveType: 'u64',
-        class: 'pure',
-        role: 'min_amount_out',
-        boundType: 'min',
-        boundOf: 'amount_out',
-        exposure: 'default',
-        default: 0,
-        confidence: 1.0,
-        provenance: 'event'
-      },
-      {
-        index: 6,
+        index: 7,
         name: 'sqrt_price_limit',
         moveType: 'u128',
         class: 'pure',
@@ -134,7 +152,23 @@ const CURATED_MANIFESTS: Record<string, ResolvedManifest> = {
         provenance: 'statistical'
       },
       {
-        index: 7,
+        // Undocumented upstream — `cetus.adapter.ts` always passes `false` here but we don't have
+        // a confirmed semantic for this argument, so it's flagged low-confidence rather than
+        // asserted as fact.
+        index: 8,
+        name: 'swap_partner',
+        moveType: 'bool',
+        class: 'pure',
+        role: 'swap_partner_flag',
+        boundType: 'none',
+        boundOf: null,
+        exposure: 'fixed',
+        default: false,
+        confidence: 0.6,
+        provenance: 'source'
+      },
+      {
+        index: 9,
         name: 'clock',
         moveType: '0x2::clock::Clock',
         class: 'system',
@@ -234,9 +268,6 @@ const CURATED_MANIFESTS: Record<string, ResolvedManifest> = {
   }
 };
 
-import { suiClient } from '../../core/config';
-import { introspectService } from './introspect.service';
-
 export class ResolverService {
   /**
    * Resolves semantics for a single function in a package.
@@ -249,15 +280,25 @@ export class ResolverService {
     return this.resolveDynamic(packageId, moduleName, functionName);
   }
 
+  /**
+   * R15: exact match on packageId + module + function (not the previous `includes()` substring
+   * check) — a bare substring match on hex fragments like `'3a5aa9'`/`'1eabed'` or on the literal
+   * word `'cetus'` (which never appears in a real hex address) risked matching an unrelated package
+   * that merely shares those characters, or a function whose name merely contains "swap"/"stake" as
+   * a substring (e.g. `flash_swap`, `unstake`). `CETUS`/`HAEDAL` are network-aware (`core/protocols.ts`
+   * picks testnet/mainnet ids from `SUI_NETWORK`), so this matches correctly on either network.
+   */
   private findCuratedKey(packageId: string, moduleName: string, functionName: string): string | null {
     const p = packageId.toLowerCase();
     const m = moduleName.toLowerCase();
     const f = functionName.toLowerCase();
+    const cetusPackageIds = [CETUS.integratePackageId, CETUS.clmmPackageId, CETUS.scriptPackageId]
+      .map((id) => id.toLowerCase());
 
-    if ((p.includes('3a5aa9') || p.includes('1eabed') || p.includes('cetus')) && f.includes('swap')) {
+    if (cetusPackageIds.includes(p) && m === 'router' && f === 'swap') {
       return 'cetus_swap';
     }
-    if ((p.includes('126e4c') || p.includes('haedal')) && (f.includes('stake') || f.includes('request_stake'))) {
+    if (p === HAEDAL.packageId.toLowerCase() && m === 'interface' && f === 'request_stake') {
       return 'haedal_stake';
     }
     return null;
@@ -276,16 +317,13 @@ export class ResolverService {
       throw new Error(`Function ${moduleName}::${functionName} not found in package ${packageId}`);
     }
 
-    // 2. Query historical transactions for event-matching
+    // 2. Historical-transaction event-matching is not implemented over gRPC in this build (R15) —
+    // `resolveDynamic` degrades gracefully to the same result it would reach after an unconditional
+    // failure: every `pure` param stays unmatched (`matches` empty, `processedTxCount` 0), so
+    // step 3 below falls through to its lower-confidence, non-event-derived naming for every field.
     const matches: Record<number, Record<string, number>> = {};
     const emits = new Set<string>();
-    let processedTxCount = 0;
-
-    try {
-      throw new Error('Transaction history resolution is not supported over gRPC in this build.');
-    } catch (e: any) {
-      console.warn(`Querying transaction history failed for resolver: ${e.message}. Degrading gracefully.`);
-    }
+    const processedTxCount = 0;
 
     // 3. Construct resolved parameters list
     const parameters: ResolvedParameter[] = func.parameters.map((param) => {

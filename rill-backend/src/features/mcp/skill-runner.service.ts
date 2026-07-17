@@ -8,7 +8,7 @@ import { resolveDeepbookOrderConfig, suiToMist } from '../../core/node-config';
 import { compilerService, type FlowGraph } from '../compiler/compiler.service';
 import { previewService } from '../compiler/preview.service';
 import { inspectTransaction, serializeUnsignedPtb } from '../compiler/ptb.util';
-import { simulatorService } from '../compiler/simulator.service';
+import { simulatorService, type SimulationResult } from '../compiler/simulator.service';
 
 export interface RunFlowOptions {
   actionId: string;
@@ -16,12 +16,25 @@ export interface RunFlowOptions {
   agentWallet: AgentWalletBinding;
 }
 
+/**
+ * Returned by `runFlow` instead of an `ExecutionEnvelope` whenever strict simulation fails
+ * (R3/KTD-4) — unconditionally, with no carve-out and no bypass field on the envelope itself.
+ * Deliberately envelope-shaped-nothing-alike (no `unsignedPtb`/`actionDigest`/`version`) so it can
+ * never be mistaken for something signable by a caller that skips the `refused` check.
+ */
+export interface ActionBuildRefusal {
+  refused: true;
+  actionId: string;
+  reason: string;
+  simulation: SimulationResult;
+}
+
 export class SkillRunnerService {
   async runFlow(
     flow: FlowGraph,
     params: Record<string, unknown>,
     options: RunFlowOptions,
-  ): Promise<ExecutionEnvelope> {
+  ): Promise<ExecutionEnvelope | ActionBuildRefusal> {
     const orderCount = flow.nodes.filter((node) => node.type === 'deepbook_limit_order').length;
     if (orderCount !== 1) {
       throw new ValidationError(
@@ -44,6 +57,23 @@ export class SkillRunnerService {
     const preview = previewService.buildPreview(compiled.resolvedFlow, compiled.warnings);
     const unsignedPtb = await serializeUnsignedPtb(compiled.transaction);
     const simulation = await simulatorService.simulateTransaction(compiled.transaction, options.sender);
+
+    // Unconditional envelope gate (R3/KTD-4): a flow that fails strict simulation never gets an
+    // ExecutionEnvelope, full stop — no field flips this, no caller can opt out of it. `runFlow`
+    // structurally only ever serves the single-`deepbook_limit_order` hero path (checked above),
+    // so the Cetus devInspect-version-check fallback (`simulator.service.ts`'s `verification:
+    // 'unverified'`) can never reach here — this gate is a plain `ok` check, not a verification
+    // carve-out.
+    if (!simulation.ok) {
+      return {
+        refused: true,
+        actionId: options.actionId,
+        reason: `Rill never hands out a signable ExecutionEnvelope for a transaction that failed `
+          + `strict simulation: ${simulation.error ?? 'simulation failed with no further detail'}`,
+        simulation,
+      };
+    }
+
     const inspection = inspectTransaction(compiled.transaction);
     const pools = (config.network === 'testnet' ? testnetPools : mainnetPools) as Record<
       string,
