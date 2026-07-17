@@ -1,7 +1,6 @@
 import { memo, useCallback, useMemo } from "react";
 import { Handle, Position, type NodeProps, useReactFlow, useEdges, useNodes } from "reactflow";
 import { motion } from "framer-motion";
-import { toast } from "sonner";
 import { Shield, Layers, FileCode2, MessageSquareText, Plug, Wallet } from "lucide-react";
 import { RillMark } from "@/components/rill-mark";
 import type { Port } from "@/lib/rill-types";
@@ -516,24 +515,9 @@ export type WalletNodeData = {
   coinType?: string;
 };
 
-function WalletNodeImpl({ id, data, selected }: NodeProps<WalletNodeData>) {
-  const { setNodes } = useReactFlow();
-  const patch = useCallback(
-    (patch: Partial<WalletNodeData>) => {
-      setNodes((nodes) =>
-        nodes.map((n) =>
-          n.id === id ? { ...n, data: { ...(n.data as WalletNodeData), ...patch } } : n,
-        ),
-      );
-    },
-    [id, setNodes],
-  );
-
-  const fieldCls =
-    "nodrag nowheel w-full rounded-md border border-border bg-background px-2 py-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-primary/40";
-
-  const balance = "$0.00";
-  const suiBalance = "0 SUI";
+function WalletNodeImpl({ data, selected }: NodeProps<WalletNodeData>) {
+  const balance = "$0.000735";
+  const suiBalance = "0.001 SUI";
 
   return (
     <motion.div
@@ -553,8 +537,7 @@ function WalletNodeImpl({ id, data, selected }: NodeProps<WalletNodeData>) {
         </div>
       </div>
 
-      <div className="px-3 py-3 space-y-3">
-        {/* Balance card */}
+      <div className="px-3 py-3">
         <div className="relative overflow-hidden rounded-xl bg-gradient-to-br from-mint/80 via-emerald-500/60 to-teal-600/80 p-3 text-background">
           <div className="absolute right-2 top-2 flex items-center gap-1 text-[10px] font-medium">
             <span className="h-1.5 w-1.5 rounded-full bg-background" />
@@ -566,79 +549,6 @@ function WalletNodeImpl({ id, data, selected }: NodeProps<WalletNodeData>) {
             <span>{suiBalance}</span>
             <span>{balance}</span>
           </div>
-          <div className="mt-3 flex gap-2">
-            <button
-              type="button"
-              onClick={() => toast("Deposit flow is executed by the local signer after publishing.")}
-              className="nodrag nowheel flex-1 rounded-full bg-background/90 px-2 py-1.5 text-[11px] font-medium text-foreground hover:bg-background transition"
-            >
-              Deposit
-            </button>
-            <button
-              type="button"
-              onClick={() => toast("Withdraw flow is executed by the local signer after publishing.")}
-              className="nodrag nowheel flex-1 rounded-full bg-background/40 px-2 py-1.5 text-[11px] font-medium text-background hover:bg-background/60 transition"
-            >
-              Withdraw
-            </button>
-          </div>
-        </div>
-
-        {/* Wallet IDs */}
-        <div className="space-y-2">
-          <label className="block">
-            <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Package ID</span>
-            <input
-              className={fieldCls}
-              placeholder="0x…"
-              value={data.packageId ?? ""}
-              onChange={(e) => patch({ packageId: e.target.value })}
-            />
-          </label>
-          <label className="block">
-            <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Wallet ID</span>
-            <input
-              className={fieldCls}
-              placeholder="0x…"
-              value={data.walletId ?? ""}
-              onChange={(e) => patch({ walletId: e.target.value })}
-            />
-          </label>
-          <label className="block">
-            <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Cap ID</span>
-            <input
-              className={fieldCls}
-              placeholder="0x…"
-              value={data.capId ?? ""}
-              onChange={(e) => patch({ capId: e.target.value })}
-            />
-          </label>
-          <label className="block">
-            <span className="text-[10px] text-muted-foreground uppercase tracking-wide">BalanceManager</span>
-            <input
-              className={fieldCls}
-              placeholder="0x…"
-              value={data.balanceManagerId ?? ""}
-              onChange={(e) => patch({ balanceManagerId: e.target.value })}
-            />
-          </label>
-          <label className="block">
-            <span className="text-[10px] text-muted-foreground uppercase tracking-wide">TradeCap</span>
-            <input
-              className={fieldCls}
-              placeholder="0x…"
-              value={data.tradeCapId ?? ""}
-              onChange={(e) => patch({ tradeCapId: e.target.value })}
-            />
-          </label>
-          <label className="block">
-            <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Coin type</span>
-            <input
-              className={fieldCls}
-              value={data.coinType ?? "0x2::sui::SUI"}
-              onChange={(e) => patch({ coinType: e.target.value })}
-            />
-          </label>
         </div>
       </div>
 
