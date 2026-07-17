@@ -142,7 +142,7 @@ const slides: { kicker: string; render: () => React.ReactNode }[] = [
     kicker: "The stack",
     render: () => (
       <div className="mx-auto max-w-3xl">
-        <h2 className="font-display text-4xl md:text-5xl tracking-tight">One agent stack for Sui.</h2>
+        <h2 className="font-display text-4xl md:text-5xl tracking-tight">Rill is the rails. The agent is yours.</h2>
         <div className="mt-10 grid gap-4 md:grid-cols-2">
           <div className="rounded-xl border border-border/60 bg-card p-6 text-left">
             <div className="font-display text-2xl">Rill</div>
@@ -151,13 +151,13 @@ const slides: { kicker: string; render: () => React.ReactNode }[] = [
           </div>
           <div className="rounded-xl border border-border/60 bg-card p-6 text-left">
             <BrainCircuit className="h-6 w-6 text-primary" />
-            <div className="mt-3 font-display text-2xl">Thiny</div>
+            <div className="mt-3 font-display text-2xl">Your agent</div>
             <p className="mt-1 text-xs uppercase tracking-widest text-muted-foreground">runtime</p>
-            <p className="mt-3 text-sm text-muted-foreground">An agent that remembers via Walrus and signs via Sui.</p>
+            <p className="mt-3 text-sm text-muted-foreground">Claude Code, OpenCode, any MCP client — on your machine, holding your key.</p>
           </div>
         </div>
         <p className="mt-8 text-lg text-muted-foreground">
-          An autonomous agent that trades on DeepBook within on-chain caps — and keeps a verifiable memory on Walrus.
+          An autonomous agent that trades on DeepBook within on-chain caps — signed locally, revocable on-chain.
         </p>
       </div>
     ),

@@ -688,7 +688,7 @@ function ExportDialog({
             <p className="mt-1 text-sm text-muted-foreground">
               {loading
                 ? "Publishing action metadata and registering the bounded Rill tools."
-                : "Copy the URL below into Claude Code, Cursor, or Thiny — not a browser link."}
+                : "Copy the URL below into Claude Code, Cursor, or any MCP client — not a browser link."}
             </p>
           </div>
           <motion.button
