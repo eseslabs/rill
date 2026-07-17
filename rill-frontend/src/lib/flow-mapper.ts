@@ -1,11 +1,12 @@
 import type { Edge, Node } from "reactflow";
-import type { ActionNodeData } from "@/components/flow/nodes";
+import type { ActionNodeData, GuardrailNodeData, PtbNodeData } from "@/components/flow/nodes";
 import type { FlowEdge, FlowGraph, FlowNode } from "@/lib/rill-api";
 import {
   buildCetusSwapFlowConfig,
   buildHaedalStakeFlowConfig,
   buildDeepbookOrderFlowConfig,
   TOKEN_COIN_TYPE,
+  toMist,
 } from "@/lib/action-config";
 import { resolveBackendCoinHandles, wireKindFromEdge } from "@/lib/wire-inference";
 
@@ -54,10 +55,39 @@ function mapActionNode(id: string, data: ActionNodeData): FlowNode | null {
   return null;
 }
 
+function mapPtbNode(id: string, _data: PtbNodeData): FlowNode {
+  return { id, type: "ptb", config: {} };
+}
+
+function mapGuardrailNode(id: string, data: GuardrailNodeData): FlowNode {
+  return {
+    id,
+    type: "guardrail",
+    config: {
+      minValue: toMist(String(data.minValue ?? "0"), "0"),
+      coinType: data.coinType || SUI,
+    },
+  };
+}
+
 function mapEdge(edge: Edge, nodes: Node[]): FlowEdge | null {
   const target = nodes.find((n) => n.id === edge.target);
   const source = nodes.find((n) => n.id === edge.source);
-  if (!target || !source || target.type !== "action" || source.type !== "action") return null;
+  if (!target || !source) return null;
+
+  // Guardrail wired to an action's coin output (e.g., Cetus swap → guardrail).
+  if (target.type === "guardrail" && source.type === "action") {
+    const sourceData = source.data as ActionNodeData;
+    if (!isBackendSupported(sourceData)) return null;
+    return {
+      source: edge.source,
+      sourceHandle: "coin_out",
+      target: edge.target,
+      targetHandle: "in",
+    };
+  }
+
+  if (target.type !== "action" || source.type !== "action") return null;
 
   const targetData = target.data as ActionNodeData;
   if (!isBackendSupported(targetData)) return null;
@@ -79,6 +109,14 @@ export function buildFlowGraph(nodes: Node[], edges: Edge[]): FlowGraph & { skip
   const flowNodes: FlowNode[] = [];
 
   for (const node of nodes) {
+    if (node.type === "ptb") {
+      flowNodes.push(mapPtbNode(node.id, node.data as PtbNodeData));
+      continue;
+    }
+    if (node.type === "guardrail") {
+      flowNodes.push(mapGuardrailNode(node.id, node.data as GuardrailNodeData));
+      continue;
+    }
     if (node.type !== "action") continue;
     const data = node.data as ActionNodeData;
     const mapped = mapActionNode(node.id, data);

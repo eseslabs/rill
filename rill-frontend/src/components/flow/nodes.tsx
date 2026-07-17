@@ -368,13 +368,32 @@ function PtbNodeImpl({ data }: NodeProps<PtbNodeData>) {
 }
 export const PtbNode = memo(PtbNodeImpl);
 
-export type GuardrailNodeData = { rules: { id: string; label: string }[] };
-function GuardrailNodeImpl({ data }: NodeProps<GuardrailNodeData>) {
+export type GuardrailNodeData = {
+  rules: { id: string; label: string }[];
+  minValue?: string;
+  coinType?: string;
+};
+function GuardrailNodeImpl({ id, data, selected }: NodeProps<GuardrailNodeData>) {
+  const { setNodes } = useReactFlow();
+  const patch = useCallback(
+    (patch: Partial<GuardrailNodeData>) => {
+      setNodes((nodes) =>
+        nodes.map((n) =>
+          n.id === id ? { ...n, data: { ...(n.data as GuardrailNodeData), ...patch } } : n,
+        ),
+      );
+    },
+    [id, setNodes],
+  );
+  const fieldCls =
+    "nodrag nowheel w-full rounded-md border border-border bg-background px-2 py-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-primary/40";
   return (
     <motion.div
       initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
-      className="relative rounded-2xl bg-card border border-border/70 px-3.5 py-3 min-w-[220px] shadow-[var(--shadow-soft)]"
+      className={`relative rounded-2xl bg-card border border-border/70 px-3.5 py-3 min-w-[220px] shadow-[var(--shadow-soft)] ${
+        selected ? "ring-2 ring-primary/60" : ""
+      }`}
     >
       <div className="flex items-center gap-2">
         <span className="inline-flex h-6 w-6 items-center justify-center rounded-md bg-peach text-peach-foreground">
@@ -392,6 +411,27 @@ function GuardrailNodeImpl({ data }: NodeProps<GuardrailNodeData>) {
           </li>
         ))}
       </ul>
+      <div className="mt-3 space-y-2">
+        <label className="block">
+          <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Min value (SUI)</span>
+          <input
+            type="number"
+            min="0"
+            step="any"
+            className={fieldCls}
+            value={data.minValue ?? "0"}
+            onChange={(e) => patch({ minValue: e.target.value })}
+          />
+        </label>
+        <label className="block">
+          <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Coin type</span>
+          <input
+            className={fieldCls}
+            value={data.coinType ?? "0x2::sui::SUI"}
+            onChange={(e) => patch({ coinType: e.target.value })}
+          />
+        </label>
+      </div>
       <Handle id={WIRE_IN} type="target" position={Position.Left} className="flow-handle" />
       <Handle id={WIRE_OUT} type="source" position={Position.Right} className="flow-handle" />
     </motion.div>

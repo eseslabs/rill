@@ -10,3 +10,6 @@ move/**/build/
 
 # Persistent skills store (file-backed)
 rill-backend/data/
+
+# Demo run policies and evidence; public IDs only, never signer material
+.rill/

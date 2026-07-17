@@ -1,5 +1,7 @@
 import { RillApiError } from './errors';
 import type {
+  ActionToolDefinition,
+  AgentWalletBinding,
   ApiResponse,
   FlowGraph,
   HealthInfo,
@@ -12,11 +14,58 @@ import type {
   SkillRunResult,
 } from './types';
 
+type BuildOptions = {
+  sender?: string;
+  agentWallet?: AgentWalletBinding;
+};
+
+function toolRejection(result: McpToolCallResult): { message: string; type: string } {
+  const structured = result.structuredContent;
+  if (structured && typeof structured === 'object' && !Array.isArray(structured)) {
+    const rejection = structured as Record<string, unknown>;
+    if (typeof rejection.message === 'string') {
+      return {
+        message: rejection.message,
+        type: typeof rejection.code === 'string' ? rejection.code : 'McpToolError',
+      };
+    }
+  }
+
+  const text = result.content?.find((item) => item.type === 'text')?.text;
+  if (text) {
+    try {
+      const rejection = JSON.parse(text) as unknown;
+      if (rejection && typeof rejection === 'object' && !Array.isArray(rejection)) {
+        const record = rejection as Record<string, unknown>;
+        if (typeof record.message === 'string') {
+          return {
+            message: record.message,
+            type: typeof record.code === 'string' ? record.code : 'McpToolError',
+          };
+        }
+      }
+    } catch {
+      return { message: text, type: 'McpToolError' };
+    }
+    return { message: text, type: 'McpToolError' };
+  }
+
+  return { message: 'MCP tool rejected the request', type: 'McpToolError' };
+}
+
 export type RillClientOptions = {
   /** e.g. http://localhost:3002/api */
   baseUrl: string;
   fetch?: typeof fetch;
 };
+
+export type CallSkillInput = {
+  sender: string;
+  agentWallet: AgentWalletBinding;
+  params: Record<string, unknown>;
+};
+
+export type BuildActionInput = CallSkillInput & { skillId: string };
 
 export class RillClient {
   private readonly baseUrl: string;
@@ -41,12 +90,24 @@ export class RillClient {
     return this.post('/resolve', { packageId, moduleName, functionName });
   }
 
-  compile(flow: FlowGraph): Promise<{ txBytes: string; warnings: string[] }> {
-    return this.post('/compile', { flow });
+  compile(flow: FlowGraph, options: BuildOptions = {}): Promise<{
+    unsignedPtb: string;
+    preview: string;
+    warnings: string[];
+    agentWalletBound: boolean;
+    budgetSpendMist: string;
+  }> {
+    return this.post('/compile', { flow, ...options });
   }
 
-  simulate(flow: FlowGraph): Promise<{ simulation: SimulationResult; warnings: string[] }> {
-    return this.post('/simulate', { flow });
+  simulate(flow: FlowGraph, options: BuildOptions = {}): Promise<{
+    unsignedPtb: string;
+    preview: string;
+    simulation: SimulationResult;
+    warnings: string[];
+    agentWalletBound: boolean;
+  }> {
+    return this.post('/simulate', { flow, ...options });
   }
 
   publish(flow: FlowGraph, policyId?: string): Promise<PublishResult> {
@@ -57,28 +118,35 @@ export class RillClient {
     return this.get('/skills');
   }
 
-  execute(options: {
-    flow?: FlowGraph;
-    skillId?: string;
-    params?: Record<string, unknown>;
-    execute?: boolean;
-    forceExecute?: boolean;
-  }): Promise<SkillRunResult> {
+  buildAction(options: BuildActionInput): Promise<SkillRunResult> {
     return this.post('/execute', options);
   }
 
   /** MCP JSON-RPC tools/call */
   async callSkill(
     skillId: string,
-    arguments_: Record<string, unknown>,
+    input: CallSkillInput,
     requestId: number | string = 1,
   ): Promise<SkillRunResult> {
     const result = await this.postJsonRpc<McpToolCallResult>(`/mcp/${skillId}`, {
       jsonrpc: '2.0',
       id: requestId,
       method: 'tools/call',
-      params: { arguments: arguments_ },
+      params: {
+        name: 'build_action',
+        arguments: {
+          actionId: skillId,
+          sender: input.sender,
+          agentWallet: input.agentWallet,
+          params: input.params,
+        },
+      },
     });
+
+    if (result.isError) {
+      const rejection = toolRejection(result);
+      throw new RillApiError(rejection.message, 400, rejection.type);
+    }
 
     const text = result.content?.[0]?.text;
     if (!text) {
@@ -90,7 +158,7 @@ export class RillClient {
 
   /** MCP JSON-RPC tools/list */
   listTools(skillId: string, requestId: number | string = 1) {
-    return this.postJsonRpc<{ tools: unknown[] }>(`/mcp/${skillId}`, {
+    return this.postJsonRpc<{ tools: ActionToolDefinition[] }>(`/mcp/${skillId}`, {
       jsonrpc: '2.0',
       id: requestId,
       method: 'tools/list',

@@ -35,31 +35,29 @@ export type FlowGraph = {
 
 export type SimulationResult = {
   ok: boolean;
+  verification: "verified" | "unverified";
   error?: string;
   gasEstimate: number;
-  simulatedViaFallback?: boolean;
   balanceChanges?: unknown[];
   objectChanges?: unknown[];
 };
 
-export type ExecuteResult = {
-  unsignedPtb: string;
-  preview: string;
-  simulation: SimulationResult;
-  executed: boolean;
-  digest?: string;
-  warnings: string[];
-  agentWalletBound: boolean;
-  signable: boolean;
-  devSignAvailable: boolean;
-  walrus?: { blobId: string; explorerUrl: string };
-};
-
 export type PublishResult = {
   skillId: string;
+  name: string;
+  description: string;
   mcpUrl: string;
   skillUrl?: string;
-  toolDefs: { name: string; description: string };
+  toolDefs: {
+    name: "build_action";
+    description: string;
+    inputSchema: {
+      type: string;
+      properties: Record<string, unknown>;
+      required?: string[];
+      additionalProperties?: boolean;
+    };
+  };
   warnings: string[];
 };
 
@@ -150,10 +148,6 @@ export const rillApi = {
       simulation: SimulationResult;
       warnings: string[];
     }>("/simulate", { flow });
-  },
-
-  execute(flow: FlowGraph, execute = false, sender?: string) {
-    return post<ExecuteResult>("/execute", { flow, execute, ...(sender ? { sender } : {}) });
   },
 
   publish(flow: FlowGraph) {

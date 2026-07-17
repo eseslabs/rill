@@ -1,13 +1,13 @@
 import type { Transaction } from '@mysten/sui/transactions';
 import { config } from '../../core/config';
+import { ValidationError } from '../../core/errors';
 
 /**
  * Injects the on-chain slippage floor: `rill_guard::assert_min_value(outputCoin, minOut)`.
  *
  * Universal — any swap adapter (Cetus, DeepBook, …) calls this on its output coin so an agent can
  * never accept a worse-than-`minOut` fill. The assert borrows the coin, so it stays usable downstream.
- * No-op when `minOut <= 0` (no floor requested); warns (doesn't silently pass) if the guard package
- * isn't configured, so a missing floor is never mistaken for an enforced one.
+ * No-op when `minOut <= 0` (no floor requested); fails closed when the guard package is absent.
  */
 export function injectMinOutAssert(
   tx: Transaction,
@@ -15,17 +15,16 @@ export function injectMinOutAssert(
   coinType: string,
   minOut: bigint,
   warnings: string[],
+  guardPackageId: string | undefined = config.guardPackageId,
 ): void {
   if (minOut <= 0n) return;
-  const pkg = config.guardPackageId;
-  if (!pkg) {
-    warnings.push(
-      `min_amount_out=${minOut} requested but RILL_GUARD_PACKAGE_ID is not set — slippage floor NOT enforced on-chain.`,
+  if (!guardPackageId) {
+    throw new ValidationError(
+      `RILL_GUARD_PACKAGE_ID is required when min_amount_out=${minOut}; refusing an unguarded PTB.`,
     );
-    return;
   }
   tx.moveCall({
-    target: `${pkg}::guard::assert_min_value`,
+    target: `${guardPackageId}::guard::assert_min_value`,
     typeArguments: [coinType],
     arguments: [coin as never, tx.pure.u64(minOut)],
   });

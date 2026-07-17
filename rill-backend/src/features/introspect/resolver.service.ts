@@ -280,83 +280,9 @@ export class ResolverService {
     const matches: Record<number, Record<string, number>> = {};
     const emits = new Set<string>();
     let processedTxCount = 0;
-    const sampleSize = 10;
-
-    const isSameAddress = (addr1: string, addr2: string) => {
-      const clean = (addr: string) => addr.toLowerCase().replace(/^0x/, '').padStart(64, '0');
-      return clean(addr1) === clean(addr2);
-    };
 
     try {
-      const txBlocks = await suiClient.queryTransactionBlocks({
-        filter: {
-          MoveFunction: {
-            package: packageId,
-            module: moduleName,
-            function: functionName
-          }
-        },
-        options: {
-          showInput: true,
-          showEvents: true
-        },
-        limit: sampleSize
-      });
-
-      for (const txBlock of txBlocks.data) {
-        const txData = (txBlock as any).transaction?.data?.transaction;
-        if (!txData) continue;
-
-        const inputs = txData.inputs || [];
-        const transactions = txData.transactions || [];
-
-        // Find the MoveCall matching our target
-        const moveCall = transactions.find((t: any) => {
-          if (!t.MoveCall) return false;
-          const mc = t.MoveCall;
-          return isSameAddress(mc.package, packageId) && 
-                 mc.module === moduleName && 
-                 mc.function === functionName;
-        });
-
-        if (!moveCall) continue;
-        processedTxCount++;
-
-        // Collect event types
-        const events = txBlock.events || [];
-        for (const event of events) {
-          emits.add(event.type);
-        }
-
-        // Map parameter indices to input values
-        const moveCallArgs = moveCall.MoveCall.arguments || [];
-        const paramIndexToValue: Record<number, any> = {};
-
-        for (let i = 0; i < moveCallArgs.length; i++) {
-          const arg = moveCallArgs[i];
-          if (arg.Input !== undefined) {
-            const inputVal = inputs[arg.Input];
-            if (inputVal && inputVal.type === 'pure') {
-              paramIndexToValue[i] = inputVal.value;
-            }
-          }
-        }
-
-        // Match param values against event fields
-        for (const [paramIdxStr, paramVal] of Object.entries(paramIndexToValue)) {
-          const paramIdx = parseInt(paramIdxStr, 10);
-          if (!matches[paramIdx]) matches[paramIdx] = {};
-
-          for (const event of events) {
-            const parsedJson = event.parsedJson || {};
-            for (const [fieldName, fieldVal] of Object.entries(parsedJson)) {
-              if (String(paramVal) === String(fieldVal)) {
-                matches[paramIdx][fieldName] = (matches[paramIdx][fieldName] || 0) + 1;
-              }
-            }
-          }
-        }
-      }
+      throw new Error('Transaction history resolution is not supported over gRPC in this build.');
     } catch (e: any) {
       console.warn(`Querying transaction history failed for resolver: ${e.message}. Degrading gracefully.`);
     }

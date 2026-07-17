@@ -12,6 +12,7 @@ import { useEffect, type ReactNode } from "react";
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 import { SuiClientProvider, WalletProvider } from "@mysten/dapp-kit";
+import { Toaster } from "@/components/ui/sonner";
 import "@mysten/dapp-kit/dist/index.css";
 
 const SUI_NETWORKS = { testnet: { url: "https://fullnode.testnet.sui.io:443" } };
@@ -131,6 +132,7 @@ function RootComponent() {
         <WalletProvider autoConnect>
           {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
           <Outlet />
+          <Toaster />
         </WalletProvider>
       </SuiClientProvider>
     </QueryClientProvider>

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isHeroActionFlow } from '../../features/mcp/tool-schema';
 
 export const IntrospectSchema = z.object({
   packageId: z.string().min(4, 'Invalid Sui Package ID'),
@@ -31,44 +32,47 @@ export const AgentWalletSchema = z.object({
   coinType: z.string().optional(),
 });
 
+const FlowSchema = z.object({
+  nodes: z.array(FlowNodeSchema),
+  edges: z.array(FlowEdgeSchema),
+});
+
 export const CompileSchema = z.object({
-  flow: z.object({
-    nodes: z.array(FlowNodeSchema),
-    edges: z.array(FlowEdgeSchema),
-  }),
+  flow: FlowSchema,
   sender: z.string().optional(),
   agentWallet: AgentWalletSchema.optional(),
-});
+}).strict();
 
 export const SimulateSchema = z.object({
-  flow: z.object({
-    nodes: z.array(FlowNodeSchema),
-    edges: z.array(FlowEdgeSchema),
-  }),
+  flow: FlowSchema,
   sender: z.string().optional(),
   agentWallet: AgentWalletSchema.optional(),
-});
+}).strict();
 
 export const PublishSchema = z.object({
-  flow: z.object({
-    nodes: z.array(FlowNodeSchema),
-    edges: z.array(FlowEdgeSchema),
-  }),
+  flow: FlowSchema,
   policyId: z.string().optional(),
-});
+}).strict().refine(
+  ({ flow }) => isHeroActionFlow(flow),
+  {
+    message: 'Publish supports exactly one deepbook_limit_order node with no edges.',
+    path: ['flow'],
+  },
+);
 
 export const ExecuteSchema = z.object({
-  flow: z
-    .object({
-      nodes: z.array(FlowNodeSchema),
-      edges: z.array(FlowEdgeSchema),
-    })
-    .optional(),
-  skillId: z.string().optional(),
-  params: z.record(z.string(), z.any()).optional(),
-  sender: z.string().optional(),
-  agentWallet: AgentWalletSchema.optional(),
-  /** Dev only — requires DEV_SIGN_ENABLED + executor key on server. Default: return unsigned PTB. */
-  execute: z.boolean().optional(),
-  forceExecute: z.boolean().optional(),
-});
+  skillId: z.string().min(1),
+  params: z.record(z.string(), z.unknown()).default({}),
+  sender: z.string().min(4),
+  agentWallet: AgentWalletSchema,
+}).strict();
+
+export const SetupPrepareSchema = z.object({
+  skillId: z.string().min(1),
+  sender: z.string().min(4),
+  budgetMist: z.string().regex(/^\d+$/, 'budgetMist must be a decimal u64 string.'),
+  perTxMist: z.string().regex(/^\d+$/, 'perTxMist must be a decimal u64 string.'),
+  minimumRemainingMist: z.string().regex(/^\d+$/, 'minimumRemainingMist must be a decimal u64 string.').optional(),
+  expiresAtMs: z.string().regex(/^\d+$/, 'expiresAtMs must be a decimal u64 string.').optional(),
+  clientOrderId: z.string().regex(/^\d+$/, 'clientOrderId must be a decimal u64 string.').optional(),
+}).strict();

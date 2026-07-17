@@ -16,6 +16,7 @@ import ReactFlow, {
 } from "reactflow";
 import { motion, AnimatePresence } from "framer-motion";
 import gsap from "gsap";
+import { toast } from "sonner";
 import {
   Search,
   Download,
@@ -290,7 +291,11 @@ function Builder() {
         id,
         type: "guardrail",
         position: { x: 320, y: 480 },
-        data: { rules: guardrails.filter((g) => g.enabled).map((g) => ({ id: g.id, label: g.label })) },
+        data: {
+          rules: guardrails.filter((g) => g.enabled).map((g) => ({ id: g.id, label: g.label })),
+          minValue: "0",
+          coinType: "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI",
+        },
       } as Node),
     );
   };
@@ -578,11 +583,23 @@ function ExportDialog({
       setError(null);
       const { nodes: flowNodes, edges: flowEdges, skipped } = buildFlowGraph(nodes, edges);
       if (flowNodes.length === 0) {
-        setError(
-          skipped.length
-            ? `Only Cetus swap + Haedal stake compile today. Skipped: ${skipped.join(", ")}`
-            : "Add a supported action before publishing.",
-        );
+        const message = skipped.length
+          ? `Only Cetus swap + Haedal stake compile today. Skipped: ${skipped.join(", ")}`
+          : "Add a supported action before publishing.";
+        setError(message);
+        toast.error(message);
+        setLoading(false);
+        return;
+      }
+      const actionNodes = flowNodes.filter(
+        (n) => n.type !== "ptb" && n.type !== "guardrail",
+      );
+      const deepbookNodes = actionNodes.filter((n) => n.type === "deepbook_limit_order");
+      if (deepbookNodes.length !== 1 || actionNodes.length !== 1) {
+        const message =
+          "Publish supports exactly one deepbook_limit_order action; PTB and Guardrail wrapper nodes are allowed.";
+        setError(message);
+        toast.error(message);
         setLoading(false);
         return;
       }
@@ -626,7 +643,7 @@ function ExportDialog({
     return JSON.stringify(
       {
         mcpServers: {
-          [published.toolDefs.name]: {
+          "rill-actions": {
             url: published.mcpUrl,
           },
         },
@@ -662,11 +679,11 @@ function ExportDialog({
           <div className="min-w-0">
             <div className="text-xs uppercase tracking-widest text-muted-foreground">Publish</div>
             <h3 className="font-display text-2xl tracking-tight">
-              {loading ? "Compiling flow…" : published ? "MCP server ready" : "Publish failed"}
+              {loading ? "Publishing flow…" : published ? "MCP server ready" : "Publish failed"}
             </h3>
             <p className="mt-1 text-sm text-muted-foreground">
               {loading
-                ? "Building PTB, simulating, and registering tools on Rill."
+                ? "Publishing action metadata and registering the bounded Rill tools."
                 : "Copy the URL below into Claude Code, Cursor, or Thiny — not a browser link."}
             </p>
           </div>
@@ -774,11 +791,10 @@ function ExportDialog({
               >
                 <p className="font-medium">How to use</p>
                 <ol className="list-decimal list-inside text-muted-foreground space-y-1 text-xs">
-                  <li>Copy the MCP URL above</li>
-                  <li>Add it to your agent&apos;s MCP config (Claude Code / Cursor / Thiny)</li>
+                  <li>Copy the MCP URL above and add it as <code className="text-foreground">rill-actions</code></li>
+                  <li>Call <code className="text-foreground">list_actions</code>, then <code className="text-foreground">describe_action</code></li>
                   <li>
-                    Agent calls <code className="text-foreground">{published.toolDefs.name}</code> → gets unsigned PTB +
-                    simulation
+                    Call <code className="text-foreground">build_action</code> with public wallet IDs and runtime params → get an unsigned ExecutionEnvelope
                   </li>
                 </ol>
               </motion.div>
@@ -816,7 +832,7 @@ function ExportDialog({
                   >
                     Open SKILL.md
                   </a>
-                  {" "}(includes the same MCP URL + signing steps)
+                  {" "}(includes the same MCP URL + bounded remote/local handoff)
                 </motion.p>
               )}
 

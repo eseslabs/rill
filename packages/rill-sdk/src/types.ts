@@ -17,6 +17,13 @@ export interface FlowGraph {
   edges: FlowEdge[];
 }
 
+export interface AgentWalletBinding {
+  packageId: string;
+  walletId: string;
+  capId: string;
+  coinType?: string;
+}
+
 export interface ApiSuccess<T> {
   success: true;
   data: T;
@@ -45,8 +52,11 @@ export interface ResolvedManifest {
   [key: string]: unknown;
 }
 
-export interface SimulationResult {
+export type RillNetwork = 'testnet' | 'mainnet';
+
+export interface StrictSimulationResult {
   ok: boolean;
+  verification: 'verified' | 'unverified';
   error?: string;
   gasEstimate: number;
   balanceChanges: {
@@ -59,17 +69,65 @@ export interface SimulationResult {
     objectId: string;
     objectType: string;
   }[];
-  simulatedViaFallback?: boolean;
+}
+
+export type SimulationResult = StrictSimulationResult;
+
+export interface DeepBookResolvedParams {
+  poolKey: string;
+  poolId: string;
+  price: number;
+  quantity: number;
+  isBid: boolean;
+  payWithDeep: boolean;
+  clientOrderId: string;
+  depositSui: number;
+  spendAmountMist: string;
+}
+
+export interface ExecutionEnvelope {
+  version: '1';
+  actionId: string;
+  actionDigest: string;
+  network: RillNetwork;
+  sender: string;
+  walletPackageId: string;
+  walletId: string;
+  agentCapId: string;
+  balanceManagerId: string;
+  tradeCapId: string;
+  resolvedParams: DeepBookResolvedParams;
+  allowedTargets: string[];
+  requiredObjectIds: string[];
+  requiredGuards: string[];
+  unsignedPtb: string;
+  preview: string;
+  simulation: StrictSimulationResult;
+  expiresAt: string;
+}
+
+export interface JsonSchema {
+  type: string;
+  description?: string;
+  const?: unknown;
+  enum?: unknown[];
+  properties?: Record<string, JsonSchema>;
+  required?: string[];
+  additionalProperties?: boolean;
+}
+
+export type ActionToolName = 'list_actions' | 'describe_action' | 'build_action';
+
+export interface ActionToolDefinition {
+  name: ActionToolName;
+  description: string;
+  inputSchema: JsonSchema;
 }
 
 export interface ToolDef {
-  name: string;
+  name: 'build_action';
   description: string;
-  inputSchema: {
-    type: string;
-    properties: Record<string, { type: string; description?: string }>;
-    required?: string[];
-  };
+  inputSchema: JsonSchema;
 }
 
 export interface PublishedSkill {
@@ -77,23 +135,22 @@ export interface PublishedSkill {
   name: string;
   description: string;
   mcpUrl: string;
+  skillUrl: string;
   toolDefs: ToolDef;
   createdAt: string;
 }
 
 export interface PublishResult {
   skillId: string;
+  name: string;
+  description: string;
   mcpUrl: string;
+  skillUrl: string;
   toolDefs: ToolDef;
   warnings: string[];
 }
 
-export interface SkillRunResult {
-  simulation: SimulationResult;
-  executed: boolean;
-  digest?: string;
-  warnings: string[];
-}
+export type SkillRunResult = ExecutionEnvelope;
 
 export interface HealthInfo {
   name: string;
@@ -101,9 +158,15 @@ export interface HealthInfo {
   version: string;
   network?: string;
   apiBase?: string;
+  walrus?: {
+    readEndpoint: string;
+    availability: 'unchecked';
+    uploadsEnabled: false;
+  };
 }
 
 export interface McpToolCallResult {
   content: { type: string; text: string }[];
+  structuredContent?: unknown;
   isError?: boolean;
 }

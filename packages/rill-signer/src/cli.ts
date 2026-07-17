@@ -1,31 +1,33 @@
 #!/usr/bin/env bun
-import { loadConfigFromEnv, createSigner, executePtb } from './core';
+import { loadConfigFromEnv, createSigner, executeUnsafePtb } from './core';
 
 /**
  * rill-sign — CLI wrapper over the signer core (for shell agents + skills like OpenClaw/Hermes).
  *
  *   rill-sign address              → print the signer's Sui address (use as Rill's `sender`)
- *   rill-sign <unsignedPtb>        → sign + submit; prints JSON { digest, status, explorerUrl }
- *   echo <unsignedPtb> | rill-sign → same, reading the PTB from stdin
+ *   rill-sign --unsafe-ptb <ptb>   → development-only raw sign + submit
  */
 async function main() {
   const cfg = loadConfigFromEnv();
   const signer = createSigner(cfg);
-  const arg = process.argv[2];
+  const command = process.argv[2];
 
-  if (arg === 'address' || arg === '--address') {
+  if (command === 'address' || command === '--address') {
     if (!signer.address) throw new Error('No key configured. Set RILL_SUI_PRIVATE_KEY (suiprivkey1…).');
     process.stdout.write(JSON.stringify({ address: signer.address, network: signer.network }) + '\n');
     return;
   }
 
-  const unsignedPtb = (arg ?? (await Bun.stdin.text())).trim();
-  if (!unsignedPtb) {
-    process.stderr.write('usage: rill-sign <unsignedPtb>  |  rill-sign address  |  echo <ptb> | rill-sign\n');
+  if (command !== '--unsafe-ptb') {
+    process.stderr.write('usage: rill-sign address | rill-sign --unsafe-ptb BASE64_PTB\n');
     process.exit(2);
   }
-
-  const result = await executePtb(unsignedPtb, signer, cfg);
+  const unsignedPtb = String(process.argv[3] ?? '').trim();
+  if (!unsignedPtb) throw new Error('BASE64_PTB is required after --unsafe-ptb.');
+  process.stderr.write(
+    'warning: unsafe raw PTB path bypasses ExecutionEnvelope policy; never use for Demo Day.\n',
+  );
+  const result = await executeUnsafePtb(unsignedPtb, signer, cfg);
   process.stdout.write(JSON.stringify(result, null, 2) + '\n');
 }
 

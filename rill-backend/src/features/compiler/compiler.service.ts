@@ -1,8 +1,10 @@
 import { Transaction } from '@mysten/sui/transactions';
 import { SUI_COIN_TYPE } from '../../core/agent-wallet';
 import { ValidationError } from '../../core/errors';
+import { resolveEffectiveFlow } from '../../core/node-config';
 import { SUI_CLOCK_ID } from '../../core/protocols';
 import { getAdapter } from '../protocols/registry';
+import { injectMinOutAssert } from '../protocols/guard';
 import type {
   CompileOptions,
   CompileResult,
@@ -22,13 +24,18 @@ export type { FlowEdge, FlowGraph, FlowNode, CompileOptions, CompileResult };
  * `tx.gas`, then `fundSuiCoin` hands SUI to whichever node needs it.
  */
 export class CompilerService {
-  async compileFlow(flow: FlowGraph, options: CompileOptions = {}): Promise<CompileResult> {
+  async compileFlow(
+    flow: FlowGraph,
+    options: CompileOptions = {},
+    runtimeParams: Record<string, unknown> = {},
+  ): Promise<CompileResult> {
+    const resolvedFlow = resolveEffectiveFlow(flow, runtimeParams);
     const tx = new Transaction();
     const warnings: string[] = [];
-    const orderedNodes = this.topologicalSort(flow.nodes, flow.edges);
+    const orderedNodes = this.topologicalSort(resolvedFlow.nodes, resolvedFlow.edges);
     const nodeOutputs: Record<string, unknown> = {};
 
-    const rootTotal = this.computeRootSuiFunding(orderedNodes, flow);
+    const rootTotal = this.computeRootSuiFunding(orderedNodes, resolvedFlow);
     let budgetCoin: unknown | undefined;
 
     if (options.agentWallet && rootTotal > 0n) {
@@ -61,6 +68,19 @@ export class CompilerService {
       return split;
     };
 
+    // Guardrails that are not wired to an upstream coin output guard the root budget coin.
+    for (const node of resolvedFlow.nodes) {
+      if (node.type !== 'guardrail') continue;
+      const hasUpstreamCoin = resolvedFlow.edges.some(
+        (e) => e.target === node.id && resolvedFlow.nodes.some((n) => n.id === e.source && n.type !== 'ptb' && n.type !== 'guardrail'),
+      );
+      if (hasUpstreamCoin) continue;
+      const minValue = BigInt(node.config?.minValue ?? 0);
+      if (minValue <= 0n || budgetCoin === undefined) continue;
+      const coinType = String(node.config?.coinType || SUI_COIN_TYPE);
+      injectMinOutAssert(tx, budgetCoin, coinType, minValue, warnings);
+    }
+
     for (const node of orderedNodes) {
       const adapter = getAdapter(node.type);
       if (!adapter) {
@@ -69,7 +89,16 @@ export class CompilerService {
         );
         continue;
       }
-      await adapter.build({ tx, flow, node, nodeOutputs, budgetCoin, options, warnings, fundSuiCoin });
+      await adapter.build({
+        tx,
+        flow: resolvedFlow,
+        node,
+        nodeOutputs,
+        budgetCoin,
+        options,
+        warnings,
+        fundSuiCoin,
+      });
     }
 
     // The agent_wallet::spend() output is a Coin; after nodes split what they need, the remainder
@@ -84,6 +113,7 @@ export class CompilerService {
 
     return {
       transaction: tx,
+      resolvedFlow,
       warnings,
       agentWalletBound: Boolean(options.agentWallet && rootTotal > 0n),
       budgetSpendMist: rootTotal,

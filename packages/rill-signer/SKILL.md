@@ -1,42 +1,45 @@
 ---
-name: rill-signer
-description: Sign and submit the unsigned Sui transactions (PTBs) that Rill builds, using a local Sui key bounded by an on-chain agent_wallet. Use whenever a Rill tool returns an `unsignedPtb` that needs to go on-chain.
+name: rill-wallet
+description: Execute Rill ExecutionEnvelopes locally through a fixed wallet, capability, amount, target, and DeepBook order policy.
 ---
 
-# rill-signer skill
+# Rill Wallet
 
-Rill builds Sui transactions **keyless** — it returns an `unsignedPtb` (base64) but never holds your key.
-This skill signs + submits that PTB locally. Hard caps (budget, per-tx, expiry, revoke) are enforced
-on-chain by the `agent_wallet` baked into the PTB, so worst case is bounded by that wallet — not your whole balance.
+Rill Cloud is keyless. It discovers and builds actions through remote `rill-actions`; this local skill reads
+public capability state and signs only a complete `ExecutionEnvelope` accepted by the run-specific policy.
 
-## Setup (once)
-Set your Sui key in the environment before running anything:
+## Setup
+
+Set `RILL_SUI_PRIVATE_KEY` only in the shell or secret manager that launches the agent. Never place the key in
+MCP JSON, command arguments, chat, transcripts, or the repository.
+
+Set these public/local references:
+
 ```bash
-export RILL_SUI_PRIVATE_KEY="suiprivkey1…"   # from: sui keytool export
-export SUI_NETWORK="testnet"                  # testnet (default) | mainnet
-# mainnet also needs: export RILL_ALLOW_MAINNET=true
+export SUI_NETWORK=testnet
+export RILL_SIGNER_POLICY_PATH="$PWD/.rill/demo/sets/live.json"
 ```
 
-## Use it
-The CLI is `rill-sign` (run via `bun /path/to/rill-signer/src/cli.ts`).
+Configure the stdio server without a secret value:
 
-1. **Get your address** — pass this as `sender` when you call Rill's build tool/REST:
-   ```bash
-   rill-sign address
-   # → {"address":"0x…","network":"testnet"}
-   ```
+```bash
+claude mcp add --transport stdio \
+  --env "SUI_NETWORK=$SUI_NETWORK" \
+  --env "RILL_SIGNER_POLICY_PATH=$RILL_SIGNER_POLICY_PATH" \
+  rill-wallet -- bun run packages/rill-signer/src/mcp.ts
+```
 
-2. **Build** (Rill, keyless) — get the `unsignedPtb` for that `sender` (MCP tool or REST `/api/execute`).
+Launch Claude from the shell where the signer key is already available to child processes.
 
-3. **Sign + submit** the PTB it returned:
-   ```bash
-   rill-sign "<unsignedPtb-base64>"
-   # or:  echo "<unsignedPtb-base64>" | rill-sign
-   # → {"digest":"…","status":"success","explorerUrl":"https://suiscan.xyz/testnet/tx/…"}
-   ```
-   It re-simulates before signing and aborts if the dry-run fails. Report the `digest`/`explorerUrl` to the user.
+## Required Sequence
 
-## Notes
-- No key set → it errors instead of signing. Never paste a private key into chat; use the env var.
-- Optional soft gas ceiling: `export RILL_MAX_GAS_MIST=50000000`.
-- MCP-capable agents can use the MCP server instead (`src/mcp.ts`, tool `sui_execute_ptb`) — same core.
+1. Call local `wallet_status`; stop unless `strategyEligible` is true.
+2. Call local `list_capabilities` and retain its public IDs, limits, targets, guards, and `demoParams`.
+3. Call remote `list_actions` and `describe_action` for the configured action ID.
+4. Call remote `build_action` with the local signer address, public `agentWallet` binding, BalanceManager,
+   TradeCap, and `demoParams`.
+5. Verify the envelope identities, resolved params, target/object manifests, expiry, and verified simulation.
+6. Pass the full envelope unchanged to local `execute_rill_action`.
+7. On rejection, call `explain_rejection`; never weaken policy or retry with raw PTB bytes.
+
+The local MCP server exposes no arbitrary transaction or raw PTB tool.

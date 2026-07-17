@@ -29,6 +29,7 @@ export interface CompileOptions {
 
 export interface CompileResult {
   transaction: Transaction;
+  resolvedFlow: FlowGraph;
   warnings: string[];
   agentWalletBound: boolean;
   budgetSpendMist: bigint;
