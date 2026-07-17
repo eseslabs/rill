@@ -45,7 +45,7 @@ import { PROTOCOLS, BACKEND_PROTOCOL_IDS, type Protocol } from "@/lib/protocols"
 import { DiscoverDialog } from "@/components/flow/discover-dialog";
 import { ProtocolLogo } from "@/components/flow/protocol-logo";
 import { DeletableEdge } from "@/components/flow/deletable-edge";
-import { SimulateDialog, DEFAULT_GUARDRAILS, type Guardrail } from "@/components/flow/simulate-dialog";
+import { SimulateDialog } from "@/components/flow/simulate-dialog";
 import { buildFlowGraph } from "@/lib/flow-mapper";
 import {
   inferWireKindFromConnection,
@@ -112,7 +112,6 @@ function Builder() {
   const [exportOpen, setExportOpen] = useState(false);
   const [discoverOpen, setDiscoverOpen] = useState(false);
   const [simulateOpen, setSimulateOpen] = useState(false);
-  const [guardrails, setGuardrails] = useState<Guardrail[]>(DEFAULT_GUARDRAILS);
   const [network, setNetwork] = useState<string | null>(null);
   const idRef = useRef(1);
   const headlineRef = useRef<HTMLHeadingElement>(null);
@@ -296,7 +295,9 @@ function Builder() {
         type: "guardrail",
         position: { x: 320, y: 480 },
         data: {
-          rules: guardrails.filter((g) => g.enabled).map((g) => ({ id: g.id, label: g.label })),
+          // No decorative rule labels: a guardrail enforces its minValue via
+          // rill_guard::assert_min_value, and nothing else.
+          rules: [],
           minValue: "0",
           coinType: "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI",
         },
@@ -490,19 +491,13 @@ function Builder() {
 
       <AnimatePresence>
         {exportOpen && (
-          <ExportDialog nodes={nodes} edges={edges} guardrails={guardrails} onClose={() => setExportOpen(false)} />
+          <ExportDialog nodes={nodes} edges={edges} onClose={() => setExportOpen(false)} />
         )}
         {discoverOpen && (
           <DiscoverDialog onClose={() => setDiscoverOpen(false)} onImport={importDiscovered} />
         )}
         {simulateOpen && (
-          <SimulateDialog
-            nodes={nodes}
-            edges={edges}
-            guardrails={guardrails}
-            onChange={setGuardrails}
-            onClose={() => setSimulateOpen(false)}
-          />
+          <SimulateDialog nodes={nodes} edges={edges} onClose={() => setSimulateOpen(false)} />
         )}
       </AnimatePresence>
     </div>
@@ -581,12 +576,10 @@ function ProtocolGroup({
 function ExportDialog({
   nodes,
   edges,
-  guardrails,
   onClose,
 }: {
   nodes: Node[];
   edges: Edge[];
-  guardrails: Guardrail[];
   onClose: () => void;
 }) {
   const [loading, setLoading] = useState(true);
@@ -849,8 +842,6 @@ function ExportDialog({
 
               <motion.p variants={fadeUp} className="text-[10px] text-muted-foreground">
                 Flow: {actions.map((a) => `${a.protocol} · ${a.action}`).join(" → ")}
-                {guardrails.filter((g) => g.enabled).length > 0 &&
-                  ` · Guardrails: ${guardrails.filter((g) => g.enabled).map((g) => g.label).join(", ")}`}
               </motion.p>
             </motion.div>
           )}
