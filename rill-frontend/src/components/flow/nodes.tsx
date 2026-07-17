@@ -1,7 +1,8 @@
-import { memo, useCallback } from "react";
-import { Handle, Position, type NodeProps, useReactFlow } from "reactflow";
+import { memo, useCallback, useMemo } from "react";
+import { Handle, Position, type NodeProps, useReactFlow, useEdges, useNodes } from "reactflow";
 import { motion } from "framer-motion";
-import { Shield, Layers, FileCode2, MessageSquareText, Plug } from "lucide-react";
+import { toast } from "sonner";
+import { Shield, Layers, FileCode2, MessageSquareText, Plug, Wallet } from "lucide-react";
 import { RillMark } from "@/components/rill-mark";
 import type { Port } from "@/lib/rill-types";
 import { FlowInLabels, FlowOutLabels, NodePort } from "@/components/flow/aligned-handle";
@@ -10,9 +11,18 @@ import { WIRE_IN, WIRE_OUT } from "@/lib/wire-inference";
 import {
   defaultActionConfig,
   otherSwapToken,
+  DEEPBOOK_PAIRS,
   type ActionConfig,
   type SwapTokenSymbol,
+  type DeepbookPairKey,
 } from "@/lib/action-config";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { TokenBadge, TokenSelect } from "@/components/flow/token-select";
 
 export type ActionNodeData = {
@@ -51,6 +61,14 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
   const c = colorMap[data.color] ?? colorMap.mint;
   const ports = data.ports;
   const { setNodes } = useReactFlow();
+  const edges = useEdges();
+  const nodes = useNodes();
+  const incomingWallet = useMemo(() => {
+    const walletEdge = edges.find((e) => e.target === id && e.source.startsWith("wallet_"));
+    if (!walletEdge) return null;
+    const walletNode = nodes.find((n) => n.id === walletEdge.source);
+    return walletNode?.data as WalletNodeData | undefined;
+  }, [edges, nodes, id]);
 
   const patchConfig = useCallback(
     (patch: ActionConfig) => {
@@ -184,22 +202,28 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
         {isDeepbookLimit && (
           <div className="mt-3 space-y-2">
             <label className="block">
-              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Pool</span>
-              <input
-                className={fieldCls}
-                value={cfg.poolKey ?? "SUI_DBUSDC"}
-                onChange={(e) => patchConfig({ poolKey: e.target.value })}
-              />
+              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Pair</span>
+              <Select
+                value={(cfg.poolKey as DeepbookPairKey) || "SUI_DBUSDC"}
+                onValueChange={(v) => patchConfig({ poolKey: v })}
+              >
+                <SelectTrigger className="nodrag nowheel mt-0.5 h-8 w-full cursor-pointer bg-background text-[11px] shadow-none focus:ring-1 focus:ring-primary/40">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="z-[200] cursor-pointer">
+                  {DEEPBOOK_PAIRS.map((p) => (
+                    <SelectItem
+                      key={p.key}
+                      value={p.key}
+                      className="cursor-pointer py-2 pl-2 pr-8 text-[11px]"
+                    >
+                      {p.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </label>
-            <label className="block">
-              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">BalanceManager</span>
-              <input
-                className={fieldCls}
-                placeholder="0x…"
-                value={cfg.balanceManagerId ?? ""}
-                onChange={(e) => patchConfig({ balanceManagerId: e.target.value })}
-              />
-            </label>
+
             <div className="grid grid-cols-2 gap-2">
               <label className="block">
                 <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Price</span>
@@ -213,7 +237,7 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
                 />
               </label>
               <label className="block">
-                <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Quantity</span>
+                <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Amount</span>
                 <input
                   type="number"
                   min="0"
@@ -224,6 +248,35 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
                 />
               </label>
             </div>
+
+            <div>
+              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Side</span>
+              <div className="mt-0.5 grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => patchConfig({ isBid: "true" })}
+                  className={`nodrag nowheel rounded-md border px-2 py-1 text-[11px] font-medium transition ${
+                    cfg.isBid === "true"
+                      ? "border-mint bg-mint/20 text-mint-foreground"
+                      : "border-border bg-background text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  Buy
+                </button>
+                <button
+                  type="button"
+                  onClick={() => patchConfig({ isBid: "false" })}
+                  className={`nodrag nowheel rounded-md border px-2 py-1 text-[11px] font-medium transition ${
+                    cfg.isBid !== "true"
+                      ? "border-peach bg-peach/20 text-peach-foreground"
+                      : "border-border bg-background text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  Sell
+                </button>
+              </div>
+            </div>
+
             <label className="block">
               <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Deposit SUI</span>
               <input
@@ -235,6 +288,19 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
                 onChange={(e) => patchConfig({ depositSui: e.target.value })}
               />
             </label>
+
+            {incomingWallet ? (
+              <div className="rounded-lg border border-mint/30 bg-mint/10 px-2.5 py-1.5 text-[10px] text-mint-foreground">
+                <span className="font-medium">Wallet connected</span>
+                <div className="mt-0.5 truncate font-mono opacity-80">
+                  {incomingWallet.walletId || "0x…"}
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[10px] text-amber-700 dark:text-amber-400">
+                Connect a Wallet node to supply BalanceManager & TradeCap.
+              </div>
+            )}
           </div>
         )}
 
@@ -438,3 +504,148 @@ function GuardrailNodeImpl({ id, data, selected }: NodeProps<GuardrailNodeData>)
   );
 }
 export const GuardrailNode = memo(GuardrailNodeImpl);
+
+
+export type WalletNodeData = {
+  label?: string;
+  packageId?: string;
+  walletId?: string;
+  capId?: string;
+  balanceManagerId?: string;
+  tradeCapId?: string;
+  coinType?: string;
+};
+
+function WalletNodeImpl({ id, data, selected }: NodeProps<WalletNodeData>) {
+  const { setNodes } = useReactFlow();
+  const patch = useCallback(
+    (patch: Partial<WalletNodeData>) => {
+      setNodes((nodes) =>
+        nodes.map((n) =>
+          n.id === id ? { ...n, data: { ...(n.data as WalletNodeData), ...patch } } : n,
+        ),
+      );
+    },
+    [id, setNodes],
+  );
+
+  const fieldCls =
+    "nodrag nowheel w-full rounded-md border border-border bg-background px-2 py-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-primary/40";
+
+  const balance = "$0.00";
+  const suiBalance = "0 SUI";
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      className={`relative min-w-[260px] overflow-visible rounded-2xl border border-border/70 bg-card shadow-[var(--shadow-soft)] ${
+        selected ? "ring-2 ring-primary/60" : ""
+      }`}
+    >
+      <div className="flex items-center gap-2 px-3 py-2 rounded-t-2xl bg-mint text-mint-foreground">
+        <span className="inline-flex h-6 w-6 items-center justify-center rounded-md bg-mint-foreground/15">
+          <Wallet className="h-3.5 w-3.5" strokeWidth={2.25} />
+        </span>
+        <div>
+          <div className="text-[11px] uppercase tracking-widest opacity-80">Agent wallet</div>
+          <div className="text-sm font-semibold">{data.label || "Wallet"}</div>
+        </div>
+      </div>
+
+      <div className="px-3 py-3 space-y-3">
+        {/* Balance card */}
+        <div className="relative overflow-hidden rounded-xl bg-gradient-to-br from-mint/80 via-emerald-500/60 to-teal-600/80 p-3 text-background">
+          <div className="absolute right-2 top-2 flex items-center gap-1 text-[10px] font-medium">
+            <span className="h-1.5 w-1.5 rounded-full bg-background" />
+            ACTIVE
+          </div>
+          <div className="text-[10px] uppercase tracking-widest opacity-90">Balance</div>
+          <div className="mt-1 text-2xl font-semibold tracking-tight">{balance}</div>
+          <div className="mt-2 flex items-center justify-between text-[11px] opacity-90">
+            <span>{suiBalance}</span>
+            <span>{balance}</span>
+          </div>
+          <div className="mt-3 flex gap-2">
+            <button
+              type="button"
+              onClick={() => toast("Deposit flow is executed by the local signer after publishing.")}
+              className="nodrag nowheel flex-1 rounded-full bg-background/90 px-2 py-1.5 text-[11px] font-medium text-foreground hover:bg-background transition"
+            >
+              Deposit
+            </button>
+            <button
+              type="button"
+              onClick={() => toast("Withdraw flow is executed by the local signer after publishing.")}
+              className="nodrag nowheel flex-1 rounded-full bg-background/40 px-2 py-1.5 text-[11px] font-medium text-background hover:bg-background/60 transition"
+            >
+              Withdraw
+            </button>
+          </div>
+        </div>
+
+        {/* Wallet IDs */}
+        <div className="space-y-2">
+          <label className="block">
+            <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Package ID</span>
+            <input
+              className={fieldCls}
+              placeholder="0x…"
+              value={data.packageId ?? ""}
+              onChange={(e) => patch({ packageId: e.target.value })}
+            />
+          </label>
+          <label className="block">
+            <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Wallet ID</span>
+            <input
+              className={fieldCls}
+              placeholder="0x…"
+              value={data.walletId ?? ""}
+              onChange={(e) => patch({ walletId: e.target.value })}
+            />
+          </label>
+          <label className="block">
+            <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Cap ID</span>
+            <input
+              className={fieldCls}
+              placeholder="0x…"
+              value={data.capId ?? ""}
+              onChange={(e) => patch({ capId: e.target.value })}
+            />
+          </label>
+          <label className="block">
+            <span className="text-[10px] text-muted-foreground uppercase tracking-wide">BalanceManager</span>
+            <input
+              className={fieldCls}
+              placeholder="0x…"
+              value={data.balanceManagerId ?? ""}
+              onChange={(e) => patch({ balanceManagerId: e.target.value })}
+            />
+          </label>
+          <label className="block">
+            <span className="text-[10px] text-muted-foreground uppercase tracking-wide">TradeCap</span>
+            <input
+              className={fieldCls}
+              placeholder="0x…"
+              value={data.tradeCapId ?? ""}
+              onChange={(e) => patch({ tradeCapId: e.target.value })}
+            />
+          </label>
+          <label className="block">
+            <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Coin type</span>
+            <input
+              className={fieldCls}
+              value={data.coinType ?? "0x2::sui::SUI"}
+              onChange={(e) => patch({ coinType: e.target.value })}
+            />
+          </label>
+        </div>
+      </div>
+
+      <Handle id={WIRE_IN} type="target" position={Position.Left} className="flow-handle" />
+      <Handle id={WIRE_OUT} type="source" position={Position.Right} className="flow-handle" />
+    </motion.div>
+  );
+}
+
+export const WalletNode = memo(WalletNodeImpl);

@@ -28,6 +28,7 @@ import {
   Layers,
   Check,
   Loader2,
+  Wallet,
 } from "lucide-react";
 import { SiteHeader } from "@/components/site-chrome";
 import {
@@ -36,7 +37,9 @@ import {
   OutputNode,
   PtbNode,
   GuardrailNode,
+  WalletNode,
   type ActionNodeData,
+  type WalletNodeData,
 } from "@/components/flow/nodes";
 import { PROTOCOLS, BACKEND_PROTOCOL_IDS, type Protocol } from "@/lib/protocols";
 import { DiscoverDialog } from "@/components/flow/discover-dialog";
@@ -65,6 +68,7 @@ const nodeTypes = {
   output: OutputNode,
   ptb: PtbNode,
   guardrail: GuardrailNode,
+  wallet: WalletNode,
 };
 
 const edgeTypes = {
@@ -300,6 +304,21 @@ function Builder() {
     );
   };
 
+  const addWallet = () => {
+    const id = `wallet_${idRef.current++}`;
+    setNodes((nds) =>
+      nds.concat({
+        id,
+        type: "wallet",
+        position: { x: 120, y: 420 },
+        data: {
+          label: "Agent wallet",
+          coinType: "0x2::sui::SUI",
+        } as WalletNodeData,
+      } as Node),
+    );
+  };
+
   return (
     <div className="h-[100dvh] flex flex-col overflow-hidden">
       <div className="shrink-0">
@@ -389,6 +408,7 @@ function Builder() {
           >
             {(
               [
+                { label: "Add Wallet", icon: Wallet, onClick: addWallet, primary: false },
                 { label: "Add PTB", icon: Layers, onClick: addPtb, primary: false },
                 { label: "Guardrails", icon: Shield, onClick: addGuardrail, primary: false },
                 { label: "Simulate", icon: Play, onClick: () => setSimulateOpen(true), primary: false },
@@ -582,22 +602,13 @@ function ExportDialog({
       setLoading(true);
       setError(null);
       const { nodes: flowNodes, edges: flowEdges, skipped } = buildFlowGraph(nodes, edges);
-      if (flowNodes.length === 0) {
-        const message = skipped.length
-          ? `Only Cetus swap + Haedal stake compile today. Skipped: ${skipped.join(", ")}`
-          : "Add a supported action before publishing.";
-        setError(message);
-        toast.error(message);
-        setLoading(false);
-        return;
-      }
       const actionNodes = flowNodes.filter(
         (n) => n.type !== "ptb" && n.type !== "guardrail",
       );
-      const deepbookNodes = actionNodes.filter((n) => n.type === "deepbook_limit_order");
-      if (deepbookNodes.length !== 1 || actionNodes.length !== 1) {
-        const message =
-          "Publish supports exactly one deepbook_limit_order action; PTB and Guardrail wrapper nodes are allowed.";
+      if (actionNodes.length === 0) {
+        const message = skipped.length
+          ? `No supported action nodes. Skipped: ${skipped.join(", ")}`
+          : "Add a supported action before publishing.";
         setError(message);
         toast.error(message);
         setLoading(false);

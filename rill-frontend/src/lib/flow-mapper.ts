@@ -1,5 +1,5 @@
 import type { Edge, Node } from "reactflow";
-import type { ActionNodeData, GuardrailNodeData, PtbNodeData } from "@/components/flow/nodes";
+import type { ActionNodeData, GuardrailNodeData, PtbNodeData, WalletNodeData } from "@/components/flow/nodes";
 import type { FlowEdge, FlowGraph, FlowNode } from "@/lib/rill-api";
 import {
   buildCetusSwapFlowConfig,
@@ -70,6 +70,24 @@ function mapGuardrailNode(id: string, data: GuardrailNodeData): FlowNode {
   };
 }
 
+function mapWalletNode(_id: string, _data: WalletNodeData): FlowNode | null {
+  // Wallet nodes are frontend-only configuration; their IDs are injected into wired actions.
+  return null;
+}
+
+/** Merge BalanceManager + TradeCap from a wired Wallet node into an action config. */
+function applyWalletIds(nodes: FlowNode[], edges: FlowEdge[], wallets: Record<string, WalletNodeData>) {
+  for (const edge of edges) {
+    if (!edge.source.startsWith("wallet_")) continue;
+    const wallet = wallets[edge.source];
+    if (!wallet) continue;
+    const target = nodes.find((n) => n.id === edge.target);
+    if (!target?.config) continue;
+    if (wallet.balanceManagerId) target.config.balanceManagerId = wallet.balanceManagerId;
+    if (wallet.tradeCapId) target.config.tradeCapId = wallet.tradeCapId;
+  }
+}
+
 function mapEdge(edge: Edge, nodes: Node[]): FlowEdge | null {
   const target = nodes.find((n) => n.id === edge.target);
   const source = nodes.find((n) => n.id === edge.source);
@@ -87,6 +105,7 @@ function mapEdge(edge: Edge, nodes: Node[]): FlowEdge | null {
     };
   }
 
+  if (source.type === "wallet" || target.type === "wallet") return null;
   if (target.type !== "action" || source.type !== "action") return null;
 
   const targetData = target.data as ActionNodeData;
@@ -107,6 +126,7 @@ function mapEdge(edge: Edge, nodes: Node[]): FlowEdge | null {
 export function buildFlowGraph(nodes: Node[], edges: Edge[]): FlowGraph & { skipped: string[] } {
   const skipped: string[] = [];
   const flowNodes: FlowNode[] = [];
+  const wallets: Record<string, WalletNodeData> = {};
 
   for (const node of nodes) {
     if (node.type === "ptb") {
@@ -115,6 +135,10 @@ export function buildFlowGraph(nodes: Node[], edges: Edge[]): FlowGraph & { skip
     }
     if (node.type === "guardrail") {
       flowNodes.push(mapGuardrailNode(node.id, node.data as GuardrailNodeData));
+      continue;
+    }
+    if (node.type === "wallet") {
+      wallets[node.id] = node.data as WalletNodeData;
       continue;
     }
     if (node.type !== "action") continue;
@@ -132,6 +156,7 @@ export function buildFlowGraph(nodes: Node[], edges: Edge[]): FlowGraph & { skip
     .filter((e): e is FlowEdge => e !== null);
 
   applyWireConstraints(flowNodes, flowEdges);
+  applyWalletIds(flowNodes, edges, wallets);
 
   return { nodes: flowNodes, edges: flowEdges, skipped };
 }

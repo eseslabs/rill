@@ -1,15 +1,13 @@
-const API_FALLBACK = "https://api.rill.naisu.one/api";
-
 function normalizeApiBase(raw: string): string {
   const trimmed = raw.replace(/\/$/, "");
-  if (trimmed.includes("rifuki.dev")) return API_FALLBACK;
   return trimmed.endsWith("/api") ? trimmed : `${trimmed}/api`;
 }
 
 function resolveApiBase(): string {
   const fromEnv = import.meta.env.VITE_RILL_API_URL;
   if (fromEnv) return normalizeApiBase(fromEnv);
-  return API_FALLBACK;
+  // Same-origin fallback keeps deploys portable; set VITE_RILL_API_URL for a remote backend.
+  return "/api";
 }
 
 const API_BASE = resolveApiBase();

@@ -66,5 +66,9 @@ export function isValidWireConnection(connection: Connection, nodes: Node[]): bo
   if (srcNode.type === "trigger" && out !== WIRE_OUT) return false;
   if (tgtNode.type === "output" && inn !== WIRE_IN) return false;
 
+  // Wallet nodes only feed into action nodes.
+  if (srcNode.type === "wallet") return tgtNode.type === "action";
+  if (tgtNode.type === "wallet") return false;
+
   return true;
 }

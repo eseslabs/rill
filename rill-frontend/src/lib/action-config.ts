@@ -25,6 +25,13 @@ export const SWAP_TOKENS = [
   },
 ] as const;
 
+export const DEEPBOOK_PAIRS = [
+  { key: "SUI_DBUSDC", label: "SUI / DBUSDC" },
+  { key: "SUI_USDC", label: "SUI / USDC" },
+] as const;
+
+export type DeepbookPairKey = (typeof DEEPBOOK_PAIRS)[number]["key"];
+
 export type SwapTokenSymbol = (typeof SWAP_TOKENS)[number]["symbol"];
 
 export const TOKEN_LOGOS: Record<SwapTokenSymbol, string> = {
@@ -48,12 +55,14 @@ export function defaultActionConfig(protocolId: string, actionId: string): Actio
   if (protocolId === "deepbook" && actionId === "limit_order") {
     return {
       poolKey: "SUI_DBUSDC",
-      balanceManagerId: "",
       depositSui: "1.1",
       price: "1",
       quantity: "1",
       isBid: "false",
       payWithDeep: "false",
+      // BalanceManager + TradeCap come from a wired Wallet node or from the agent at execution time.
+      balanceManagerId: "",
+      tradeCapId: "",
     };
   }
   return {};
@@ -103,6 +112,7 @@ export function buildDeepbookOrderFlowConfig(cfg: ActionConfig) {
   return {
     poolKey: cfg.poolKey || "SUI_DBUSDC",
     balanceManagerId: cfg.balanceManagerId || "",
+    tradeCapId: cfg.tradeCapId || "",
     depositSui: cfg.depositSui || "0",
     price: cfg.price || "1",
     quantity: cfg.quantity || "1",

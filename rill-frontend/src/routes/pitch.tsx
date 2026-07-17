@@ -174,7 +174,7 @@ const slides: { kicker: string; render: () => React.ReactNode }[] = [
           <Link to="/builder" className="inline-flex items-center gap-1.5 rounded-full bg-foreground text-background px-5 py-2.5 text-sm font-medium hover:opacity-90 transition">
             Open the builder <ArrowRight className="h-4 w-4" />
           </Link>
-          <a href="https://api.rill.naisu.one" target="_blank" rel="noreferrer" className="rounded-full border border-border/60 px-5 py-2.5 text-sm text-muted-foreground hover:text-foreground transition">
+          <a href={`${rillApi.baseUrl.replace(/\/api$/, "")}/health`} target="_blank" rel="noreferrer" className="rounded-full border border-border/60 px-5 py-2.5 text-sm text-muted-foreground hover:text-foreground transition">
             Live API
           </a>
         </div>
