@@ -7,6 +7,7 @@ import type { Port } from "@/lib/rill-types";
 import { FlowInLabels, FlowOutLabels, NodePort } from "@/components/flow/aligned-handle";
 import { ProtocolLogo } from "@/components/flow/protocol-logo";
 import { WIRE_IN, WIRE_OUT } from "@/lib/wire-inference";
+import { isGuardrailMinValueValid } from "@/lib/publish-gate";
 import {
   defaultActionConfig,
   otherSwapToken,
@@ -387,6 +388,7 @@ function GuardrailNodeImpl({ id, data, selected }: NodeProps<GuardrailNodeData>)
   );
   const fieldCls =
     "nodrag nowheel w-full rounded-md border border-border bg-background px-2 py-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-primary/40";
+  const minValueValid = isGuardrailMinValueValid(data.minValue);
   return (
     <motion.div
       initial={{ opacity: 0, y: 6 }}
@@ -418,10 +420,18 @@ function GuardrailNodeImpl({ id, data, selected }: NodeProps<GuardrailNodeData>)
             type="number"
             min="0"
             step="any"
-            className={fieldCls}
-            value={data.minValue ?? "0"}
+            placeholder="Required — e.g. 0.05"
+            className={`${fieldCls} ${!minValueValid ? "border-destructive focus:ring-destructive/40" : ""}`}
+            value={data.minValue ?? ""}
             onChange={(e) => patch({ minValue: e.target.value })}
+            aria-invalid={!minValueValid}
+            aria-describedby={!minValueValid ? `guardrail-min-error-${id}` : undefined}
           />
+          {!minValueValid && (
+            <p id={`guardrail-min-error-${id}`} className="mt-1 text-[10px] text-destructive">
+              Required — must be greater than 0, or this guardrail enforces nothing.
+            </p>
+          )}
         </label>
         <label className="block">
           <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Coin type</span>

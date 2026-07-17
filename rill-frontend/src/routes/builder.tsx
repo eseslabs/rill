@@ -11,6 +11,7 @@ import ReactFlow, {
   type Connection,
   type Edge,
   type Node,
+  type OnConnectStartParams,
   ReactFlowProvider,
   useReactFlow,
 } from "reactflow";
@@ -42,14 +43,16 @@ import { PROTOCOLS, BACKEND_PROTOCOL_IDS, type Protocol } from "@/lib/protocols"
 import { DiscoverDialog } from "@/components/flow/discover-dialog";
 import { ProtocolLogo } from "@/components/flow/protocol-logo";
 import { DeletableEdge } from "@/components/flow/deletable-edge";
-import { SimulateDialog, DEFAULT_GUARDRAILS, type Guardrail } from "@/components/flow/simulate-dialog";
-import { buildFlowGraph } from "@/lib/flow-mapper";
+import { SimulateDialog } from "@/components/flow/simulate-dialog";
+import { FlowWarningsBanner } from "@/components/flow/flow-warnings";
+import { buildFlowGraph, applyWireConstraints } from "@/lib/flow-mapper";
 import {
   inferWireKindFromConnection,
   isValidWireConnection,
   WIRE_IN,
   WIRE_OUT,
 } from "@/lib/wire-inference";
+import { computePublishGate, CAPABILITY_COPY } from "@/lib/publish-gate";
 import { applyProtocolRegistry, defaultActionConfig } from "@/lib/action-config";
 import { getActionPorts } from "@/lib/action-ports";
 import { rillApi, type PublishResult } from "@/lib/rill-api";
@@ -58,6 +61,20 @@ import type { DiscoveredFunction, IntrospectionResult } from "@/lib/rill-types";
 export const Route = createFileRoute("/builder")({
   component: BuilderPage,
 });
+
+/** Cosmetic labels shown on a newly-created guardrail node's checklist — informational
+ *  only; the guardrail's actually-enforced field is `minValue`/`coinType` (see
+ *  nodes.tsx GuardrailNode and the read-only panel in simulate-dialog.tsx).
+ *  Not exported — this module is the only remaining consumer. */
+type Guardrail = { id: string; label: string; enabled: boolean };
+
+const DEFAULT_GUARDRAILS: Guardrail[] = [
+  { id: "max_in", label: "Max amount_in ≤ 100 SUI", enabled: true },
+  { id: "slippage", label: "Slippage ≤ 1.0%", enabled: true },
+  { id: "allowlist", label: "Recipient must be on allowlist", enabled: false },
+  { id: "ttl", label: "Deadline within 60s", enabled: true },
+  { id: "dry_run", label: "Require successful dry-run", enabled: true },
+];
 
 const nodeTypes = {
   action: ActionNode,
@@ -108,7 +125,9 @@ function Builder() {
   const [exportOpen, setExportOpen] = useState(false);
   const [discoverOpen, setDiscoverOpen] = useState(false);
   const [simulateOpen, setSimulateOpen] = useState(false);
-  const [guardrails, setGuardrails] = useState<Guardrail[]>(DEFAULT_GUARDRAILS);
+  // Cosmetic seed data for a new guardrail node's checklist (see DEFAULT_GUARDRAILS
+  // doc comment) — not enforcement state, so it's a constant, not a setter pair.
+  const guardrails = DEFAULT_GUARDRAILS;
   const [network, setNetwork] = useState<string | null>(null);
   const idRef = useRef(1);
   const headlineRef = useRef<HTMLHeadingElement>(null);
@@ -158,9 +177,86 @@ function Builder() {
   );
 
   const isValidConnection = useCallback(
-    (c: Connection) => isValidWireConnection(c, nodes),
-    [nodes],
+    (c: Connection) => isValidWireConnection(c, nodes, edges).valid,
+    [nodes, edges],
   );
+
+  // ReactFlow's isValidConnection only returns a boolean (nothing tells the app
+  // *why* a dropped connection didn't attach), so a rejected drag is re-validated
+  // here from the raw DOM handle attributes ReactFlow itself stamps on each
+  // handle element, purely to recover the reason for a toast.
+  const connectStartRef = useRef<OnConnectStartParams | null>(null);
+
+  const onConnectStart = useCallback((_event: unknown, params: OnConnectStartParams) => {
+    connectStartRef.current = params;
+  }, []);
+
+  const onConnectEnd = useCallback(
+    (event: MouseEvent | TouchEvent) => {
+      const start = connectStartRef.current;
+      connectStartRef.current = null;
+      if (!start?.nodeId) return;
+
+      const targetEl = event.target as HTMLElement | null;
+      const handleEl = targetEl?.closest?.(".react-flow__handle") as HTMLElement | null;
+      if (!handleEl) return; // dropped on empty canvas — not a rejected node-to-node attempt
+
+      const otherNodeId = handleEl.getAttribute("data-nodeid");
+      const otherHandleId = handleEl.getAttribute("data-handleid");
+      if (!otherNodeId || otherNodeId === start.nodeId) return;
+
+      const connection: Connection =
+        start.handleType === "source"
+          ? { source: start.nodeId, sourceHandle: start.handleId, target: otherNodeId, targetHandle: otherHandleId }
+          : { source: otherNodeId, sourceHandle: otherHandleId, target: start.nodeId, targetHandle: start.handleId };
+
+      const validation = isValidWireConnection(connection, nodes, edges);
+      if (!validation.valid && validation.reason) {
+        toast.error(validation.reason);
+      }
+    },
+    [nodes, edges],
+  );
+
+  const publishGate = useMemo(() => computePublishGate(nodes, edges), [nodes, edges]);
+
+  // Applies applyWireConstraints' change list to real canvas state (setNodes) and
+  // explains what changed and why — the compiled output was already self-correcting
+  // (buildFlowGraph applies the same list to its own internal copy), this is purely
+  // about making the correction visible instead of silent. A no-op when the canvas
+  // already matches (empty change list), so reopening a conformant flow stays quiet.
+  const applyWireCorrections = useCallback(() => {
+    const changes = applyWireConstraints(nodes, edges);
+    if (changes.length === 0) return;
+
+    setNodes((nds) =>
+      nds.map((n) => {
+        const nodeChanges = changes.filter((c) => c.nodeId === n.id);
+        if (nodeChanges.length === 0) return n;
+        const data = n.data as ActionNodeData;
+        const patchedConfig = { ...(data.config ?? {}) };
+        for (const c of nodeChanges) patchedConfig[c.field] = c.to;
+        return { ...n, data: { ...data, config: patchedConfig } };
+      }),
+    );
+
+    const reasons = Array.from(new Set(changes.map((c) => c.reason)));
+    reasons.forEach((reason) => toast.warning(reason));
+  }, [nodes, edges, setNodes]);
+
+  const openSimulate = useCallback(() => {
+    applyWireCorrections();
+    setSimulateOpen(true);
+  }, [applyWireCorrections]);
+
+  const openExport = useCallback(() => {
+    if (!publishGate.publishable) {
+      if (publishGate.reason) toast.error(publishGate.reason);
+      return;
+    }
+    applyWireCorrections();
+    setExportOpen(true);
+  }, [publishGate, applyWireCorrections]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -293,7 +389,7 @@ function Builder() {
         position: { x: 320, y: 480 },
         data: {
           rules: guardrails.filter((g) => g.enabled).map((g) => ({ id: g.id, label: g.label })),
-          minValue: "0",
+          minValue: "",
           coinType: "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI",
         },
       } as Node),
@@ -385,31 +481,52 @@ function Builder() {
             initial={{ opacity: 0, y: -8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.2, duration: 0.4, ease: easeOut }}
-            className="absolute top-3 right-3 z-10 flex flex-wrap gap-2 justify-end"
+            className="absolute top-3 right-3 z-10 flex flex-col items-end gap-2"
           >
-            {(
-              [
-                { label: "Add PTB", icon: Layers, onClick: addPtb, primary: false },
-                { label: "Guardrails", icon: Shield, onClick: addGuardrail, primary: false },
-                { label: "Simulate", icon: Play, onClick: () => setSimulateOpen(true), primary: false },
-                { label: "Compile & export", icon: Download, onClick: () => setExportOpen(true), primary: true },
-              ] as const
-            ).map(({ label, icon: Icon, onClick, primary }) => (
+            <div className="flex flex-wrap gap-2 justify-end">
+              {(
+                [
+                  { label: "Add PTB", icon: Layers, onClick: addPtb },
+                  { label: "Guardrails", icon: Shield, onClick: addGuardrail },
+                  { label: "Simulate", icon: Play, onClick: openSimulate },
+                ] as const
+              ).map(({ label, icon: Icon, onClick }) => (
+                <motion.button
+                  key={label}
+                  whileHover={{ scale: 1.04, y: -2 }}
+                  whileTap={{ scale: 0.96 }}
+                  transition={{ type: "spring", stiffness: 480, damping: 22 }}
+                  onClick={onClick}
+                  className="inline-flex cursor-pointer items-center gap-2 rounded-full bg-card/90 backdrop-blur border border-border px-3.5 py-2 text-sm font-medium shadow-[var(--shadow-soft)]"
+                >
+                  <Icon className="h-4 w-4" /> {label}
+                </motion.button>
+              ))}
               <motion.button
-                key={label}
-                whileHover={{ scale: 1.04, y: -2 }}
-                whileTap={{ scale: 0.96 }}
+                whileHover={publishGate.publishable ? { scale: 1.04, y: -2 } : undefined}
+                whileTap={publishGate.publishable ? { scale: 0.96 } : undefined}
                 transition={{ type: "spring", stiffness: 480, damping: 22 }}
-                onClick={onClick}
-                className={
-                  primary
-                    ? "inline-flex cursor-pointer items-center gap-2 rounded-full bg-foreground text-background px-3.5 py-2 text-sm font-medium shadow-[var(--shadow-float)]"
-                    : "inline-flex cursor-pointer items-center gap-2 rounded-full bg-card/90 backdrop-blur border border-border px-3.5 py-2 text-sm font-medium shadow-[var(--shadow-soft)]"
-                }
+                onClick={openExport}
+                aria-disabled={!publishGate.publishable}
+                aria-describedby={!publishGate.publishable ? "publish-gate-reason" : undefined}
+                className={`inline-flex items-center gap-2 rounded-full px-3.5 py-2 text-sm font-medium shadow-[var(--shadow-float)] transition-colors ${
+                  publishGate.publishable
+                    ? "cursor-pointer bg-foreground text-background"
+                    : "cursor-not-allowed bg-foreground/50 text-background/80"
+                }`}
               >
-                <Icon className="h-4 w-4" /> {label}
+                <Download className="h-4 w-4" /> Compile & export
               </motion.button>
-            ))}
+            </div>
+            {!publishGate.publishable && publishGate.reason && (
+              <p
+                id="publish-gate-reason"
+                role="status"
+                className="max-w-xs rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-1.5 text-right text-[11px] text-amber-800 dark:text-amber-300"
+              >
+                {publishGate.reason}
+              </p>
+            )}
           </motion.div>
 
           <motion.div
@@ -433,6 +550,8 @@ function Builder() {
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
+              onConnectStart={onConnectStart}
+              onConnectEnd={onConnectEnd}
               isValidConnection={isValidConnection}
               nodeTypes={nodeTypes as any}
               edgeTypes={edgeTypes as any}
@@ -476,13 +595,7 @@ function Builder() {
           <DiscoverDialog onClose={() => setDiscoverOpen(false)} onImport={importDiscovered} />
         )}
         {simulateOpen && (
-          <SimulateDialog
-            nodes={nodes}
-            edges={edges}
-            guardrails={guardrails}
-            onChange={setGuardrails}
-            onClose={() => setSimulateOpen(false)}
-          />
+          <SimulateDialog nodes={nodes} edges={edges} onClose={() => setSimulateOpen(false)} />
         )}
       </AnimatePresence>
     </div>
@@ -575,36 +688,29 @@ function ExportDialog({
   const [copied, setCopied] = useState<"mcp" | "config" | null>(null);
   const mcpBoxRef = useRef<HTMLDivElement>(null);
   const actions = nodes.filter((n) => n.type === "action").map((n) => n.data as ActionNodeData);
+  const graph = useMemo(() => buildFlowGraph(nodes, edges), [nodes, edges]);
 
   useEffect(() => {
     let cancelled = false;
     const run = async () => {
       setLoading(true);
       setError(null);
-      const { nodes: flowNodes, edges: flowEdges, skipped } = buildFlowGraph(nodes, edges);
-      if (flowNodes.length === 0) {
-        const message = skipped.length
-          ? `Only Cetus swap + Haedal stake compile today. Skipped: ${skipped.join(", ")}`
-          : "Add a supported action before publishing.";
+
+      // Re-derived here (not just trusted from the button that opened this dialog)
+      // as a defense-in-depth check — one shared predicate, one truthful message,
+      // instead of the two different "why can't I publish" strings this dialog and
+      // the simulate dialog used to show independently.
+      const gate = computePublishGate(nodes, edges);
+      if (!gate.publishable) {
+        const message = gate.reason ?? CAPABILITY_COPY.publishScope;
         setError(message);
         toast.error(message);
         setLoading(false);
         return;
       }
-      const actionNodes = flowNodes.filter(
-        (n) => n.type !== "ptb" && n.type !== "guardrail",
-      );
-      const deepbookNodes = actionNodes.filter((n) => n.type === "deepbook_limit_order");
-      if (deepbookNodes.length !== 1 || actionNodes.length !== 1) {
-        const message =
-          "Publish supports exactly one deepbook_limit_order action; PTB and Guardrail wrapper nodes are allowed.";
-        setError(message);
-        toast.error(message);
-        setLoading(false);
-        return;
-      }
+
       try {
-        const data = await rillApi.publish({ nodes: flowNodes, edges: flowEdges });
+        const data = await rillApi.publish({ nodes: graph.nodes, edges: graph.edges });
         if (!cancelled) setPublished(data);
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : "Publish failed");
@@ -616,7 +722,7 @@ function ExportDialog({
     return () => {
       cancelled = true;
     };
-  }, [nodes, edges]);
+  }, [nodes, edges, graph]);
 
   useEffect(() => {
     if (!published || !mcpBoxRef.current) return;
@@ -696,6 +802,12 @@ function ExportDialog({
             <X className="h-4 w-4" />
           </motion.button>
         </div>
+
+        {(graph.skipped.length > 0 || graph.skippedEdges.length > 0) && (
+          <div className="px-5 pt-4">
+            <FlowWarningsBanner skippedNodes={graph.skipped} skippedEdges={graph.skippedEdges} />
+          </div>
+        )}
 
         <div className="p-5 space-y-4 min-h-[180px]">
           {loading && (

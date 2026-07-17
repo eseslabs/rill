@@ -1,28 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { X, Loader2, Check, AlertTriangle, Activity } from "lucide-react";
+import { X, Loader2, Check, AlertTriangle, Activity, ShieldOff } from "lucide-react";
 import type { Edge, Node } from "reactflow";
-import type { ActionNodeData } from "./nodes";
+import type { ActionNodeData, GuardrailNodeData } from "./nodes";
 import { buildFlowGraph } from "@/lib/flow-mapper";
 import { rillApi, type SimulationResult } from "@/lib/rill-api";
-
-export type Guardrail = { id: string; label: string; enabled: boolean };
-
-export const DEFAULT_GUARDRAILS: Guardrail[] = [
-  { id: "max_in", label: "Max amount_in ≤ 100 SUI", enabled: true },
-  { id: "slippage", label: "Slippage ≤ 1.0%", enabled: true },
-  { id: "allowlist", label: "Recipient must be on allowlist", enabled: false },
-  { id: "ttl", label: "Deadline within 60s", enabled: true },
-  { id: "dry_run", label: "Require successful dry-run", enabled: true },
-];
-
-function getEmptyFlowError(skipped: string[]): string {
-  if (skipped.length > 0) {
-    return `Backend supports Cetus swap + Haedal stake only. Skipped: ${skipped.join(", ")}`;
-  }
-
-  return "Add a Cetus swap or Haedal stake node to simulate.";
-}
+import { CAPABILITY_COPY, guardrailGateReason, isGuardrailMinValueValid } from "@/lib/publish-gate";
+import { FlowWarningsBanner } from "@/components/flow/flow-warnings";
 
 function getSimulationPhase(simulation: SimulationResult): "ok" | "fail" | "unverified" {
   if (simulation.verification === "unverified") {
@@ -36,17 +20,19 @@ function getSimulationPhase(simulation: SimulationResult): "ok" | "fail" | "unve
   return "fail";
 }
 
+function coinSymbol(coinType?: string): string {
+  if (!coinType) return "SUI";
+  const parts = coinType.split("::");
+  return parts[parts.length - 1] || coinType;
+}
+
 export function SimulateDialog({
   nodes,
   edges,
-  guardrails,
-  onChange,
   onClose,
 }: {
   nodes: Node[];
   edges: Edge[];
-  guardrails: Guardrail[];
-  onChange: (g: Guardrail[]) => void;
   onClose: () => void;
 }) {
   const [phase, setPhase] = useState<"idle" | "simulating" | "ok" | "fail" | "unverified">("idle");
@@ -58,6 +44,9 @@ export function SimulateDialog({
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const actions = nodes.filter((n) => n.type === "action").map((n) => n.data as ActionNodeData);
+  const guardrailNodes = nodes.filter((n) => n.type === "guardrail");
+
+  const graph = useMemo(() => buildFlowGraph(nodes, edges), [nodes, edges]);
 
   useEffect(() => {
     let cancelled = false;
@@ -66,16 +55,27 @@ export function SimulateDialog({
       setError(null);
       setResult(null);
 
-      const { nodes: flowNodes, edges: flowEdges, skipped } = buildFlowGraph(nodes, edges);
-
-      if (flowNodes.length === 0) {
+      // A guardrail with no real floor is a no-op — don't run a "simulation" that
+      // implies protection which isn't actually there (R1).
+      const blockedReason = guardrailGateReason(nodes);
+      if (blockedReason) {
         setPhase("fail");
-        setError(getEmptyFlowError(skipped));
+        setError(blockedReason);
+        return;
+      }
+
+      if (graph.nodes.length === 0) {
+        setPhase("fail");
+        setError(
+          graph.skipped.length > 0
+            ? CAPABILITY_COPY.simulateSkipped(graph.skipped)
+            : CAPABILITY_COPY.simulateEmpty,
+        );
         return;
       }
 
       try {
-        const data = await rillApi.simulate({ nodes: flowNodes, edges: flowEdges });
+        const data = await rillApi.simulate({ nodes: graph.nodes, edges: graph.edges });
         if (cancelled) return;
         setResult(data);
         setPhase(getSimulationPhase(data.simulation));
@@ -93,9 +93,7 @@ export function SimulateDialog({
     return () => {
       cancelled = true;
     };
-  }, [nodes, edges]);
-
-  const toggle = (id: string) => onChange(guardrails.map((g) => (g.id === id ? { ...g, enabled: !g.enabled } : g)));
+  }, [nodes, edges, graph]);
 
   const previewText =
     result?.preview ??
@@ -137,6 +135,12 @@ export function SimulateDialog({
             <X className="h-4 w-4" />
           </button>
         </div>
+
+        {(graph.skipped.length > 0 || graph.skippedEdges.length > 0) && (
+          <div className="px-5 pt-4">
+            <FlowWarningsBanner skippedNodes={graph.skipped} skippedEdges={graph.skippedEdges} />
+          </div>
+        )}
 
         <div className="grid md:grid-cols-2 gap-0">
           <div className="p-5 border-r border-border">
@@ -183,32 +187,57 @@ export function SimulateDialog({
                 </>
               )}
             </div>
+            {result?.warnings && result.warnings.length > 0 && (
+              <p className="mt-2 text-[11px] text-amber-700 dark:text-amber-400">
+                Backend warnings: {result.warnings.join(" · ")}
+              </p>
+            )}
           </div>
 
           <div className="p-5">
-            <div className="text-xs uppercase tracking-widest text-muted-foreground">Guardrails</div>
+            <div className="text-xs uppercase tracking-widest text-muted-foreground">Enforced at execution</div>
             <p className="mt-1 text-xs text-muted-foreground">
-              Enforced at sign time (Thiny policy + on-chain agent_wallet).
+              Read-only — what actually runs, not a toggle. Add or edit a guardrail node on the canvas to change it.
             </p>
             <div className="mt-3 space-y-1.5">
-              {guardrails.map((g) => (
-                <label
-                  key={g.id}
-                  className="flex items-center justify-between gap-3 rounded-lg border border-border bg-background/60 px-3 py-2 cursor-pointer hover:bg-secondary/60"
-                >
-                  <span className="text-sm">{g.label}</span>
-                  <input
-                    type="checkbox"
-                    checked={g.enabled}
-                    onChange={() => toggle(g.id)}
-                    className="accent-primary"
-                  />
-                </label>
-              ))}
+              {guardrailNodes.length === 0 && (
+                <p className="rounded-lg border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
+                  No guardrails on this flow — actions execute without a minimum-output floor.
+                </p>
+              )}
+              {guardrailNodes.map((n) => {
+                const gData = n.data as GuardrailNodeData;
+                const valid = isGuardrailMinValueValid(gData.minValue);
+                return (
+                  <div
+                    key={n.id}
+                    className={`rounded-lg border px-3 py-2 text-xs ${
+                      valid ? "border-border bg-background/60" : "border-destructive/40 bg-destructive/5"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium">Guardrail</span>
+                      {!valid && (
+                        <span className="inline-flex items-center gap-1 text-[10px] text-destructive">
+                          <ShieldOff className="h-3 w-3" /> not enforced
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-1 font-mono text-[11px] text-muted-foreground">
+                      min {gData.minValue?.trim() ? gData.minValue : "(unset)"} · {coinSymbol(gData.coinType)}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
             <div className="mt-4 rounded-xl bg-sky/30 text-sky-foreground p-3 text-[11px]">
               Rill returns an <strong>unsigned PTB</strong> — keyless backend. Thiny signs and submits;
               agent_wallet enforces budget on-chain.
+            </div>
+            <div className="mt-2 rounded-xl bg-amber-400/10 border border-amber-400/30 text-amber-800 dark:text-amber-300 p-3 text-[11px]">
+              This flow runs without an agent-wallet budget binding — the builder can't attach an{" "}
+              <code>agentWallet</code> id yet, so execution isn't capped by an on-chain spend policy beyond
+              what's wired above.
             </div>
           </div>
         </div>
