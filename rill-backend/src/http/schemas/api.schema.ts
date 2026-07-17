@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { isHeroActionFlow } from '../../features/mcp/tool-schema';
+import { findFlowStructureIssues } from '../../features/protocols/handles';
 
 export const IntrospectSchema = z.object({
   packageId: z.string().min(4, 'Invalid Sui Package ID'),
@@ -32,9 +33,22 @@ export const AgentWalletSchema = z.object({
   coinType: z.string().optional(),
 });
 
-const FlowSchema = z.object({
+/**
+ * Structural flow validation (U3, KTD-3/R13): unique node ids, every edge referencing an existing
+ * node, and every edge using a handle name registered for its endpoint's node type (the shared
+ * `NODE_HANDLES` registry in `features/protocols/handles.ts`, next to the adapters that actually
+ * consume those handles). `compiler.service.ts` runs the SAME check (`findFlowStructureIssues`)
+ * again at the top of `compileFlow`, throwing a 422 `ValidationError` — that is what gives direct
+ * callers (the MCP skill-runner bypasses this HTTP schema layer entirely) the same protection this
+ * refinement gives `/compile` and `/simulate` requests.
+ */
+export const FlowSchema = z.object({
   nodes: z.array(FlowNodeSchema),
   edges: z.array(FlowEdgeSchema),
+}).superRefine((flow, ctx) => {
+  for (const issue of findFlowStructureIssues(flow)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: issue.message, path: issue.path });
+  }
 });
 
 export const CompileSchema = z.object({

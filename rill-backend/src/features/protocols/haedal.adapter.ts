@@ -32,11 +32,27 @@ export const haedalAdapter: ProtocolAdapter = {
     let coinInputArg: unknown;
 
     if (coinInputEdge) {
-      coinInputArg = nodeOutputs[coinInputEdge.source];
-      if (coinInputArg === undefined) {
-        throw new ValidationError(
-          `Node ${node.id}: missing SUI coin from ${coinInputEdge.source} — wire swap coin_out → sui_coin.`,
-        );
+      const upstream = nodeOutputs[coinInputEdge.source];
+      if (upstream === undefined) {
+        const sourceNode = flow.nodes.find((n) => n.id === coinInputEdge.source);
+        if (sourceNode?.type === 'guardrail') {
+          // Documented gap: a guardrail with nothing to forward (root-budget mode) feeding an
+          // action isn't a supported "guard a coin flowing into an action" pattern yet — degrade to
+          // normal root funding instead of a hard failure so the edge's presence is still reported.
+          warnings.push(
+            `Node ${node.id}: guardrail ${coinInputEdge.source} has no coin to forward (guarding a `
+              + `coin flowing into a downstream action isn't supported yet) — funding from the root `
+              + `budget instead.`,
+          );
+          coinInputArg = fundSuiCoin(amount);
+        } else {
+          throw new ValidationError(
+            `Node ${node.id}: missing SUI coin from ${coinInputEdge.source} — wire swap coin_out → sui_coin.`,
+          );
+        }
+      } else {
+        delete nodeOutputs[coinInputEdge.source]; // consumed — keep the sweep from settling it too
+        coinInputArg = upstream.value;
       }
     } else {
       coinInputArg = fundSuiCoin(amount);
