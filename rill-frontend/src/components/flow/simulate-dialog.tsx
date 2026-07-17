@@ -4,8 +4,7 @@ import { X, Loader2, Check, AlertTriangle, Activity } from "lucide-react";
 import type { Edge, Node } from "reactflow";
 import type { ActionNodeData } from "./nodes";
 import { buildFlowGraph } from "@/lib/flow-mapper";
-import { rillApi, type ExecuteResult } from "@/lib/rill-api";
-import { useCurrentAccount } from "@mysten/dapp-kit";
+import { rillApi, type SimulationResult } from "@/lib/rill-api";
 
 export type Guardrail = { id: string; label: string; enabled: boolean };
 
@@ -16,6 +15,26 @@ export const DEFAULT_GUARDRAILS: Guardrail[] = [
   { id: "ttl", label: "Deadline within 60s", enabled: true },
   { id: "dry_run", label: "Require successful dry-run", enabled: true },
 ];
+
+function getEmptyFlowError(skipped: string[]): string {
+  if (skipped.length > 0) {
+    return `Backend supports Cetus swap + Haedal stake only. Skipped: ${skipped.join(", ")}`;
+  }
+
+  return "Add a Cetus swap or Haedal stake node to simulate.";
+}
+
+function getSimulationPhase(simulation: SimulationResult): "ok" | "fail" | "unverified" {
+  if (simulation.verification === "unverified") {
+    return "unverified";
+  }
+
+  if (simulation.ok) {
+    return "ok";
+  }
+
+  return "fail";
+}
 
 export function SimulateDialog({
   nodes,
@@ -30,11 +49,15 @@ export function SimulateDialog({
   onChange: (g: Guardrail[]) => void;
   onClose: () => void;
 }) {
-  const [phase, setPhase] = useState<"idle" | "simulating" | "ok" | "fail">("idle");
-  const [result, setResult] = useState<ExecuteResult | null>(null);
+  const [phase, setPhase] = useState<"idle" | "simulating" | "ok" | "fail" | "unverified">("idle");
+  const [result, setResult] = useState<{
+    unsignedPtb: string;
+    preview: string;
+    simulation: SimulationResult;
+    warnings: string[];
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const actions = nodes.filter((n) => n.type === "action").map((n) => n.data as ActionNodeData);
-  const account = useCurrentAccount();
 
   useEffect(() => {
     let cancelled = false;
@@ -47,19 +70,15 @@ export function SimulateDialog({
 
       if (flowNodes.length === 0) {
         setPhase("fail");
-        setError(
-          skipped.length
-            ? `Backend supports Cetus swap + Haedal stake only. Skipped: ${skipped.join(", ")}`
-            : "Add a Cetus swap or Haedal stake node to simulate.",
-        );
+        setError(getEmptyFlowError(skipped));
         return;
       }
 
       try {
-        const data = await rillApi.execute({ nodes: flowNodes, edges: flowEdges }, false, account?.address);
+        const data = await rillApi.simulate({ nodes: flowNodes, edges: flowEdges });
         if (cancelled) return;
         setResult(data);
-        setPhase(data.simulation.ok ? "ok" : "fail");
+        setPhase(getSimulationPhase(data.simulation));
         if (!data.simulation.ok) {
           setError(data.simulation.error ?? "Simulation failed");
         }
@@ -74,7 +93,7 @@ export function SimulateDialog({
     return () => {
       cancelled = true;
     };
-  }, [nodes, edges, account?.address]);
+  }, [nodes, edges]);
 
   const toggle = (id: string) => onChange(guardrails.map((g) => (g.id === id ? { ...g, enabled: !g.enabled } : g)));
 
@@ -144,7 +163,14 @@ export function SimulateDialog({
                   </span>
                   <span>
                     Dry-run OK · gas ≈ <span className="font-mono">{gasSui} SUI</span>
-                    {result?.simulation.simulatedViaFallback && " (estimated)"}
+                  </span>
+                </>
+              )}
+              {phase === "unverified" && (
+                <>
+                  <AlertTriangle className="h-4 w-4 text-peach-foreground" />
+                  <span className="text-peach-foreground">
+                    Simulation unverified: {result?.simulation.error ?? "No reason returned by backend"}. Signing is blocked.
                   </span>
                 </>
               )}
