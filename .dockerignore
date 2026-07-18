@@ -1,0 +1,12 @@
+**/node_modules
+**/dist
+**/.output
+**/.nitro
+**/build
+.git
+**/.env
+**/.env.*
+**/data
+.rill
+move/**/build
+**/*.log
