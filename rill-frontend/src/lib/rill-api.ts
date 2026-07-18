@@ -1,3 +1,5 @@
+import type { CapabilityManifest } from "../../../packages/rill-sdk/src";
+
 const API_FALLBACK = "https://api.rill.naisu.one/api";
 
 function normalizeApiBase(raw: string): string {
@@ -78,6 +80,15 @@ export type ProtocolRegistry = {
     stakingObjectId: string;
     minStakeMist: string;
     coinType: string;
+  };
+};
+
+export type CapabilityPreviewResult = {
+  onChainRules: { module: string; config: Record<string, unknown> }[];
+  signerPolicy: Record<string, unknown>;
+  declaration: {
+    summaryLines: string[];
+    caps: { label: string; value: string; enforcement: "on-chain" | "pre-flight" }[];
   };
 };
 
@@ -163,5 +174,9 @@ export const rillApi = {
 
   publish(flow: FlowGraph, signal?: AbortSignal) {
     return post<PublishResult>("/publish", { flow }, signal);
+  },
+
+  previewCapabilities(manifest: CapabilityManifest, signal?: AbortSignal) {
+    return post<CapabilityPreviewResult>("/capabilities/preview", { manifest }, signal);
   },
 };

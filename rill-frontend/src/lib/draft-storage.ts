@@ -1,5 +1,6 @@
 import type { Edge, Node } from "reactflow";
 import type { PublishResult } from "@/lib/rill-api";
+import { emptyManifest, type CapabilityManifest } from "@/lib/capabilities";
 
 /**
  * Pure, localStorage-backed persistence for the builder canvas draft and the
@@ -18,7 +19,7 @@ export const PUBLISH_STORAGE_KEY = "rill.builder.publish.v1";
 
 const DRAFT_SCHEMA_VERSION = 1;
 
-export type DraftPayload = { nodes: Node[]; edges: Edge[] };
+export type DraftPayload = { nodes: Node[]; edges: Edge[]; manifest: CapabilityManifest };
 
 export type StoredPublishRecord = { hash: string; result: PublishResult };
 
@@ -30,9 +31,16 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 // Draft (nodes/edges) round-trip
 // ---------------------------------------------------------------------------
 
-/** nodes/edges -> versioned JSON string. Pure. */
-export function serializeDraft(nodes: Node[], edges: Edge[]): string {
-  return JSON.stringify({ schemaVersion: DRAFT_SCHEMA_VERSION, nodes, edges });
+/** nodes/edges(/manifest) -> versioned JSON string. `manifest` is optional so every existing
+ *  2-arg call site keeps working unchanged; omitting it simply omits the key from the JSON (never
+ *  writes an explicit `null`), which `deserializeDraft` treats the same as an old pre-manifest
+ *  draft. Pure. */
+export function serializeDraft(
+  nodes: Node[],
+  edges: Edge[],
+  manifest?: CapabilityManifest,
+): string {
+  return JSON.stringify({ schemaVersion: DRAFT_SCHEMA_VERSION, nodes, edges, manifest });
 }
 
 /** A restorable node only needs a non-empty string `id` and an `{x, y}`
@@ -59,11 +67,29 @@ function isRestorableEdge(value: unknown): value is Edge {
   );
 }
 
+/** A restorable manifest only needs a non-empty string `walletCoinType` and an array `rules` —
+ *  individual rule shape isn't deeply re-validated here (mirrors `isRestorableNode`/
+ *  `isRestorableEdge`'s shallow-shape-only guard just above). A rule that's incomplete or
+ *  schema-invalid (e.g. an amount the owner hadn't finished typing when the tab closed) is exactly
+ *  the same "still composing" state `capabilities-dialog.tsx` already renders as a local validation
+ *  message, not a crash — so it is restored as-is rather than discarded. */
+function isRestorableManifest(value: unknown): value is CapabilityManifest {
+  return (
+    isPlainRecord(value) &&
+    typeof value.walletCoinType === "string" &&
+    value.walletCoinType.length > 0 &&
+    Array.isArray(value.rules)
+  );
+}
+
 /**
- * JSON string -> {nodes, edges}, or `null` on ANY corruption, shape
+ * JSON string -> {nodes, edges, manifest}, or `null` on ANY corruption, shape
  * mismatch, or schema-version skew (R16: restore is validated, never trusted
  * blindly). Mirrors the `onDrop` JSON.parse guard in builder.tsx — corrupt
- * input degrades to "nothing to restore," never a crash. Pure.
+ * input degrades to "nothing to restore," never a crash. A draft saved before
+ * the manifest field existed (or whose `manifest` key fails the shape guard)
+ * restores with `manifest: emptyManifest()` rather than being rejected wholesale
+ * — backward-compatible with every pre-manifest stored draft. Pure.
  */
 export function deserializeDraft(raw: string | null | undefined): DraftPayload | null {
   if (!raw) return null;
@@ -81,7 +107,9 @@ export function deserializeDraft(raw: string | null | undefined): DraftPayload |
   if (!Array.isArray(nodes) || !Array.isArray(edges)) return null;
   if (!nodes.every(isRestorableNode) || !edges.every(isRestorableEdge)) return null;
 
-  return { nodes: nodes as Node[], edges: edges as Edge[] };
+  const manifest = isRestorableManifest(parsed.manifest) ? parsed.manifest : emptyManifest();
+
+  return { nodes: nodes as Node[], edges: edges as Edge[], manifest };
 }
 
 /** Highest numeric suffix among restored node ids (e.g. `n_12` -> 12), so
@@ -121,9 +149,13 @@ export function loadDraftFromStorage(): DraftRestoreResult {
 
 /** Best-effort autosave — localStorage being full/disabled degrades to "no
  *  autosave," never a thrown error on the canvas's hot path. */
-export function saveDraftToStorage(nodes: Node[], edges: Edge[]): void {
+export function saveDraftToStorage(
+  nodes: Node[],
+  edges: Edge[],
+  manifest?: CapabilityManifest,
+): void {
   try {
-    localStorage.setItem(DRAFT_STORAGE_KEY, serializeDraft(nodes, edges));
+    localStorage.setItem(DRAFT_STORAGE_KEY, serializeDraft(nodes, edges, manifest));
   } catch {
     /* best-effort */
   }
