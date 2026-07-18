@@ -26,6 +26,7 @@ import {
   ScanSearch,
   Shield,
   Layers,
+  LayoutTemplate,
 } from "lucide-react";
 import { SiteHeader } from "@/components/site-chrome";
 import {
@@ -39,6 +40,7 @@ import {
 import { PROTOCOLS, BACKEND_PROTOCOL_IDS, type Protocol } from "@/lib/protocols";
 import { DiscoverDialog } from "@/components/flow/discover-dialog";
 import { ExportDialog } from "@/components/flow/export-dialog";
+import { TemplateDialog } from "@/components/flow/template-dialog";
 import { ProtocolLogo } from "@/components/flow/protocol-logo";
 import { DeletableEdge } from "@/components/flow/deletable-edge";
 import { SimulateDialog } from "@/components/flow/simulate-dialog";
@@ -52,6 +54,7 @@ import {
 import { computePublishGate } from "@/lib/publish-gate";
 import { applyProtocolRegistry, defaultActionConfig } from "@/lib/action-config";
 import { getActionPorts } from "@/lib/action-ports";
+import { FLOW_TEMPLATES } from "@/lib/flow-templates";
 import { rillApi } from "@/lib/rill-api";
 import { loadDraftFromStorage, saveDraftToStorage, maxNodeId } from "@/lib/draft-storage";
 import type { DiscoveredFunction, IntrospectionResult } from "@/lib/rill-types";
@@ -109,6 +112,7 @@ function Builder() {
   const [search, setSearch] = useState("");
   const [exportOpen, setExportOpen] = useState(false);
   const [discoverOpen, setDiscoverOpen] = useState(false);
+  const [templateOpen, setTemplateOpen] = useState(false);
   const [simulateOpen, setSimulateOpen] = useState(false);
   // Cosmetic seed data for a new guardrail node's checklist (see DEFAULT_GUARDRAILS
   // doc comment) — not enforcement state, so it's a constant, not a setter pair.
@@ -377,6 +381,31 @@ function Builder() {
     [setNodes],
   );
 
+  // Same `n_${idRef.current++}` scheme every add*/import path already uses —
+  // shared so a template-built node id can never collide with a hand-added one.
+  const makeId = useCallback(() => `n_${idRef.current++}`, []);
+
+  // Template gallery (FLOW-ONLY presets, template-dialog.tsx / lib/flow-templates.ts):
+  // fully REPLACES the canvas with the chosen preset, mirroring the draft-restore
+  // block above — same setNodes/setEdges/idRef-reseed sequence. Confirms first if
+  // the canvas already has content so a template never silently wipes in-progress
+  // work (mirrors the beforeunload "hasContent" check).
+  const applyTemplate = useCallback(
+    (templateId: string) => {
+      const template = FLOW_TEMPLATES.find((t) => t.id === templateId);
+      if (!template) return;
+      const hasContent =
+        nodesRef.current.some((n) => n.type !== "trigger" && n.type !== "output") ||
+        edgesRef.current.length > 0;
+      if (hasContent && !window.confirm("Replace the current flow with this template?")) return;
+      const built = template.build(makeId);
+      setNodes(built.nodes);
+      setEdges(built.edges);
+      idRef.current = maxNodeId(built.nodes) + 1;
+    },
+    [makeId, setNodes, setEdges],
+  );
+
   const onDragStart = (e: React.DragEvent, p: Protocol, actionId: string) => {
     e.dataTransfer.setData("application/rill", JSON.stringify({ protocolId: p.id, actionId }));
     e.dataTransfer.effectAllowed = "move";
@@ -469,6 +498,15 @@ function Builder() {
               className="mt-3 w-full inline-flex cursor-pointer items-center justify-center gap-2 rounded-lg bg-foreground text-background px-3 py-2 text-sm font-medium shadow-[var(--shadow-soft)]"
             >
               <ScanSearch className="h-3.5 w-3.5" /> Discover / Import
+            </motion.button>
+            <motion.button
+              whileHover={{ scale: 1.02, y: -1 }}
+              whileTap={{ scale: 0.98 }}
+              transition={{ type: "spring", stiffness: 420, damping: 24 }}
+              onClick={() => setTemplateOpen(true)}
+              className="mt-2 w-full inline-flex cursor-pointer items-center justify-center gap-2 rounded-lg bg-background border border-border text-foreground px-3 py-2 text-sm font-medium shadow-[var(--shadow-soft)]"
+            >
+              <LayoutTemplate className="h-3.5 w-3.5" /> Template
             </motion.button>
             <div className="mt-3 relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
@@ -646,6 +684,16 @@ function Builder() {
             open
             onOpenChange={(o) => !o && setDiscoverOpen(false)}
             onImport={importDiscovered}
+          />
+        )}
+        {templateOpen && (
+          <TemplateDialog
+            open
+            onOpenChange={(o) => !o && setTemplateOpen(false)}
+            onApply={(id) => {
+              applyTemplate(id);
+              setTemplateOpen(false);
+            }}
           />
         )}
         {simulateOpen && (
