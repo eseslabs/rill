@@ -49,6 +49,21 @@ export function buildAgentWalletSchema() {
       walletId: { type: 'string', description: 'Run-specific shared AgentWallet object ID.' },
       capId: { type: 'string', description: 'Run-specific AgentCap object ID held by the local signer.' },
       coinType: { type: 'string', description: 'AgentWallet coin type; defaults to 0x2::sui::SUI.' },
+      // F7: opts this call into the redesigned Rule + Hot Potato agent_wallet package
+      // (request_spend/confirm_spend) instead of the legacy spend() call — see
+      // `core/agent-wallet.ts`'s `normalizeAgentWallet`. Both remain optional and absent by
+      // default, so an MCP caller that never mentions them keeps building the live v2 spend().
+      capabilityManifest: {
+        type: 'object',
+        additionalProperties: true,
+        description: 'Wallet-level CapabilityManifest (rules[]) — when set, builds the redesigned '
+          + 'request_spend/prove/confirm_spend sequence instead of the legacy spend() call.',
+      },
+      versionId: {
+        type: 'string',
+        description: 'Shared agent_wallet Version object ID — required alongside capabilityManifest '
+          + 'unless AGENT_WALLET_VERSION_ID is configured on the server.',
+      },
     },
     required: ['packageId', 'walletId', 'capId'],
     additionalProperties: false,

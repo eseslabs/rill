@@ -45,11 +45,24 @@ export const FlowNodeSchema = z.object({
   inputs: z.record(z.string(), z.any()).optional(),
 });
 
+/**
+ * F7: optional `capabilityManifest` + `versionId` opt a request into the redesigned Rule + Hot
+ * Potato agent_wallet package instead of today's legacy `spend()` (see `core/agent-wallet.ts`'s
+ * `normalizeAgentWallet`, the single place that resolves which package/version a binding actually
+ * uses). `capabilityManifest` is validated via the SDK's `CapabilityManifestSchema` — the same
+ * single source of truth `/capabilities/preview` and the compiler's own defense-in-depth
+ * re-validation (`parseManifestOrThrow`) use — so a malformed manifest is rejected with a 422 here,
+ * before it ever reaches `normalizeAgentWallet` or the compiler. Both fields are optional and
+ * absent by default: a request that never mentions them keeps compiling through the live v2
+ * `agent_wallet::spend()` path exactly as it did before F7.
+ */
 export const AgentWalletSchema = z.object({
   packageId: suiAddress('agentWallet.packageId'),
   walletId: suiAddress('agentWallet.walletId'),
   capId: suiAddress('agentWallet.capId'),
   coinType: z.string().optional(),
+  capabilityManifest: CapabilityManifestSchema.optional(),
+  versionId: suiAddress('agentWallet.versionId').optional(),
 });
 
 /**

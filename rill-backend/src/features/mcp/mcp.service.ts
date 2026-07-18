@@ -2,6 +2,8 @@ import { mainnetPackageIds, mainnetPools, testnetPackageIds, testnetPools } from
 import { skillsStore, type PublishedSkill } from './skills.store';
 import { skillRunnerService } from './skill-runner.service';
 import { config } from '../../core/config';
+import { normalizeAgentWallet, type AgentWalletBinding } from '../../core/agent-wallet';
+import type { CapabilityManifest } from '../../../../packages/rill-sdk/src/capability-manifest';
 import {
   buildActionInputSchema,
   HERO_ACTION_DESCRIPTION,
@@ -37,7 +39,7 @@ export const actionTools = [
 const EMPTY_FIELDS: readonly string[] = [];
 const ACTION_TOOL_NAMES: ReadonlySet<string> = new Set(actionTools.map((tool) => tool.name));
 const BUILD_ACTION_FIELDS = ['actionId', 'sender', 'agentWallet', 'params'] as const;
-const AGENT_WALLET_FIELDS = ['packageId', 'walletId', 'capId', 'coinType'] as const;
+const AGENT_WALLET_FIELDS = ['packageId', 'walletId', 'capId', 'coinType', 'capabilityManifest', 'versionId'] as const;
 
 export interface McpDependencies {
   getSkill(id: string): PublishedSkill | undefined;
@@ -89,22 +91,41 @@ function requireNonEmptyString(value: unknown, message: string): string {
   return value.trim();
 }
 
-function readAgentWallet(value: unknown) {
+/**
+ * F7: allow-listed field parsing PLUS resolution — `assertOnlyFields`/`requireNonEmptyString` below
+ * only shape-check what the caller sent; `normalizeAgentWallet` (`core/agent-wallet.ts`, the SAME
+ * function the HTTP `/compile`/`/simulate`/`/execute` routes use) is what actually decides which of
+ * the two coexisting agent_wallet packages this call resolves to — v2 `spend()` when no
+ * `capabilityManifest` was sent, the redesigned request_spend/confirm_spend package (falling back to
+ * `AGENT_WALLET_PACKAGE_ID_REDESIGNED`/`AGENT_WALLET_VERSION_ID` when the caller omits its own
+ * packageId/versionId) when one was. `packageId` is therefore no longer required to be present up
+ * front here — a manifest-gated MCP caller may omit it and let the server-configured redesigned
+ * package resolve automatically, exactly like the HTTP path.
+ */
+function readAgentWallet(value: unknown): AgentWalletBinding {
   if (!isRecord(value)) {
     throw new Error('agentWallet public binding is required.');
   }
 
   assertOnlyFields(value, AGENT_WALLET_FIELDS, 'agentWallet');
 
-  return {
-    packageId: requireNonEmptyString(value.packageId, 'agentWallet.packageId is required.'),
+  return normalizeAgentWallet({
+    packageId:
+      value.packageId === undefined
+        ? undefined
+        : requireNonEmptyString(value.packageId, 'agentWallet.packageId must be a non-empty string.'),
     walletId: requireNonEmptyString(value.walletId, 'agentWallet.walletId is required.'),
     capId: requireNonEmptyString(value.capId, 'agentWallet.capId is required.'),
     coinType:
       value.coinType === undefined
-        ? '0x2::sui::SUI'
+        ? undefined
         : requireNonEmptyString(value.coinType, 'agentWallet.coinType must be a non-empty string.'),
-  };
+    capabilityManifest: value.capabilityManifest as CapabilityManifest | undefined,
+    versionId:
+      value.versionId === undefined
+        ? undefined
+        : requireNonEmptyString(value.versionId, 'agentWallet.versionId must be a non-empty string.'),
+  });
 }
 
 function readBuildActionArgs(args: Record<string, unknown>, skillId: string) {

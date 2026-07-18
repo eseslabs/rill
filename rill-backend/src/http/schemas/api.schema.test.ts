@@ -95,6 +95,45 @@ test('AgentWalletSchema accepts a short-form address like "0x2"', () => {
   expect(result.success).toBe(true);
 });
 
+// --- F7: optional capabilityManifest + versionId (manifest-gated redesigned package) ------------
+
+const validManifest = {
+  walletCoinType: '0x2::sui::SUI',
+  rules: [{ kind: 'budget', totalMist: '5000000000' }],
+};
+
+test('AgentWalletSchema accepts a valid capabilityManifest + versionId alongside the existing fields', () => {
+  const result = AgentWalletSchema.safeParse({
+    ...validWallet,
+    versionId: `0x${'5'.repeat(64)}`,
+    capabilityManifest: validManifest,
+  });
+  expect(result.success).toBe(true);
+});
+
+test('AgentWalletSchema still accepts a request with no capabilityManifest/versionId (v2, unchanged)', () => {
+  const result = AgentWalletSchema.safeParse(validWallet);
+  expect(result.success).toBe(true);
+  if (result.success) {
+    expect('capabilityManifest' in result.data).toBe(false);
+    expect('versionId' in result.data).toBe(false);
+  }
+});
+
+test('AgentWalletSchema rejects a non-hex versionId', () => {
+  const result = AgentWalletSchema.safeParse({ ...validWallet, versionId: 'not-hex', capabilityManifest: validManifest });
+  expect(result.success).toBe(false);
+});
+
+test('AgentWalletSchema rejects an invalid capabilityManifest (KTD-6: empty rules means unlimited spend)', () => {
+  const result = AgentWalletSchema.safeParse({
+    ...validWallet,
+    versionId: `0x${'5'.repeat(64)}`,
+    capabilityManifest: { walletCoinType: '0x2::sui::SUI', rules: [] },
+  });
+  expect(result.success).toBe(false);
+});
+
 test('IntrospectSchema rejects a garbage packageId', () => {
   expect(IntrospectSchema.safeParse({ packageId: 'zz' }).success).toBe(false);
 });

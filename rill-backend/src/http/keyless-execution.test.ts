@@ -540,6 +540,128 @@ test('an explicit agentWallet still binds without useServerWallet', async () => 
   expect(body.data.agentWalletBound).toBe(true);
 });
 
+// --- F7: manifest-gated agent-wallet flow wired to /compile (coexists with the v2 spend() path) --
+
+test('compile with agentWallet.capabilityManifest + versionId binds via the redesigned agent_wallet package', async () => {
+  const flow = {
+    nodes: [{ id: 'stake1', type: 'haedal_stake', config: { amount: '1000000000' } }],
+    edges: [],
+  };
+  const response = await apiRouter.request('/compile', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      flow,
+      sender: `0x${'1'.repeat(64)}`,
+      agentWallet: {
+        packageId: `0x${'a'.repeat(64)}`,
+        walletId: `0x${'b'.repeat(64)}`,
+        capId: `0x${'c'.repeat(64)}`,
+        versionId: `0x${'d'.repeat(64)}`,
+        capabilityManifest: {
+          walletCoinType: '0x2::sui::SUI',
+          rules: [{ kind: 'budget', totalMist: '5000000000' }],
+        },
+      },
+    }),
+  });
+  const body = await response.json() as {
+    success: boolean;
+    data: { agentWalletBound: boolean; budgetSpendMist: string };
+  };
+
+  expect(response.status).toBe(200);
+  expect(body.success).toBe(true);
+  expect(body.data.agentWalletBound).toBe(true);
+  expect(body.data.budgetSpendMist).toBe('1000000000');
+});
+
+// A manifest-less request against the SAME /compile route still binds the legacy v2 spend() path —
+// the two coexist per-request, not behind a global server toggle.
+test('compile without a capabilityManifest still binds the legacy v2 agent_wallet path', async () => {
+  const flow = {
+    nodes: [{ id: 'stake1', type: 'haedal_stake', config: { amount: '1000000000' } }],
+    edges: [],
+  };
+  const response = await apiRouter.request('/compile', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      flow,
+      sender: `0x${'1'.repeat(64)}`,
+      agentWallet: {
+        packageId: `0x${'a'.repeat(64)}`,
+        walletId: `0x${'b'.repeat(64)}`,
+        capId: `0x${'c'.repeat(64)}`,
+      },
+    }),
+  });
+  const body = await response.json() as { success: boolean; data: { agentWalletBound: boolean } };
+
+  expect(response.status).toBe(200);
+  expect(body.success).toBe(true);
+  expect(body.data.agentWalletBound).toBe(true);
+});
+
+// `normalizeAgentWallet` THROWS `ValidationError` rather than returning a JSON error — that only
+// becomes a structured 422 through the full app's `onError` handler (`index.ts`'s `app.onError
+// (errorHandler)`), not the bare `apiRouter` sub-router used everywhere else in this file (which has
+// no error handler of its own and would otherwise surface a plain-text 500 — see the `/introspect`
+// 501 test below for the same distinction).
+test('compile with a capabilityManifest but no versionId, and no server-side env fallback, rejects with 422', async () => {
+  const flow = {
+    nodes: [{ id: 'stake1', type: 'haedal_stake', config: { amount: '1000000000' } }],
+    edges: [],
+  };
+  const response = await server.fetch(new Request('http://localhost/api/compile', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      flow,
+      sender: `0x${'1'.repeat(64)}`,
+      agentWallet: {
+        packageId: `0x${'a'.repeat(64)}`,
+        walletId: `0x${'b'.repeat(64)}`,
+        capId: `0x${'c'.repeat(64)}`,
+        capabilityManifest: {
+          walletCoinType: '0x2::sui::SUI',
+          rules: [{ kind: 'budget', totalMist: '5000000000' }],
+        },
+      },
+    }),
+  }));
+  const body = await response.json() as { success: boolean; type: string; error: string };
+
+  expect(response.status).toBe(422);
+  expect(body.success).toBe(false);
+  expect(body.type).toBe('ValidationError');
+  expect(body.error).toMatch(/versionId/);
+});
+
+test('AgentWalletSchema rejects an invalid capabilityManifest (KTD-6 empty rules) with a 400 before it ever reaches the compiler', async () => {
+  const flow = {
+    nodes: [{ id: 'stake1', type: 'haedal_stake', config: { amount: '1000000000' } }],
+    edges: [],
+  };
+  const response = await apiRouter.request('/compile', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      flow,
+      sender: `0x${'1'.repeat(64)}`,
+      agentWallet: {
+        packageId: `0x${'a'.repeat(64)}`,
+        walletId: `0x${'b'.repeat(64)}`,
+        capId: `0x${'c'.repeat(64)}`,
+        versionId: `0x${'d'.repeat(64)}`,
+        capabilityManifest: { walletCoinType: '0x2::sui::SUI', rules: [] },
+      },
+    }),
+  });
+
+  expect(response.status).toBe(400);
+});
+
 // --- /introspect honest 501 (R15) -----------------------------------------------------------
 
 test('introspectService.introspectPackage rejects with a stable 501 AppError, not a plain Error', async () => {

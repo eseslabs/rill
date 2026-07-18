@@ -86,6 +86,20 @@ const agentWalletSchema = {
     walletId: { type: 'string' },
     capId: { type: 'string' },
     coinType: { type: 'string', default: '0x2::sui::SUI' },
+    // F7: opts this binding into the redesigned Rule + Hot Potato agent_wallet package
+    // (request_spend/prove/confirm_spend) instead of the legacy spend() call — see
+    // `core/agent-wallet.ts`'s `normalizeAgentWallet`. Both optional and absent by default.
+    capabilityManifest: {
+      type: 'object',
+      additionalProperties: true,
+      description: 'Wallet-level CapabilityManifest (rules[]) — when set, builds the redesigned '
+        + 'request_spend/prove/confirm_spend sequence instead of the legacy spend() call.',
+    },
+    versionId: {
+      type: 'string',
+      description: 'Shared agent_wallet Version object ID — required alongside capabilityManifest '
+        + 'unless AGENT_WALLET_VERSION_ID is configured on the server.',
+    },
   },
 } as const;
 
