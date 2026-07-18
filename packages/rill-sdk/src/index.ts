@@ -8,6 +8,29 @@ export { RillApiError } from './errors';
 export { assertExecutionEnvelope, digestUnsignedPtb } from './execution-envelope';
 export { decimalToBaseUnits, parseU64String, U64_MAX } from './amounts';
 export { findToken, TOKENS, type TokenInfo } from './tokens';
+export {
+  CapabilityManifestSchema,
+  RULE_KINDS,
+  toDeclaration,
+  toOnChainRuleParams,
+  toSignerPolicy,
+  type AssetScopeRule,
+  type BudgetRule,
+  type CapabilityDeclaration,
+  type CapabilityDeclarationCap,
+  type CapabilityManifest,
+  type CapabilityRule,
+  type OnChainRuleConfigValue,
+  type OnChainRuleParams,
+  type PerTxRule,
+  type ProtocolScopeRule,
+  type RateLimitRule,
+  type RecipientAllowlistRule,
+  type RuleKind,
+  type SignerPolicy,
+  type SlippageFloorRule,
+  type TimeWindowRule,
+} from './capability-manifest';
 export type {
   ActionToolDefinition,
   ActionToolName,

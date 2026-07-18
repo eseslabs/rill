@@ -1,6 +1,13 @@
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
-import { SUI_COIN_TYPE, type AgentWalletBinding } from '../../core/agent-wallet';
+import {
+  toDeclaration,
+  toOnChainRuleParams,
+  toSignerPolicy,
+  type OnChainRuleConfigValue,
+  type OnChainRuleParams,
+} from '../../../../packages/rill-sdk/src/capability-manifest';
+import { normalizeAgentWallet, type AgentWalletBinding } from '../../core/agent-wallet';
 import { config } from '../../core/config';
 import { getProtocolRegistry, DEFAULT_SIMULATE_SENDER } from '../../core/protocols';
 import { introspectService } from '../../features/introspect/introspect.service';
@@ -17,6 +24,7 @@ import {
   HERO_ACTION_NAME,
 } from '../../features/mcp/tool-schema';
 import { buildSkillDoc } from '../../features/mcp/skill-doc';
+import { renderAgentInstructions } from '../../features/mcp/agent-instructions';
 import { handleMcpJsonRpc } from '../../features/mcp/mcp.service';
 import { prepareSetupPlan } from '../../features/setup/setup.service';
 import { walrusAuditService } from '../../features/walrus/audit.service';
@@ -28,6 +36,7 @@ import {
   PublishSchema,
   ExecuteSchema,
   SetupPrepareSchema,
+  CapabilityPreviewSchema,
 } from '../schemas/api.schema';
 
 export const apiRouter = new Hono();
@@ -88,23 +97,17 @@ function isAllowedMcpOrigin(origin: string): boolean {
   }
 }
 
-function normalizeAgentWallet(
-  agentWallet: Omit<AgentWalletBinding, 'coinType'> & { coinType?: string },
-): AgentWalletBinding {
-  return {
-    packageId: agentWallet.packageId,
-    walletId: agentWallet.walletId,
-    capId: agentWallet.capId,
-    coinType: agentWallet.coinType ?? SUI_COIN_TYPE,
-  };
-}
-
 /**
  * R13: an anonymous /compile or /simulate request binds the operator's configured `config.agentWallet`
  * ONLY when the caller explicitly opts in with `useServerWallet: true` — never by default. Silently
  * defaulting every wallet-less request to the operator's real wallet meant any anonymous caller could
  * get a PTB that spends from it without ever asking; the honest behavior (KTD-1) is the no-wallet
  * warning branch unless the caller asks for the server wallet by name.
+ *
+ * F7: `normalizeAgentWallet` (`core/agent-wallet.ts`) is the single place that resolves which of the
+ * two coexisting agent_wallet packages a binding actually uses — v2 `spend()` when the request's
+ * `agentWallet` carries no `capabilityManifest`, the redesigned request_spend/confirm_spend package
+ * when it does. This route no longer duplicates that resolution.
  */
 function resolveAgentWallet(body: {
   agentWallet?: Omit<AgentWalletBinding, 'coinType'> & { coinType?: string };
@@ -117,6 +120,58 @@ function resolveAgentWallet(body: {
 apiRouter.get('/protocols', (c) => {
   return c.json({ success: true, data: getProtocolRegistry(config.network) });
 });
+
+/** `toOnChainRuleParams` returns `bigint` for u64 config fields (the SDK's single money path,
+ *  never floating point) — `JSON.stringify`/`c.json` cannot serialize `bigint` directly, so this
+ *  converts each rule's config values to their decimal-string wire form (the same convention used
+ *  everywhere else a u64 amount crosses HTTP, e.g. `/compile`'s `budgetSpendMist`). Non-bigint
+ *  values (strings, numbers, arrays) pass through unchanged. */
+function serializeOnChainRuleParams(rules: OnChainRuleParams[]) {
+  const serializeValue = (value: OnChainRuleConfigValue): string | number | readonly string[] | readonly number[] =>
+    typeof value === 'bigint' ? value.toString() : value;
+
+  return rules.map((rule) => ({
+    module: rule.module,
+    config: Object.fromEntries(
+      Object.entries(rule.config).map(([key, value]) => [key, serializeValue(value)]),
+    ),
+  }));
+}
+
+/**
+ * Task 5 (U7, R11): "see exactly what you're granting" before publishing. Takes a
+ * `CapabilityManifest` and returns its three synchronized projections — the on-chain
+ * `add_rule`/`prove` params U5's compiler would assemble into a PTB, the signer's flat pre-flight
+ * policy shape, and the human/agent-readable declaration U3 renders into skill.md /
+ * agent-instructions. Validation runs entirely through the SDK's own `CapabilityManifestSchema`
+ * (via `CapabilityPreviewSchema`), so an empty-rules or unknown-kind manifest is rejected with a
+ * 422 carrying the SDK's own honest "no restrictions = unsafe" message (KTD-6) — never a
+ * fabricated 200.
+ *
+ * PURE projection, deliberately: the handler body below calls only the three SDK projection
+ * functions on the already-validated request body. It imports no chain client, no signer, no
+ * skills store — nothing here can sign a transaction, submit one, or touch the network. Read-only.
+ */
+apiRouter.post(
+  '/capabilities/preview',
+  zValidator('json', CapabilityPreviewSchema, (result, c) => {
+    if (!result.success) {
+      const message = result.error.issues.map((issue) => issue.message).join('; ');
+      return c.json({ success: false, error: message, type: 'ValidationError' }, 422);
+    }
+  }),
+  (c) => {
+    const { manifest } = c.req.valid('json');
+    return c.json({
+      success: true,
+      data: {
+        onChainRules: serializeOnChainRuleParams(toOnChainRuleParams(manifest)),
+        signerPolicy: toSignerPolicy(manifest),
+        declaration: toDeclaration(manifest),
+      },
+    });
+  },
+);
 
 apiRouter.post('/introspect', zValidator('json', IntrospectSchema), async (c) => {
   const { packageId } = c.req.valid('json');
@@ -232,6 +287,16 @@ apiRouter.get('/skills/:id/skill.md', (c) => {
   const skill = skillsStore.get(c.req.param('id'));
   if (!skill) return c.text('Skill not found', 404);
   return c.text(buildSkillDoc(skill), 200, { 'content-type': 'text/markdown; charset=utf-8' });
+});
+
+/** Ready-to-paste agent-instructions template (task 4 / R10) — the mcp-add commands, the correct
+ *  tool sequence, and the active guardrails declared honestly. `PublishedSkill` does not carry a
+ *  `CapabilityManifest` yet (owner-set manifest wiring is a later unit), so this renders the honest
+ *  no-wallet-budget branch until that lands. */
+apiRouter.get('/skills/:id/instructions.md', (c) => {
+  const skill = skillsStore.get(c.req.param('id'));
+  if (!skill) return c.text('Skill not found', 404);
+  return c.text(renderAgentInstructions(skill), 200, { 'content-type': 'text/markdown; charset=utf-8' });
 });
 
 apiRouter.get('/skills', (c) => {

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { isHeroActionFlow } from '../../features/mcp/tool-schema';
 import { findFlowStructureIssues } from '../../features/protocols/handles';
+import { CapabilityManifestSchema } from '../../../../packages/rill-sdk/src/capability-manifest';
 
 /**
  * A Sui address/object id: `0x` + 1-64 hex chars (U4, R13). Sui accepts both the short form (e.g.
@@ -44,11 +45,24 @@ export const FlowNodeSchema = z.object({
   inputs: z.record(z.string(), z.any()).optional(),
 });
 
+/**
+ * F7: optional `capabilityManifest` + `versionId` opt a request into the redesigned Rule + Hot
+ * Potato agent_wallet package instead of today's legacy `spend()` (see `core/agent-wallet.ts`'s
+ * `normalizeAgentWallet`, the single place that resolves which package/version a binding actually
+ * uses). `capabilityManifest` is validated via the SDK's `CapabilityManifestSchema` — the same
+ * single source of truth `/capabilities/preview` and the compiler's own defense-in-depth
+ * re-validation (`parseManifestOrThrow`) use — so a malformed manifest is rejected with a 422 here,
+ * before it ever reaches `normalizeAgentWallet` or the compiler. Both fields are optional and
+ * absent by default: a request that never mentions them keeps compiling through the live v2
+ * `agent_wallet::spend()` path exactly as it did before F7.
+ */
 export const AgentWalletSchema = z.object({
   packageId: suiAddress('agentWallet.packageId'),
   walletId: suiAddress('agentWallet.walletId'),
   capId: suiAddress('agentWallet.capId'),
   coinType: z.string().optional(),
+  capabilityManifest: CapabilityManifestSchema.optional(),
+  versionId: suiAddress('agentWallet.versionId').optional(),
 });
 
 /**
@@ -104,6 +118,18 @@ export const ExecuteSchema = z.object({
   params: z.record(z.string(), z.unknown()).default({}),
   sender: suiAddress('sender'),
   agentWallet: AgentWalletSchema,
+}).strict();
+
+/**
+ * U7/R11: wraps the SDK's `CapabilityManifestSchema` (already the single source of truth for
+ * manifest validity, incl. the KTD-6 "no restrictions = unsafe" empty-rules refinement and the
+ * duplicate-rule-kind check) in the request-body envelope `/capabilities/preview` expects. No
+ * additional field-level validation is layered on here — the manifest's addresses/u64 amounts are
+ * already validated by the SDK schema itself, so re-validating them here would just be a second,
+ * possibly-drifting implementation of the same checks.
+ */
+export const CapabilityPreviewSchema = z.object({
+  manifest: CapabilityManifestSchema,
 }).strict();
 
 export const SetupPrepareSchema = z.object({

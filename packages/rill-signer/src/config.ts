@@ -67,3 +67,20 @@ export function saveOnboardingConfig(config: Partial<OnboardingConfig>): Onboard
 export function isAutoOnboardingAllowed(env: Record<string, string | undefined> = process.env): boolean {
   return env.RILL_ALLOW_AUTO_ONBOARDING === 'true';
 }
+
+/**
+ * Rill supports two custody models: `bounded` (default) — a budget-capped, revocable on-chain
+ * AgentWallet — and `direct` (opt-in) — the agent's local keypair holds funds directly, which is
+ * strictly LESS safe (no on-chain budget cap, per-tx cap, expiry, or revoke).
+ */
+export type CustodyMode = 'bounded' | 'direct';
+
+/**
+ * Resolves the active custody mode. Fail-safe-to-the-safer-mode: only the exact string "direct"
+ * opts into direct-fund custody — any other value (unset, "DIRECT", "1", a typo) stays `bounded`.
+ * This mirrors the exact-string, launch-time env gating used by isAutoOnboardingAllowed /
+ * RILL_ALLOW_MAINNET: the safer default must never be bypassed by an almost-right value.
+ */
+export function loadCustodyMode(env: Record<string, string | undefined> = process.env): CustodyMode {
+  return env.RILL_CUSTODY_MODE === 'direct' ? 'direct' : 'bounded';
+}

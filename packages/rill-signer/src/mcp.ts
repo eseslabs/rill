@@ -11,7 +11,13 @@ import {
   type Signer,
   type SignerConfig,
 } from './core';
-import { isAutoOnboardingAllowed, loadOnboardingConfig, saveOnboardingConfig, type OnboardingConfig } from './config';
+import {
+  isAutoOnboardingAllowed,
+  loadCustodyMode,
+  loadOnboardingConfig,
+  saveOnboardingConfig,
+  type OnboardingConfig,
+} from './config';
 import { listRunSets, saveRunSet, type RunSet } from './runsets';
 import { inspectOnboarding, loadPolicy, readMoveU64, type LocalSignerPolicy, type OnboardingAllowlist } from './policy';
 
@@ -150,6 +156,29 @@ function listCapabilities(policy: LocalSignerPolicy) {
   };
 }
 
+/**
+ * Honest, mode-specific statements of what the signer actually enforces — `wallet_status` must never
+ * imply a guarantee that doesn't apply. Bounded custody enforces all four via the on-chain AgentWallet
+ * (budget cap, per-tx cap, expiry, revocability). Direct custody has none of them: the agent's local
+ * keypair holds funds directly, so a compromised key is a total loss with no on-chain backstop.
+ */
+const BOUNDED_GUARANTEES = {
+  budgetCap: true,
+  perTxCap: true,
+  expiry: true,
+  revocable: true,
+} as const;
+
+const DIRECT_GUARANTEES = {
+  budgetCap: false,
+  perTxCap: false,
+  expiry: false,
+  revocable: false,
+  note:
+    'Direct-fund mode: the agent key holds the funds directly. If it is compromised, all funds are at risk. ' +
+    'There is no on-chain budget cap or revoke.',
+} as const;
+
 async function readWalletStatus(signer: Signer, policy: LocalSignerPolicy) {
   const wallet = await signer.client.getObject({
     objectId: policy.walletId,
@@ -166,6 +195,8 @@ async function readWalletStatus(signer: Signer, policy: LocalSignerPolicy) {
   const revoked = fields.revoked === true;
   const active = !revoked && Date.now() < Number(expiresAtMs);
   return {
+    custodyMode: 'bounded' as const,
+    guarantees: BOUNDED_GUARANTEES,
     address: signer.address,
     network: signer.network,
     walletId: policy.walletId,
@@ -177,6 +208,21 @@ async function readWalletStatus(signer: Signer, policy: LocalSignerPolicy) {
     expiresAtMs,
     minimumRemainingMist: policy.minimumRemainingMist,
     strategyEligible: active && BigInt(remainingMist) >= BigInt(policy.minimumRemainingMist),
+  };
+}
+
+/**
+ * `wallet_status` in direct custody mode: there is no run-set policy and no on-chain AgentWallet to
+ * read (the agent's own keypair holds the funds), so this must not require a loaded policy and must
+ * not attempt to read a wallet object that doesn't exist. It reports the same honest, all-false
+ * guarantees every direct-mode caller sees, plus the signer's own address/balance (signer_status-style).
+ */
+async function readDirectWalletStatus(signer: Signer) {
+  const status = await readSignerStatus(signer);
+  return {
+    custodyMode: 'direct' as const,
+    guarantees: DIRECT_GUARANTEES,
+    ...status,
   };
 }
 
@@ -398,6 +444,8 @@ export function createWalletMcpHandler(runtime?: WalletMcpRuntime) {
       case 'wallet_status': {
         assertOnlyArguments(args, EMPTY_ARGUMENTS);
         const { signer, policy } = requireRuntime(runtime);
+        // Direct custody has no run-set policy and no on-chain AgentWallet — never require either.
+        if (loadCustodyMode() === 'direct') return readDirectWalletStatus(signer);
         return readWalletStatus(signer, requirePolicy({ ...requireRuntime(runtime), policy }));
       }
       case 'list_capabilities': {

@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rill — Codebase Map</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f8f9fa;
+    --fg: #1a1d21;
+    --muted: #5f6368;
+    --border: #dadce0;
+    --code-bg: #f1f3f4;
+    --link: #1a73e8;
+    --table-header-bg: #e8eaed;
+    --table-row-alt: #f8f9fa;
+    --accent: #188038;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117;
+      --fg: #c9d1d9;
+      --muted: #8b949e;
+      --border: #30363d;
+      --code-bg: #161b22;
+      --link: #58a6ff;
+      --table-header-bg: #161b22;
+      --table-row-alt: #0d1117;
+      --accent: #3fb950;
+    }
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.65;
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 2rem 1.25rem;
+    background: var(--bg);
+    color: var(--fg);
+  }
+  h1, h2, h3, h4 {
+    font-weight: 600;
+    line-height: 1.25;
+    margin-top: 2rem;
+    margin-bottom: 0.75rem;
+  }
+  h1 { font-size: 2rem; border-bottom: 2px solid var(--accent); padding-bottom: 0.25rem; }
+  h2 { font-size: 1.5rem; border-bottom: 1px solid var(--border); padding-bottom: 0.2rem; }
+  h3 { font-size: 1.2rem; color: var(--accent); }
+  h4 { font-size: 1.05rem; }
+  p, li { margin: 0.5rem 0; }
+  a { color: var(--link); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code {
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    background: var(--code-bg);
+    padding: 0.15rem 0.35rem;
+    border-radius: 4px;
+    font-size: 0.9em;
+  }
+  pre {
+    background: var(--code-bg);
+    padding: 1rem;
+    border-radius: 8px;
+    overflow-x: auto;
+    border: 1px solid var(--border);
+  }
+  pre code { background: transparent; padding: 0; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+    font-size: 0.95rem;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 0.6rem 0.75rem;
+    text-align: left;
+    vertical-align: top;
+  }
+  th { background: var(--table-header-bg); font-weight: 600; }
+  tr:nth-child(even) { background: var(--table-row-alt); }
+  ul, ol { padding-left: 1.5rem; }
+  blockquote {
+    border-left: 4px solid var(--accent);
+    margin: 1rem 0;
+    padding: 0.5rem 1rem;
+    background: var(--code-bg);
+    color: var(--muted);
+    font-style: italic;
+  }
+  hr { border: 0; border-top: 1px solid var(--border); margin: 2rem 0; }
+  .toc {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.5rem;
+    margin-bottom: 2rem;
+  }
+  .toc ul { margin: 0; padding-left: 1.25rem; }
+  .toc li { margin: 0.25rem 0; }
+  .back {
+    position: fixed;
+    top: 1rem;
+    right: 1rem;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.4rem 0.75rem;
+    font-size: 0.85rem;
+  }
+</style>
+</head>
+<body>
+<a class="back" href="CODEBASE_MAP.md">View source markdown</a>
+<nav class="toc">
+  <strong>Table of Contents</strong>
+  <ul>
+<li><a href="#0-orientation">0. Orientation</a></li><li><a href="#1-the-end-to-end-money-path-the-flow">1. The end-to-end money path (the flow)</a></li><li><a href="#2-backend-core-rill-backend-src-core">2. Backend — core (<code>rill-backend/src/core/</code>)</a></li><li><a href="#3-backend-compile-engine-rill-backend-src-features-compiler">3. Backend — compile engine (<code>rill-backend/src/features/compiler/</code>)</a></li><li><a href="#4-backend-protocol-adapters-rill-backend-src-features-protocols">4. Backend — protocol adapters (<code>rill-backend/src/features/protocols/</code>)</a></li><li><a href="#5-backend-mcp-skill-runner-setup-walrus-http">5. Backend — MCP, skill-runner, setup, walrus, HTTP</a></li><li><a href="#6-signer-sdk-the-security-model-packages">6. Signer + SDK — the security model (<code>packages/</code>)</a></li><li><a href="#7-move-contracts-move">7. Move contracts (<code>move/</code>)</a></li><li><a href="#8-frontend-rill-studio-rill-frontend-src">8. Frontend — Rill Studio (<code>rill-frontend/src/</code>)</a></li><li><a href="#9-honest-status-known-limitations">9. Honest status &amp; known limitations</a></li><li><a href="#10-quick-file-index">10. Quick file index</a></li>
+  </ul>
+</nav>
+<h1 id="rill-codebase-map">Rill — Codebase Map</h1>
+<blockquote><strong>Audience:</strong> engineers and AI agents working in this repo. Detailed feature → file → method → behavior → flow reference.</blockquote>
+<blockquote><strong>Generated:</strong> 2026-07-18 from a full four-part scan of the audit-hardened codebase.</blockquote>
+<blockquote><strong>Scope:</strong> <code>main</code>, <code>develop</code>, and the <code>feat/rill-demo-day-vertical-slice</code> worktree are <strong>content-identical</strong> — this map describes all three. Paths are relative to the repo root.</blockquote>
+<hr>
+<h2 id="0-orientation">0. Orientation</h2>
+<p><strong>Rill = the keyless transaction layer for AI agents on Sui.</strong> An owner grants a bounded, revocable on-chain wallet to an agent; the agent uses any MCP client to <em>build</em> transactions through Rill&#x27;s hosted backend (which never holds a key), then <em>signs locally</em> with the <code>rill-signer</code>, which independently re-validates everything before the key is ever used. Two on-chain Move contracts bound every action.</p>
+<p><strong>The one rule that explains the whole design:</strong> <em>Rill Cloud builds (keyless) · the local signer signs · Move gates on-chain.</em> No component trusts the one before it.</p>
+<h3 id="deployed-sui-testnet">Deployed (Sui testnet)</h3>
+<ul>
+<li><code>agent_wallet</code> package: <code>0xd9265581b6b930f5fd27d9ec98e67b48f876f5de7bd25155639d808e9da636da</code>
+<li><code>rill_guard</code> package: <code>0xadec99557cf7771bce94737fdd3ea0bcc989d81e0860f3e69af55433dae8c034</code>
+<li>Live API <code>https://api.rill.naisu.one</code> · Studio <code>https://rill.naisu.one</code>
+<li><strong>Caveat:</strong> the <code>agent_wallet</code> <em>source</em> in <code>move/</code> is <strong>v2</strong> (window quota, sender check, cap rotation — struct layout changed, a fresh package not an upgrade). The address hardcoded in <code>pitch.tsx</code> is the earlier deployment; <strong>verify whether v2 is redeployed before relying on window/rotation on-chain.</strong>
+</ul>
+<h3 id="monorepo-bun-workspace">Monorepo (Bun workspace)</h3>
+<table><thead><tr><th>Path</th><th>Role</th><th>Entry</th></tr></thead><tbody><tr><td> <code>rill-backend/</code> </td><td> Keyless Hono API — build/simulate/publish/MCP </td><td> <code>src/index.ts</code> → <code>src/http/routes/api.routes.ts</code> </td></tr><tr><td> <code>rill-frontend/</code> </td><td> Rill Studio (TanStack Router + React Flow) </td><td> <code>src/routes/builder.tsx</code> </td></tr><tr><td> <code>packages/rill-sdk/</code> </td><td> Shared types, envelope schema, money-path, HTTP client </td><td> <code>src/index.ts</code> </td></tr><tr><td> <code>packages/rill-signer/</code> </td><td> Local key-holding MCP signer (security-critical) </td><td> <code>src/mcp.ts</code> (bin <code>rill-signer-mcp</code>), <code>src/cli.ts</code> (bin <code>rill-sign</code>) </td></tr><tr><td> <code>move/agent_wallet/</code> </td><td> Capped/revocable budget contract (v2) </td><td> <code>sources/agent_wallet.move</code> </td></tr><tr><td> <code>move/rill_guard/</code> </td><td> On-chain slippage floor </td><td> <code>sources/guard.move</code> </td></tr></tbody></table>
+<h3 id="test-counts-all-green">Test counts (all green)</h3>
+<p>backend <strong>147</strong> · signer <strong>111</strong> · sdk <strong>59</strong> · frontend <strong>48</strong> (vitest) · Move <code>agent_wallet</code> <strong>25</strong>, <code>rill_guard</code> <strong>2</strong>.</p>
+<h3 id="audit-remediation-tags">Audit-remediation tags</h3>
+<p>The source is littered with <code>KTD-n</code> (Known Technical Debt) and <code>Rn</code> (audit remediation) markers. Key ones referenced below: <strong>KTD-2</strong> single money-path (no float touches an amount), <strong>KTD-3</strong> single settle-sweep owner, <strong>KTD-4</strong> envelope gains no field, <strong>R1</strong> a no-floor guardrail must never look enforced, <strong>R3</strong> Cetus-abort match is package-scoped not substring, <strong>R7</strong> no fake 1-mist slippage default, <strong>R8</strong> onboarding inspected unconditionally, <strong>R9/R10/R11</strong> signer effects-check / independent ceilings / byte-pinning.</p>
+<hr>
+<h2 id="1-the-end-to-end-money-path-the-flow">1. The end-to-end money path (the flow)</h2>
+<p>This is the DeepBook &quot;hero&quot; flow — the one fully-wired path. Every arrow is a real code boundary.</p>
+<pre><code>Owner (browser wallet)
+  └─ POST /api/setup/prepare ──► setup.service.prepareSetupPlan
+       → 2 unsigned PTBs (create_wallet+BalanceManager ; mint_trade_cap) + runSetTemplate
+  └─ local signer: create_run_set ──► inspectOnboarding (unconditional) → signs setup → harvests object ids
+       → rebuilds tradeCap PTB LOCALLY (never signs backend&#x27;s bytes) → saves run-set JSON
+
+Agent (Claude Code / any MCP client)
+  ├─ remote MCP rill-actions: list_actions → describe_action
+  ├─ remote MCP rill-actions: build_action(params)
+  │     └─ skill-runner.runFlow ──► compiler.compileFlow (FlowGraph → 1 unsigned PTB)
+  │          → serializeUnsignedPtb → simulator.simulateTransaction (devInspect)
+  │          → if !ok: RETURN a refusal (envelope-shaped-NOTHING, unsignable)   [R3/KTD-4]
+  │          → else: digestUnsignedPtb (SHA-256) → ExecutionEnvelope (TTL now+5min)
+  └─ local MCP rill-wallet: execute_rill_action(envelope)
+        └─ core.executeEnvelope ──► validateExecutionEnvelope (fail-closed, ~15 checks)
+             → byte-pin: re-serialize+digest #2 == actionDigest  [R11 TOCTOU]
+             → assertCapabilitiesActive (live on-chain liveness+ceilings)
+             → re-simulate exact tx (must succeed) → gas ceiling → SUI-outflow ≤ spend+gas  [R9]
+             → sign (Ed25519/Secp) → submit → verify status.success
+             → on-chain: agent_wallet::spend (gates budget/per-tx/window/expiry/revoke/sender/cap)
+                         → balance_manager::deposit → generate_proof_as_trader → pool::place_limit_order</code></pre>
+<p>Owner revokes → <code>agent_wallet::revoke</code> sets <code>revoked=true</code>, drains budget. Next agent attempt fails at the signer&#x27;s <code>assertCapabilitiesActive</code> (revoked read) <em>before</em> signing, and a devInspect of the revoked PTB returns abort code <code>2</code>.</p>
+<hr>
+<h2 id="2-backend-core-rill-backend-src-core">2. Backend — core (<code>rill-backend/src/core/</code>)</h2>
+<table><thead><tr><th>File</th><th>Responsibility</th><th>Key exports &amp; behavior</th></tr></thead><tbody><tr><td> <code>config.ts</code> </td><td> Central config + fail-fast boot + Sui clients </td><td> <code>config</code> object; <code>assertBootSafe()</code> <strong>throws at module load if <code>network===&#x27;mainnet&#x27; &amp;&amp; !guardPackageId</code></strong> (a guardrail-only flow would otherwise 500 on every compile). Builds <strong>two <code>SuiGrpcClient</code></strong> (not JSON-RPC): <code>suiClient</code> (active net), <code>mainnetSuiClient</code> (always mainnet, for mainnet-only reads). <code>BACKEND_ROOT</code> anchors paths to the package, not <code>cwd</code>. Testnet is the default; mainnet has <strong>no</strong> default guard package. </td></tr><tr><td> <code>protocols.ts</code> </td><td> Curated protocol addresses per network </td><td> <code>CETUS</code>, <code>HAEDAL</code> (<code>minStakeMist = 1e9</code>, abort 4 below), <code>SUI_CLOCK_ID=&#x27;0x6&#x27;</code>, <code>DEFAULT_SIMULATE_SENDER</code> (zero address = keyless devInspect sender). <code>getProtocolRegistry()</code> for <code>/protocols</code>. <strong>DeepBook has NO hardcoded addresses</strong> — pools/coins/packageIds come from <code>@mysten/deepbook-v3</code>. </td></tr><tr><td> <code>node-config.ts</code> </td><td> Validated config parsing + runtime-param merge + per-protocol resolvers </td><td> <code>resolveEffectiveFlow(flow, runtimeParams)</code> is the flow&#x27;s front door: precedence <strong>config &lt; inputs &lt; runtimeParams</strong>; rejects a runtime key not allowed for any node, or flat params with &gt;1 matching node. <code>RUNTIME_KEYS.cetus_swap = [&#x27;amount_in&#x27;,&#x27;min_amount_out&#x27;]</code>. <code>suiToMist()</code> is the single float→mist path (KTD-2). <strong><code>min_amount_out</code> uses <code>optionalString</code> — no server fallback</strong> (R7: a 1-mist floor is fake protection). </td></tr><tr><td> <code>agent-wallet.ts</code> </td><td> Optional env-loaded wallet binding </td><td> <code>loadAgentWalletFromEnv()</code> → <code>{packageId,walletId,capId,coinType}</code> or undefined. When set, PTBs fund via <code>agent_wallet::spend()</code> instead of <code>tx.gas</code>. <code>SUI_COIN_TYPE</code>. </td></tr><tr><td> <code>walrus-client.ts</code> </td><td> Walrus-extended gRPC client factory </td><td> <code>createWalrusClient()</code>. </td></tr><tr><td> <code>errors.ts</code> </td><td> Error hierarchy + Hono handler </td><td> <code>AppError</code>(400)/<code>ValidationError</code>(422)/<code>NotFoundError</code>(404). <code>errorHandler</code> returns <code>{success:false,error,type}</code> for <code>AppError</code>; <strong>any non-AppError → generic 500, never leaks message/stack.</strong> </td></tr></tbody></table>
+<hr>
+<h2 id="3-backend-compile-engine-rill-backend-src-features-compiler">3. Backend — compile engine (<code>rill-backend/src/features/compiler/</code>)</h2>
+<h3 id="compiler-service-ts-compileflow-flow-options-runtimeparams-compileresult"><code>compiler.service.ts</code> — <code>compileFlow(flow, options, runtimeParams): CompileResult</code></h3>
+<p>The FlowGraph → <strong>one unsigned PTB</strong> engine. Steps:</p>
+<ol>
+<li><code>findFlowStructureIssues</code> (unique ids, real edge endpoints, registered handles) → 422. Runs here too so MCP callers that bypass the HTTP schema still get it (R13).
+<li><code>resolveEffectiveFlow</code> (merge config/inputs/runtime).
+<li><code>topologicalSort</code> — DFS, <strong>throws <code>ValidationError</code> on a cycle</strong>.
+<li><code>computeRootSuiFunding</code> — sum each adapter&#x27;s <code>rootSuiFunding</code> (only when the node has no upstream coin edge).
+<li><strong>Funding chokepoint:</strong> if <code>agentWallet</code> bound &amp; root&gt;0 → one <code>agent_wallet::spend(wallet, cap, u64(rootTotal), Clock)</code> producing <code>budgetCoin</code> (SUI-only, else throws); else <code>fundSuiCoin</code> splits from <code>tx.gas</code>.
+<li><strong>Root-budget guardrail loop</strong> — guardrails with <em>zero</em> incoming edges assert on <code>budgetCoin</code> directly (paired with the adapter&#x27;s early-return = KTD-3 dedupe).
+<li><strong>Adapter loop</strong> in topo order — <code>getAdapter(node.type).build(ctx)</code>; unknown type → warn + skip. Consumers read <code>nodeOutputs[source]</code> and <strong>must <code>delete</code></strong> it.
+<li><code>settleCoin</code> sweep (the single cleanup owner, KTD-3): SUI → <code>mergeCoins(gas)</code>; other coin → <code>transferObjects(sender)</code>, or <strong>throws if no sender</strong> (never lose a coin). Returns <code>{transaction, resolvedFlow, warnings, agentWalletBound, budgetSpendMist}</code>.
+</ol>
+<h3 id="simulator-service-ts-simulatetransaction-tx-sender"><code>simulator.service.ts</code> — <code>simulateTransaction(tx, sender?)</code></h3>
+<p>Wraps gRPC <code>simulateTransaction</code> (devInspect-style; <strong>never signs</strong>). RPC throw is caught → returns a classified <code>{ok:false}</code>, never throws. <code>classifySimulation</code>: <strong>verification is a two-value enum <code>&#x27;verified&#x27;|&#x27;unverified&#x27;</code></strong> (there is no <code>&#x27;failed&#x27;</code>); failure is the boolean <code>ok</code>. Only case of <code>unverified</code>: <code>!ok &amp;&amp; isCetusDevInspectVersionAbort(error)</code>.</p>
+<h3 id="pool-resolver-ts"><code>pool-resolver.ts</code></h3>
+<p><code>resolvePoolTypeArgs(poolId)</code> reads on-chain <code>Pool&lt;A,B&gt;</code>. <code>pickSwapFunction</code> decides a2b/b2a (<code>a2b = inputCoinType===coinTypeA</code>). <strong><code>isCetusDevInspectVersionAbort</code></strong> (R3): true only if error contains <code>&#x27;checked_package_version&#x27;</code> <strong>AND</strong> one of the three curated Cetus package ids — not a bare substring, so lookalikes aren&#x27;t misclassified.</p>
+<h3 id="preview-service-ts-ptb-util-ts"><code>preview.service.ts</code> / <code>ptb.util.ts</code></h3>
+<p><code>buildPreview(flow, warnings)</code> → human text. <code>serializeUnsignedPtb(tx)</code> → base64 tx JSON (intents resolved). <code>inspectTransaction(tx)</code> → <code>{allowedTargets, objectIds}</code> read from the PTB&#x27;s own commands/inputs (feeds the envelope&#x27;s allowlist).</p>
+<hr>
+<h2 id="4-backend-protocol-adapters-rill-backend-src-features-protocols">4. Backend — protocol adapters (<code>rill-backend/src/features/protocols/</code>)</h2>
+<p>Contract (<code>types.ts</code>): each adapter has <code>rootSuiFunding(node,flow)</code> and <code>build(ctx)</code>. Adapters <strong>only record</strong> produced coins (into <code>nodeOutputs</code>/<code>extraCoins</code>); they never merge/transfer — the compiler&#x27;s sweep owns that.</p>
+<table><thead><tr><th>Adapter</th><th>nodeType</th><th>Behavior</th></tr></thead><tbody><tr><td> <code>cetus.adapter.ts</code> </td><td> <code>cetus_swap</code> </td><td> Builds <code>router::swap</code> directly (zero-coin pattern: exactly one <code>0x2::coin::zero</code> for the unfunded side; an extra aborts execute with <code>UnusedValueWithoutDrop</code> which devInspect misses). Sources coin from upstream edge / sender (<code>sourceCoinFromSender</code>, paginates <code>listCoins</code>, <strong>MAX 10 pages</strong>) / <code>fundSuiCoin</code>. <strong>R7 slippage:</strong> if <code>!min_amount_out &amp;&amp; !feedsGuardrail</code> → <strong>throws</strong>. Injects <code>assert_min_value</code> on output unless a downstream guardrail asserts it. Records output; pushes ≈0 leftover to <code>extraCoins</code>. </td></tr><tr><td> <code>haedal.adapter.ts</code> </td><td> <code>haedal_stake</code> </td><td> <code>request_stake</code> (SUI→haSUI). <strong>Throws if <code>amount &lt; minStakeMist</code> (1 SUI, abort 4).</strong> Consumes one SUI coin, produces no chainable output. </td></tr><tr><td> <code>deepbook.adapter.ts</code> </td><td> <code>deepbook_limit_order</code> </td><td> <strong>Hero path, all preconditions fail-closed:</strong> requires <code>agentWallet</code> (SUI-only), pre-provisioned <code>balanceManagerId</code>, delegated <code>tradeCapId</code>, <code>poolKey</code>/<code>price</code>/<code>quantity</code>, <code>spendAmountMist&gt;0</code>. <code>balance_manager::deposit</code> of the spend-funded coin, then <code>DeepBookClient.placeLimitOrder(...)(tx)</code> appends <code>generate_proof_as_trader</code> + <code>pool::place_limit_order</code>. <strong>The one place a protocol SDK builds (not signs) commands.</strong> </td></tr><tr><td> <code>guard.ts</code> </td><td> (injection helper) </td><td> <code>injectMinOutAssert(tx, coin, coinType, minOut)</code> — no-op when <code>minOut&lt;=0</code>; <strong>throws if <code>minOut&gt;0</code> and <code>guardPackageId</code> unset</strong> (&quot;refusing an unguarded PTB&quot;). <code>resolveGuardrailMinValue</code> warns when <code>&lt;=0</code> (R1). </td></tr><tr><td> <code>guardrail.adapter.ts</code> </td><td> <code>guardrail</code> </td><td> Pass-through sink. <strong>Zero incoming edges → early return</strong> (compiler owns it). Else collects incoming coins (must share coin type, else throws), asserts <code>min_value</code> per coin <strong>only when <code>minValue&gt;0</code></strong> (else merges + warns &quot;no protection enforced&quot;), merges into one output. </td></tr><tr><td> <code>ptb.adapter.ts</code> </td><td> <code>ptb</code> </td><td> <strong>Enforces nothing</strong> — only warns if &gt;1 PTB node exists. Inert boundary marker. </td></tr><tr><td> <code>registry.ts</code> / <code>handles.ts</code> </td><td> </td><td> <code>getAdapter(nodeType)</code>; <code>NODE_HANDLES</code> per-type valid edge handles; <code>findFlowStructureIssues</code> the shared structural gate. </td></tr></tbody></table>
+<hr>
+<h2 id="5-backend-mcp-skill-runner-setup-walrus-http">5. Backend — MCP, skill-runner, setup, walrus, HTTP</h2>
+<h3 id="mcp-src-features-mcp">MCP (<code>src/features/mcp/</code>)</h3>
+<ul>
+<li><strong><code>mcp.service.ts</code></strong> — MCP Streamable-HTTP JSON-RPC. Server name <code>rill-actions</code>. Tools: <code>list_actions</code>, <code>describe_action</code>, <code>build_action</code>. <strong>Keyless guard <code>assertKeylessToolArguments</code></strong> recursively rejects any arg whose normalized key is <code>execute</code>/<code>force</code> (→ &quot;sign locally&quot;) or <code>privatekey</code>/<code>secretkey</code>/<code>mnemonic</code>/<code>keypair</code> (→ &quot;public object IDs only&quot;); runs on <strong>every</strong> <code>tools/call</code>. A <code>build_action</code> result with <code>refused===true</code> is surfaced as an MCP <strong>error</strong> (<code>isError</code>) so it can&#x27;t be mistaken for signable content.
+<li><strong><code>skill-runner.service.ts</code></strong> — <code>runFlow(flow, params, options)</code>: hero-gate (exactly 1 DeepBook node) → compile → serialize → simulate → <strong>if <code>!ok</code> return an <code>ActionBuildRefusal</code> (no <code>unsignedPtb</code>/<code>actionDigest</code>/<code>version</code> — deliberately unsignable, R3/KTD-4)</strong> → <code>digestUnsignedPtb</code> (SHA-256, a hash not a signature) → <code>ExecutionEnvelope</code> (<code>expiresAt = now+5min</code>). <strong>Never signs.</strong>
+<li><strong><code>skills.store.ts</code></strong> — file-backed JSON store; atomic write (<code>.tmp</code>+rename); load-time filter drops non-hero flows and re-canonicalizes name/description/toolDefs.
+<li><strong><code>tool-schema.ts</code></strong> — <code>isHeroActionFlow</code> predicate (exactly 1 <code>deepbook_limit_order</code>; other nodes only <code>ptb</code>/<code>guardrail</code>); MCP input schemas.
+<li><strong><code>skill-doc.ts</code></strong> — generates <code>skill.md</code> (the agent runbook): remote <code>rill-actions</code> + local <code>rill-wallet</code> setup, tool order, and the security rule &quot;never request hosted execution, never pass raw PTB bytes to a generic signer.&quot; <strong>No <code>sui-signer.ts</code> exists</strong> — signing lives only in <code>packages/rill-signer</code>.
+</ul>
+<h3 id="setup-src-features-setup-setup-service-ts">Setup (<code>src/features/setup/setup.service.ts</code>)</h3>
+<p><code>prepareSetupPlan(...)</code> builds two unsigned PTBs: (1) <code>create_wallet&lt;SUI&gt;(funds, agent, perTx, expiry, allowed_packages=[deepbookPkg])</code> + <code>balance_manager::new</code> + <code>public_share_object</code>; (2) <code>mint_trade_cap</code> (<strong>placeholder BalanceManager id</strong> — the signer fills the real one) + transfer to agent. Computes a deliberately-far, unlikely-to-fill onboarding order from live <code>midPrice</code>. Caps: throws if <code>spendAmountMist&gt;perTxMist</code> or <code>budgetMist &lt; perTxMist + minimumRemainingMist</code>.</p>
+<h3 id="walrus-src-features-walrus-audit-service-ts">Walrus (<code>src/features/walrus/audit.service.ts</code>)</h3>
+<p><code>readAuditTrail(blobId)</code> — reads a blob, <strong>caps 256 KB</strong>, <code>JSON.parse</code>, then <strong><code>AuditRecordSchema.safeParse</code></strong> (never trusts <code>as AuditRecord</code>). Uploads are disabled (<code>walrusEnabled</code> default false).</p>
+<h3 id="http-src-http-src-index-ts">HTTP (<code>src/http/</code> + <code>src/index.ts</code>)</h3>
+<p>CORS wildcard/no-credentials, 512 KB body limit (413), <code>errorHandler</code> on all routes.</p>
+<p><strong>REST endpoints (all under <code>/api</code>):</strong></p>
+<table><thead><tr><th>Method</th><th>Path</th><th>Purpose</th></tr></thead><tbody><tr><td> GET </td><td> <code>/protocols</code> </td><td> Network protocol registry </td></tr><tr><td> POST </td><td> <code>/introspect</code> </td><td> <strong>Always 501</strong> — gRPC client can&#x27;t read Move bytecode/ABI (honest, R15) </td></tr><tr><td> POST </td><td> <code>/resolve</code> </td><td> Semantic manifest — curated Cetus/Haedal only </td></tr><tr><td> POST </td><td> <code>/compile</code> </td><td> Flow → unsigned PTB + preview </td></tr><tr><td> POST </td><td> <code>/simulate</code> </td><td> Compile + devInspect </td></tr><tr><td> POST </td><td> <code>/publish</code> </td><td> Publish a hero flow as an MCP skill </td></tr><tr><td> GET </td><td> <code>/skills</code>, <code>/skills/:id/skill.md</code> </td><td> List / agent runbook </td></tr><tr><td> POST </td><td> <code>/execute</code> </td><td> Build a strictly-simulated ExecutionEnvelope (refusal → <strong>422</strong>) </td></tr><tr><td> POST </td><td> <code>/setup/prepare</code> </td><td> Onboarding PTBs + run-set template </td></tr><tr><td> GET </td><td> <code>/audit/:blobId</code> </td><td> Read Walrus audit record (errors → <strong>generic sanitized 404</strong>) </td></tr><tr><td> GET·POST </td><td> <code>/mcp/:skillId</code> </td><td> MCP JSON-RPC (GET→302 to skill.md; origin-gated) </td></tr></tbody></table>
+<p>Guards: <code>MAX_FLOW_NODES=20</code> (422), <code>MAX_STORED_SKILLS=500</code> (507, never evicts), <code>resolveAgentWallet</code> binds the server wallet <strong>only when <code>useServerWallet===true</code></strong> (R13), <code>isAllowedMcpOrigin</code> exact-hostname match (R14). <code>api.schema.ts</code> Zod schemas are all <code>.strict()</code>; <code>openapi.ts</code> documents the honest behavior (501 introspect, 422 refusal, sanitized 404).</p>
+<hr>
+<h2 id="6-signer-sdk-the-security-model-packages">6. Signer + SDK — the security model (<code>packages/</code>)</h2>
+<p><strong>Trust boundary: the backend builds unsigned PTBs and holds no key; the signer holds the key and trusts no backend bytes without independent structural inspection.</strong></p>
+<h3 id="sdk-packages-rill-sdk-src">SDK (<code>packages/rill-sdk/src/</code>)</h3>
+<ul>
+<li><strong><code>envelope.schema.ts</code></strong> — the single Zod <code>ExecutionEnvelopeSchema</code>, <strong><code>.strict()</code> at every nesting level</strong> (KTD-4: no field can be smuggled in; an added field fails closed). <code>verification</code> enum = <code>[&#x27;verified&#x27;,&#x27;unverified&#x27;]</code> only. Semantic checks (digest/TTL) are deliberately NOT here — they&#x27;re the signer&#x27;s job.
+<li><strong><code>execution-envelope.ts</code></strong> — <code>assertExecutionEnvelope(value)</code>; <code>digestUnsignedPtb(b64)</code> = SHA-256 over the <strong>UTF-8 bytes of the base64 string</strong> (both sides derive it identically; catches byte drift).
+<li><strong><code>amounts.ts</code></strong> — the single money path (KTD-2): <code>decimalToBaseUnits</code>/<code>parseU64String</code>, pure string/bigint, reject scientific notation / excess precision / &gt;<code>U64_MAX</code>. <strong>No IEEE-754 ever touches a token amount.</strong>
+<li><strong><code>tokens.ts</code></strong> — coin-decimals registry (SUI 9, USDC 6, WAL 9) keyed by full Move type.
+<li><strong><code>client.ts</code></strong> — <code>RillClient</code> HTTP + MCP JSON-RPC client. <strong><code>errors.ts</code></strong> — <code>RillApiError</code>.
+</ul>
+<h3 id="signer-packages-rill-signer-src-security-critical-all-checks-fail-closed">Signer (<code>packages/rill-signer/src/</code>) — SECURITY-CRITICAL, all checks fail-closed</h3>
+<ul>
+<li><strong><code>core.ts</code></strong> — key handling + <code>executeEnvelope</code> orchestration. Key hygiene (R10): raw <code>secretKey</code> <strong>deleted</strong> from config after derivation; keypair kept only in a <code>WeakMap</code>; multi-scheme (<code>keypairFromSuiPrivateKey</code>). <code>executeEnvelope</code> order: validate → <strong>byte-pin (R11:</strong> re-serialize+digest #2 before any simulate/sign, defeating TOCTOU) → <code>assertCapabilitiesActive</code> → re-simulate exact tx (must succeed) → gas ≤ ceiling → <strong>sender SUI outflow ≤ spend+gas (R9)</strong> → sign → submit → verify success. <strong>Mainnet guard:</strong> refuses unless <code>RILL_ALLOW_MAINNET=true</code>.
+<li><strong><code>policy.ts</code></strong> — the fail-closed engine:
+<ul>
+<li><code>validateExecutionEnvelope</code>: TTL not-expired <strong>and ≤ now+5min</strong>; network/sender/actionId/identity-ids all pinned; <strong>simulation gate — accepts ONLY <code>ok &amp;&amp; verification===&#x27;verified&#x27;</code>; <code>unverified</code> is ALWAYS rejected (there is no <code>allowUnverifiedSimulation</code>)</strong>; declared-gas ≤ ceiling; digest #1; exact target <em>sequence</em> + off-scope rejection; exact object set; <strong>two independent spend ceilings</strong> (<code>maxAmountMist</code> and <code>demoParams.depositSui</code>, from unrelated sources so neither relaxes the other).
+<li><code>inspect</code> — the hardcoded DeepBook manifest: exact <code>spend</code>→<code>deposit</code>→<code>generate_proof</code>→<code>place_limit_order</code> sequence, wallet-funded deposit (split == spend), TradeCap-proof-authorized order, single-split + single terminal merge-to-gas. Any other command shape → throw.
+<li><code>assertCapabilitiesActive</code> — <strong>live on-chain reads:</strong> wallet must be shared &amp; not revoked &amp; agent-bound; live <code>expires_at_ms</code>/<code>per_tx_max</code>/<code>budget</code>/<code>minimumRemaining</code> enforced from the wallet&#x27;s own state; each cap held by the signer and correctly bound.
+<li><code>inspectOnboarding</code> — a <strong>second, independent</strong> inspector (shares zero code) for onboarding PTBs; unknown command kind → throw; split total ≤ budget ceiling.
+</ul>
+<li><strong><code>config.ts</code></strong> — <code>isAutoOnboardingAllowed()</code> (launch-env only, exact <code>&#x27;true&#x27;</code>); <code>autoCreateRunSets</code> deliberately <strong>removed</strong> from the persisted shape and un-settable at runtime.
+<li><strong><code>runsets.ts</code></strong> — run-set persistence (<code>.rill/runsets/</code>, sanitized filenames). <strong><code>mcp.ts</code></strong> — the local <code>rill-wallet</code> MCP server; tools: <code>wallet_status</code>, <code>list_capabilities</code>, <code>execute_rill_action</code>, <code>explain_rejection</code>, <code>signer_status</code>, <code>get/set_onboarding_config</code>, <code>request_faucet</code>, <code>list_run_sets</code>, <code>create_run_set</code>. <code>create_run_set</code> inspects backend onboarding bytes <strong>unconditionally (R8)</strong>, and <strong>rebuilds the tradeCap PTB locally</strong> rather than signing backend bytes. <strong><code>cli.ts</code></strong> — <code>rill-sign</code> (<code>--unsafe-ptb</code> dev-only).
+</ul>
+<p><strong>The enforcement chain (each throws on first violation):</strong> schema strictness → envelope validation (verified-only sim, dual ceilings, target sequence) → structural PTB inspection → byte-pinning → live liveness → re-simulation + effects check → mainnet guard → onboarding boundary → key hygiene.</p>
+<hr>
+<h2 id="7-move-contracts-move">7. Move contracts (<code>move/</code>)</h2>
+<h3 id="agent-wallet-agent-wallet-v2"><code>agent_wallet::agent_wallet</code> (v2)</h3>
+<p>Generic <code>AgentWallet&lt;T&gt;</code> shared object. <strong>v2 adds:</strong> <code>cap_id</code> (active cap; rotation invalidation), <code>window_ms</code>/<code>window_max</code>/<code>window_start_ms</code>/<code>spent_in_window</code> (rolling quota), and setters.</p>
+<p><strong>Abort codes:</strong> 1 NOT_OWNER · 2 REVOKED · 3 EXPIRED · 4 OVER_PER_TX · 5 OVER_BUDGET · 6 BAD_CAP · 7 ZERO_AMOUNT · <strong>8 OVER_WINDOW</strong> · <strong>9 NOT_AGENT</strong> · <strong>10 EXPIRY_NOT_FORWARD</strong>.</p>
+<p><strong><code>spend&lt;T&gt;(wallet, cap, amount, clock, ctx)</code> assert order:</strong> cap.wallet matches → <code>cap_id</code> matches (rotation) → <strong><code>sender==agent</code></strong> (NOT_AGENT) → not revoked → not expired → amount&gt;0 → ≤per_tx_max → ≤budget → <strong>window check</strong> → take coin.</p>
+<p><strong>Window logic:</strong> disabled entirely if <code>window_ms==0</code> OR <code>window_max==0</code>; else lazily rolls (<code>now &gt;= start+window_ms</code> resets <code>spent_in_window</code>), then <code>assert spent_in_window+amount &lt;= window_max</code>.</p>
+<p><strong>Functions:</strong> <code>create_wallet</code>, <code>spend</code>, <code>top_up</code> (owner), <code>revoke</code> (owner, drains), <strong><code>rotate_agent</code></strong> (owner; new cap, old cap fails BAD_CAP), <strong><code>set_per_tx_max</code>/<code>extend_expiry</code></strong> (forward-only, EXPIRY_NOT_FORWARD; can re-enable an expired wallet)<strong>/<code>set_window</code></strong> (owner). Events include <code>AgentRotated</code>, <code>ConfigChanged</code>.</p>
+<p><strong>Two critical semantics:</strong></p>
+<ul>
+<li><strong><code>expires_at_ms == 0</code> means PERMANENTLY EXPIRED, not &quot;no expiry&quot;</strong> — the assert <code>now_ms &lt; expires_at_ms</code> always fails at 0. (Opposite of the window sentinel where 0 = disabled.) Never pass 0.
+<li><strong><code>allowed_packages</code> is recorded on-chain but NOT enforced in <code>spend</code></strong> — protocol scope is enforced at the build/policy layer (Move can&#x27;t intercept a released coin). <code>is_allowed</code> view: empty = allow-all.
+</ul>
+<p>Tests: <strong>25</strong> (happy path, every abort code, window rollover, sender check, cap rotation, all setters).</p>
+<h3 id="rill-guard-guard"><code>rill_guard::guard</code></h3>
+<p><code>assert_min_value&lt;T&gt;(coin: &amp;Coin&lt;T&gt;, min: u64)</code> — aborts <code>E_SLIPPAGE=1</code> if <code>coin.value() &lt; min</code>; immutable borrow so the coin stays usable downstream. Injected by the compiler after every swap output. Tests: <strong>2</strong>.</p>
+<hr>
+<h2 id="8-frontend-rill-studio-rill-frontend-src">8. Frontend — Rill Studio (<code>rill-frontend/src/</code>)</h2>
+<p>Stack: TanStack Router, React Flow, Framer Motion + GSAP, Radix, Tailwind. Six vitest suites (money/flow/persistence logic).</p>
+<h3 id="routes">Routes</h3>
+<ul>
+<li><strong><code>routes/builder.tsx</code></strong> — the Studio. Palette <strong>filtered to backend-supported actions only</strong> (Cetus swap / Haedal stake / DeepBook limit, Cetus first). Reads network from <code>/health</code> (<code>Live on {network}</code>). Draft restore/autosave (R16, 800ms debounce, <code>beforeunload</code> guard). <code>computePublishGate</code> disables &quot;Compile &amp; export&quot; with a reason. <code>applyWireCorrections</code> runs before Simulate/Export so the visible canvas matches compiled output. <code>DEFAULT_GUARDRAILS</code> are <strong>cosmetic checklist labels</strong> — the enforced field is a node&#x27;s <code>minValue</code>/<code>coinType</code>.
+<li><code>index.tsx</code> (landing), <code>pitch.tsx</code> (8-slide deck, hardcodes deployed ids), <code>protocols.tsx</code> (all 9, marketing), <code>docs.tsx</code>.
+</ul>
+<h3 id="lib">lib/</h3>
+<ul>
+<li><strong><code>flow-mapper.ts</code></strong> — canvas → backend <code>FlowGraph</code>. <code>buildFlowGraph</code> maps <code>cetus</code>→<code>cetus_swap</code>, <code>haedal</code>→<code>haedal_stake</code>, <code>deepbook</code>→<code>deepbook_limit_order</code>, plus <code>ptb</code>/<code>guardrail</code>; returns <strong><code>skipped</code>/<code>skippedEdges</code> with reasons</strong> (R17). <code>isBackendSupported</code> = the &quot;compiles today&quot; predicate. <code>applyWireConstraints</code> forces Cetus→Haedal edges to output SUI and caps stake to swap output. <strong>Edges touching trigger/output/ptb are dropped</strong> (canvas-only sequencing; PTB is &quot;not a real boundary yet&quot;).
+<li><strong><code>wire-inference.ts</code></strong> — draw-time <code>isValidWireConnection</code> (rejects self-loop, backwards guardrail, cycles, second coin-input into an action); <code>inferWireKind</code> (coin only for swap→stake).
+<li><strong><code>action-config.ts</code></strong> — <code>TESTNET_MANIFEST</code>, token registry, <strong>per-token decimals</strong> (<code>parseActionAmount</code> via <code>findToken(coinType).decimals</code>, KTD-2 — fixes USDC 6-dec). Note: swap <code>min_amount_out</code> is hardcoded <code>&quot;1&quot;</code> in the FE flow config (see §9). <code>toMist</code> is UI-only.
+<li><strong><code>protocols.ts</code></strong> — catalog of <strong>9</strong> protocols; <strong><code>BACKEND_PROTOCOL_IDS = {cetus, haedal, deepbook}</code></strong> are the only three that compile.
+<li><strong><code>rill-api.ts</code></strong> — typed client, <code>API_BASE</code> from <code>VITE_RILL_API_URL</code>, <strong>20s hard timeout</strong> on every request (R18).
+<li><strong>Audit-hardening pieces:</strong> <code>publish-gate.ts</code> (single truth for simulate-vs-publish eligibility; <strong>only a single DeepBook order can publish</strong> today — Cetus/Haedal only simulate), <code>draft-storage.ts</code> (localStorage, schema-versioned, corrupt→null), <code>graph-hash.ts</code> (FNV-1a idempotent-publish hash), <code>use-flow-request.ts</code> (abortable fetch hook, distinguishes AbortError from TimeoutError).
+</ul>
+<h3 id="components-flow">components/flow/</h3>
+<p><code>nodes.tsx</code> (5 node renderers + per-type config forms with live amount validation), <code>simulate-dialog.tsx</code> (<strong>guardrail toggles are read-only/presentational post-audit</strong> — &quot;what actually runs, not a toggle&quot;; gates synchronously before any network call), <code>export-dialog.tsx</code> (explicit publish only on click; idempotent via graph hash; stale-record banner), <code>discover-dialog.tsx</code> (real ABI introspect, no mock data), <code>flow-warnings.tsx</code> (dropped nodes/edges + reasons), plus <code>deletable-edge</code>, <code>aligned-handle</code>, <code>token-select</code>, <code>protocol-logo</code>, <code>dialog-shell</code>.</p>
+<hr>
+<h2 id="9-honest-status-known-limitations">9. Honest status &amp; known limitations</h2>
+<ul>
+<li><strong>Only DeepBook limit order is fully live</strong> (proven on testnet). Cetus swap and Haedal stake <strong>compile and simulate</strong> but publish is gated to a single DeepBook order. Cetus <strong>cannot be strictly simulated on testnet</strong> (<code>checked_package_version</code> devInspect abort → <code>unverified</code> → the signer refuses to sign it).
+<li><strong><code>/introspect</code> returns 501</strong> by design (gRPC has no bytecode/ABI). Semantics come from curated <code>/resolve</code> manifests (Cetus/Haedal only).
+<li><strong>The agent supplies <code>min_amount_out</code></strong> (it&#x27;s a runtime key); the Cetus adapter requires it <em>unless</em> a downstream guardrail asserts a floor. There is <strong>no live-quote derivation</strong> and <strong>no <code>allowUnverifiedSimulation</code> opt-in</strong> on this codebase — both were deferred work on a superseded branch.
+<li><strong>FE <code>action-config.ts</code> hardcodes swap <code>min_amount_out: &quot;1&quot;</code></strong> while the backend adapter would reject a missing floor — a FE flow always carries a floor, but it&#x27;s a fixed <code>&quot;1&quot;</code>, not a real slippage bound. (This is the gap the deferred pool-state quote feature addressed.)
+<li><strong><code>expires_at_ms == 0</code> bricks a wallet</strong> (permanently expired). <strong><code>allowed_packages</code> is not Move-enforced.</strong> <code>AgentCap has store</code> (transferable) — rotation, not non-transferability, is the revocation mechanism.
+<li><strong>Skills persist to a local JSON file</strong> — no DB/auth/multi-tenant. Walrus upload disabled.
+<li><strong><code>agent_wallet</code> source is v2</strong> but the deployed testnet address may be v1 — verify before relying on window/rotation on-chain.
+</ul>
+<hr>
+<h2 id="10-quick-file-index">10. Quick file index</h2>
+<ul>
+<li>Compile chokepoint: <code>rill-backend/src/features/compiler/compiler.service.ts</code>
+<li>Simulation classification: <code>rill-backend/src/features/compiler/simulator.service.ts</code>
+<li>Envelope build (keyless): <code>rill-backend/src/features/mcp/skill-runner.service.ts</code>
+<li>Remote MCP + keyless guard: <code>rill-backend/src/features/mcp/mcp.service.ts</code>
+<li>REST routes: <code>rill-backend/src/http/routes/api.routes.ts</code>
+<li>Onboarding: <code>rill-backend/src/features/setup/setup.service.ts</code>
+<li>Money path (amounts): <code>packages/rill-sdk/src/amounts.ts</code>
+<li>Envelope schema: <code>packages/rill-sdk/src/envelope.schema.ts</code>
+<li>Signer policy engine: <code>packages/rill-signer/src/policy.ts</code>
+<li>Signer orchestration: <code>packages/rill-signer/src/core.ts</code>
+<li>Local signer MCP: <code>packages/rill-signer/src/mcp.ts</code>
+<li>Move: <code>move/agent_wallet/sources/agent_wallet.move</code>, <code>move/rill_guard/sources/guard.move</code>
+<li>Studio: <code>rill-frontend/src/routes/builder.tsx</code>, <code>rill-frontend/src/lib/flow-mapper.ts</code>, <code>rill-frontend/src/lib/publish-gate.ts</code>
+</ul>
+</body>
+</html>

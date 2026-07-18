@@ -13,6 +13,7 @@ import {
   validateExecutionEnvelope,
   type LocalSignerPolicy,
 } from './policy';
+import { loadOrCreateKeypair, keystorePath } from './keystore';
 
 /**
  * @rill/signer core — the agent's "hand + signature".
@@ -40,6 +41,13 @@ export interface SignerConfig {
    * check and executeEnvelope's spend+gas outflow bound (R9).
    */
   maxGasBudgetMist: bigint;
+  /**
+   * Base dir for the local keystore fallback used when `secretKey` is absent (see createSigner).
+   * Passed straight through to keystore.ts's `loadOrCreateKeypair`/`keystorePath`, which default it to
+   * `RILL_CONFIG_DIR ?? process.cwd()` when this is left unset. Not populated by loadConfigFromEnv —
+   * mainly here so callers (and tests) can point the keystore at an isolated directory.
+   */
+  keystoreBaseDir?: string;
 }
 
 export interface Signer {
@@ -97,13 +105,34 @@ function keypairFromSuiPrivateKey(secretKey: string): SignerKeypair {
   }
 }
 
+/**
+ * Resolves the signing keypair for `createSigner`: an explicit `cfg.secretKey` (operator-pinned env
+ * key) always wins; otherwise falls back to the local keystore (`.rill/keys/agent-<network>.key`),
+ * which generates a keypair on first use and reuses it thereafter — this is how the agent "creates a
+ * wallet locally if it doesn't have one." When a new key is generated, a one-line notice is logged to
+ * stderr (never stdout, never the secret) so the operator knows to fund the address.
+ */
+function resolveSignerKeypair(cfg: SignerConfig): SignerKeypair {
+  if (cfg.secretKey) return keypairFromSuiPrivateKey(cfg.secretKey);
+  const { keypair, created } = loadOrCreateKeypair(cfg.network, cfg.keystoreBaseDir);
+  if (created) {
+    const address = keypair.getPublicKey().toSuiAddress();
+    const path = keystorePath(cfg.network, cfg.keystoreBaseDir);
+    console.error(
+      `rill-signer: no signer key configured — generated a new local ${cfg.network} keypair at ${path}. `
+        + `Fund ${address} before signing anything.`,
+    );
+  }
+  return keypair;
+}
+
 export function createSigner(cfg: SignerConfig): Signer {
   const client = new SuiGrpcClient({
     baseUrl: cfg.rpcUrl ?? 'https://fullnode.testnet.sui.io:443',
     network: cfg.network,
   });
-  const keypair = cfg.secretKey ? keypairFromSuiPrivateKey(cfg.secretKey) : undefined;
-  const address = keypair?.getPublicKey().toSuiAddress();
+  const keypair = resolveSignerKeypair(cfg);
+  const address = keypair.getPublicKey().toSuiAddress();
   // Stash for execution without re-deriving. Only the derived keypair is retained: the raw
   // suiprivkey1… string is cleared from the config object below so nothing downstream (logging, an
   // error dump, a future code path reading `cfg`) can read it back out (R10).
