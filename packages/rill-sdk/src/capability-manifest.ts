@@ -124,14 +124,16 @@ const RecipientAllowlistRuleSchema = z.object({
     .min(1, 'rules[recipient_allowlist].addresses must not be empty (empty allowlist means no recipient is reachable — declare at least one, or omit the rule).'),
 }).strict();
 
+// Mirrors the on-chain rule (agent_wallet::time_window): both bounds are required, there is no
+// hour-of-day concept, and notBeforeMs must be strictly less than notAfterMs (a zero-width or
+// inverted window can never be satisfied). The strict-ordering check lives in the manifest-level
+// refine below, because a discriminated-union member must stay a plain ZodObject.
 const TimeWindowRuleSchema = z.object({
   kind: z.literal('time_window'),
-  /** Unix ms before which spends are rejected. Omit for no lower bound. */
-  notBeforeMs: u64String('rules[time_window].notBeforeMs').optional(),
-  /** Unix ms after which spends are rejected. Omit for no upper bound. */
-  notAfterMs: u64String('rules[time_window].notAfterMs').optional(),
-  /** UTC hours-of-day (0-23) during which spends are permitted. Omit for no hour restriction. */
-  allowedHoursUtc: z.array(z.number().int().min(0).max(23)).optional(),
+  /** Unix ms at/after which spends are allowed (inclusive lower bound). */
+  notBeforeMs: u64String('rules[time_window].notBeforeMs'),
+  /** Unix ms before which spends are allowed (exclusive upper bound). */
+  notAfterMs: u64String('rules[time_window].notAfterMs'),
 }).strict();
 
 const RuleSchema = z.discriminatedUnion('kind', [
@@ -184,6 +186,15 @@ export const CapabilityManifestSchema = z.object({
       });
     }
     seenKinds.add(rule.kind);
+    if (rule.kind === 'time_window' && BigInt(rule.notBeforeMs) >= BigInt(rule.notAfterMs)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `rules[${index}] time_window: notBeforeMs must be strictly less than notAfterMs `
+          + '(a zero-width or inverted window can never be satisfied — this mirrors the on-chain '
+          + 'agent_wallet::time_window assertion).',
+        path: ['rules', index, 'notBeforeMs'],
+      });
+    }
   });
 });
 
@@ -264,13 +275,16 @@ export function toOnChainRuleParams(manifest: CapabilityManifest): OnChainRulePa
         return { ruleWitness, module, config: { allowedCoinTypes: rule.allowedCoinTypes } };
       case 'recipient_allowlist':
         return { ruleWitness, module, config: { addresses: rule.addresses } };
-      case 'time_window': {
-        const config: Record<string, OnChainRuleConfigValue> = {};
-        if (rule.notBeforeMs !== undefined) config.notBeforeMs = parseU64String(rule.notBeforeMs, 'notBeforeMs');
-        if (rule.notAfterMs !== undefined) config.notAfterMs = parseU64String(rule.notAfterMs, 'notAfterMs');
-        if (rule.allowedHoursUtc !== undefined) config.allowedHoursUtc = rule.allowedHoursUtc;
-        return { ruleWitness, module, config };
-      }
+      case 'time_window':
+        // Move `time_window::add(not_before_ms, not_after_ms)` — both required.
+        return {
+          ruleWitness,
+          module,
+          config: {
+            notBeforeMs: parseU64String(rule.notBeforeMs, 'notBeforeMs'),
+            notAfterMs: parseU64String(rule.notAfterMs, 'notAfterMs'),
+          },
+        };
     }
   });
 }
@@ -285,7 +299,7 @@ export interface SignerPolicy {
   minSlippageBps?: number;
   allowedCoinTypes?: string[];
   allowedRecipients?: string[];
-  timeWindow?: { notBeforeMs?: string; notAfterMs?: string; allowedHoursUtc?: number[] };
+  timeWindow?: { notBeforeMs: string; notAfterMs: string };
 }
 
 /**
@@ -322,14 +336,11 @@ export function toSignerPolicy(manifest: CapabilityManifest): SignerPolicy {
       case 'recipient_allowlist':
         policy.allowedRecipients = rule.addresses;
         break;
-      case 'time_window': {
-        const timeWindow: { notBeforeMs?: string; notAfterMs?: string; allowedHoursUtc?: number[] } = {};
-        if (rule.notBeforeMs !== undefined) timeWindow.notBeforeMs = rule.notBeforeMs;
-        if (rule.notAfterMs !== undefined) timeWindow.notAfterMs = rule.notAfterMs;
-        if (rule.allowedHoursUtc !== undefined) timeWindow.allowedHoursUtc = rule.allowedHoursUtc;
-        policy.timeWindow = timeWindow;
+      case 'time_window':
+        // Both bounds are required by the schema (mirrors Move `time_window::add`), so the signer
+        // mirror always receives a fully-specified window — no optional fields to guard.
+        policy.timeWindow = { notBeforeMs: rule.notBeforeMs, notAfterMs: rule.notAfterMs };
         break;
-      }
     }
   }
   return policy;
@@ -378,16 +389,12 @@ function formatWindow(windowMs: string): string {
   return `${windowMs}ms`;
 }
 
-/** Formats a `time_window` rule's active fields into one clause per present field, joined with
- *  `"; "`. Returns `"no time restriction"` when every field is absent (a valid, if vacuous, rule). */
+/** Formats a `time_window` rule as a `"not before <ISO>; not after <ISO>"` clause. Both bounds are
+ *  always present (schema-required, mirroring Move `time_window::add`), so there is no vacuous case. */
 function describeTimeWindow(rule: TimeWindowRule): string {
-  const parts: string[] = [];
-  if (rule.notBeforeMs !== undefined) parts.push(`not before ${new Date(Number(rule.notBeforeMs)).toISOString()}`);
-  if (rule.notAfterMs !== undefined) parts.push(`not after ${new Date(Number(rule.notAfterMs)).toISOString()}`);
-  if (rule.allowedHoursUtc !== undefined && rule.allowedHoursUtc.length > 0) {
-    parts.push(`allowed hours (UTC): ${rule.allowedHoursUtc.join(', ')}`);
-  }
-  return parts.length > 0 ? parts.join('; ') : 'no time restriction';
+  const before = new Date(Number(rule.notBeforeMs)).toISOString();
+  const after = new Date(Number(rule.notAfterMs)).toISOString();
+  return `not before ${before}; not after ${after}`;
 }
 
 /** Renders one rule to a `{summaryLine, cap}` pair of plain-language text (KTD-6: declares exactly

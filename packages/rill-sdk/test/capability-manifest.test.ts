@@ -27,12 +27,7 @@ function fullManifest(): CapabilityManifest {
       { kind: 'slippage_floor', minBps: 50 },
       { kind: 'asset_scope', allowedCoinTypes: ['0x2::sui::SUI', USDC_MAINNET] },
       { kind: 'recipient_allowlist', addresses: [hex(3)] },
-      {
-        kind: 'time_window',
-        notBeforeMs: '1700000000000',
-        notAfterMs: '1800000000000',
-        allowedHoursUtc: [9, 10, 11],
-      },
+      { kind: 'time_window', notBeforeMs: '1700000000000', notAfterMs: '1800000000000' },
     ],
   };
 }
@@ -82,21 +77,36 @@ test('a recipient_allowlist rule validates', () => {
   expect(result.success).toBe(true);
 });
 
-test('a time_window rule validates (all fields present)', () => {
+test('a time_window rule validates (both bounds present, ordered)', () => {
   const result = CapabilityManifestSchema.safeParse(
-    oneRuleManifest({
-      kind: 'time_window',
-      notBeforeMs: '1700000000000',
-      notAfterMs: '1800000000000',
-      allowedHoursUtc: [9, 10, 11],
-    }),
+    oneRuleManifest({ kind: 'time_window', notBeforeMs: '1700000000000', notAfterMs: '1800000000000' }),
   );
   expect(result.success).toBe(true);
 });
 
-test('a time_window rule validates with every field optional and omitted', () => {
-  const result = CapabilityManifestSchema.safeParse(oneRuleManifest({ kind: 'time_window' }));
-  expect(result.success).toBe(true);
+test('a time_window rule missing a bound is rejected (both are required, mirroring Move)', () => {
+  const missingAfter = CapabilityManifestSchema.safeParse(
+    oneRuleManifest({ kind: 'time_window', notBeforeMs: '1700000000000' } as CapabilityManifest['rules'][number]),
+  );
+  expect(missingAfter.success).toBe(false);
+  const missingBefore = CapabilityManifestSchema.safeParse(
+    oneRuleManifest({ kind: 'time_window', notAfterMs: '1800000000000' } as CapabilityManifest['rules'][number]),
+  );
+  expect(missingBefore.success).toBe(false);
+});
+
+test('a time_window rule with notBeforeMs >= notAfterMs is rejected (zero-width/inverted window)', () => {
+  const inverted = CapabilityManifestSchema.safeParse(
+    oneRuleManifest({ kind: 'time_window', notBeforeMs: '1800000000000', notAfterMs: '1700000000000' }),
+  );
+  expect(inverted.success).toBe(false);
+  const zeroWidth = CapabilityManifestSchema.safeParse(
+    oneRuleManifest({ kind: 'time_window', notBeforeMs: '1700000000000', notAfterMs: '1700000000000' }),
+  );
+  expect(zeroWidth.success).toBe(false);
+  if (!zeroWidth.success) {
+    expect(JSON.stringify(zeroWidth.error.issues)).toMatch(/strictly less/);
+  }
 });
 
 test('the full 8-rule manifest validates', () => {
@@ -216,16 +226,18 @@ test('toOnChainRuleParams maps the full 8-rule manifest to expected witness/modu
     {
       ruleWitness: 'TimeWindowRule',
       module: 'time_window',
-      config: { notBeforeMs: 1700000000000n, notAfterMs: 1800000000000n, allowedHoursUtc: [9, 10, 11] },
+      config: { notBeforeMs: 1700000000000n, notAfterMs: 1800000000000n },
     },
   ]);
 });
 
-test('toOnChainRuleParams omits absent optional time_window fields from config', () => {
-  const manifest = CapabilityManifestSchema.parse(oneRuleManifest({ kind: 'time_window', notBeforeMs: '1000' }));
+test('toOnChainRuleParams emits both time_window bounds as bigint', () => {
+  const manifest = CapabilityManifestSchema.parse(
+    oneRuleManifest({ kind: 'time_window', notBeforeMs: '1000', notAfterMs: '2000' }),
+  );
   const params = toOnChainRuleParams(manifest);
   expect(params).toEqual([
-    { ruleWitness: 'TimeWindowRule', module: 'time_window', config: { notBeforeMs: 1000n } },
+    { ruleWitness: 'TimeWindowRule', module: 'time_window', config: { notBeforeMs: 1000n, notAfterMs: 2000n } },
   ]);
 });
 
@@ -242,7 +254,7 @@ test('toSignerPolicy yields the agreed flat shape for the full 8-rule manifest',
     minSlippageBps: 50,
     allowedCoinTypes: ['0x2::sui::SUI', USDC_MAINNET],
     allowedRecipients: [hex(3)],
-    timeWindow: { notBeforeMs: '1700000000000', notAfterMs: '1800000000000', allowedHoursUtc: [9, 10, 11] },
+    timeWindow: { notBeforeMs: '1700000000000', notAfterMs: '1800000000000' },
   });
 });
 
@@ -315,26 +327,14 @@ test('toDeclaration describes a recipient_allowlist rule in plain language', () 
   expect(declaration.caps).toEqual([{ label: 'Allowed recipients', value: hex(3) }]);
 });
 
-test('toDeclaration describes a fully-specified time_window rule in plain language', () => {
+test('toDeclaration describes a time_window rule in plain language', () => {
   const manifest = CapabilityManifestSchema.parse(
-    oneRuleManifest({
-      kind: 'time_window',
-      notBeforeMs: '1700000000000',
-      notAfterMs: '1800000000000',
-      allowedHoursUtc: [9, 10, 11],
-    }),
+    oneRuleManifest({ kind: 'time_window', notBeforeMs: '1700000000000', notAfterMs: '1800000000000' }),
   );
   const declaration = toDeclaration(manifest);
-  const expectedValue = 'not before 2023-11-14T22:13:20.000Z; not after 2027-01-15T08:00:00.000Z; allowed hours (UTC): 9, 10, 11';
+  const expectedValue = 'not before 2023-11-14T22:13:20.000Z; not after 2027-01-15T08:00:00.000Z';
   expect(declaration.summaryLines).toEqual([`Time window: ${expectedValue}`]);
   expect(declaration.caps).toEqual([{ label: 'Time window', value: expectedValue }]);
-});
-
-test('toDeclaration handles a time_window rule with no fields set', () => {
-  const manifest = CapabilityManifestSchema.parse(oneRuleManifest({ kind: 'time_window' }));
-  const declaration = toDeclaration(manifest);
-  expect(declaration.summaryLines).toEqual(['Time window: no time restriction']);
-  expect(declaration.caps).toEqual([{ label: 'Time window', value: 'no time restriction' }]);
 });
 
 test('toDeclaration renders one summary line and one cap per rule, for all 8 kinds, in manifest order', () => {

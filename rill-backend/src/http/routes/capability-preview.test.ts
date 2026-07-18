@@ -27,7 +27,7 @@ const manifest: CapabilityManifest = {
     { kind: 'slippage_floor', minBps: 50 },
     { kind: 'asset_scope', allowedCoinTypes: ['0x2::sui::SUI'] },
     { kind: 'recipient_allowlist', addresses: [`0x${'b'.repeat(64)}`] },
-    { kind: 'time_window', notBeforeMs: '1000', notAfterMs: '2000', allowedHoursUtc: [9, 10, 11] },
+    { kind: 'time_window', notBeforeMs: '1000', notAfterMs: '2000' },
   ],
 };
 

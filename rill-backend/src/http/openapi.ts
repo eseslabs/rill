@@ -262,12 +262,11 @@ const recipientAllowlistRuleSchema = {
 const timeWindowRuleSchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['kind'],
+  required: ['kind', 'notBeforeMs', 'notAfterMs'],
   properties: {
     kind: { type: 'string', enum: ['time_window'] },
-    notBeforeMs: { type: 'string' },
-    notAfterMs: { type: 'string' },
-    allowedHoursUtc: { type: 'array', items: { type: 'number', minimum: 0, maximum: 23 } },
+    notBeforeMs: { type: 'string', description: 'Unix ms lower bound (inclusive); must be < notAfterMs.' },
+    notAfterMs: { type: 'string', description: 'Unix ms upper bound (exclusive).' },
   },
 } as const;
 
@@ -320,10 +319,10 @@ const signerPolicySchema = {
     allowedRecipients: { type: 'array', items: { type: 'string' } },
     timeWindow: {
       type: 'object',
+      required: ['notBeforeMs', 'notAfterMs'],
       properties: {
         notBeforeMs: { type: 'string' },
         notAfterMs: { type: 'string' },
-        allowedHoursUtc: { type: 'array', items: { type: 'number' } },
       },
     },
   },
