@@ -33,7 +33,7 @@ public fun prove<T>(req: &mut SpendRequest, wallet: &AgentWallet<T>, version: &V
     version.check_is_valid();
     let cfg: &Config = aw::rule_config<T, Rule, Config>(Rule {}, wallet);
     assert!(cfg.allowed.contains(&req.request_recipient()), E_RECIPIENT_NOT_ALLOWED);
-    aw::add_receipt(Rule {}, req);
+    aw::add_receipt(Rule {}, wallet, req);
 }
 
 public fun allowed(cfg: &Config): vector<address> { cfg.allowed }

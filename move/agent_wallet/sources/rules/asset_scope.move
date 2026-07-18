@@ -36,7 +36,7 @@ public fun prove<T>(req: &mut SpendRequest, wallet: &AgentWallet<T>, version: &V
     let cfg: &Config = aw::rule_config<T, Rule, Config>(Rule {}, wallet);
     assert!(cfg.allowed.contains(&req.request_coin_in()), E_ASSET_NOT_ALLOWED);
     assert!(cfg.allowed.contains(&req.request_coin_out()), E_ASSET_NOT_ALLOWED);
-    aw::add_receipt(Rule {}, req);
+    aw::add_receipt(Rule {}, wallet, req);
 }
 
 public fun allowed(cfg: &Config): vector<TypeName> { cfg.allowed }

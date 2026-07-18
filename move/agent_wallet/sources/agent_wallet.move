@@ -12,7 +12,7 @@
 /// which asserts every attached rule's receipt is present.
 ///
 /// Rules are independent modules (`agent_wallet::budget`, `::per_tx`, `::rate_limit`,
-/// `::protocol_scope`, `::slippage_floor`, `::asset_scope`, `::recipient_allowlist`, `::time_window`)
+/// `::protocol_scope`, `::asset_scope`, `::recipient_allowlist`, `::time_window`)
 /// that attach their config as a dynamic field on `SpendPolicy`, keyed by their own witness type —
 /// mirroring `sui::transfer_policy::add_rule`. Because rule configs live in dynamic fields rather than
 /// `AgentWallet`/`SpendPolicy` struct fields, new rule types ship via in-place package upgrade
@@ -71,9 +71,9 @@ module agent_wallet::agent_wallet {
 
     /// Shared object: the agent's capped, revocable wallet. `T` = the budget coin type (any token).
     /// Deliberately minimal — custody + identity + hard kill-switch only. Every *composable*
-    /// restriction (budget ceiling, per-tx cap, rolling window, protocol/asset/recipient scope,
-    /// slippage floor, time window) lives in `policy` as a dynamic field, never as a struct field
-    /// here, so this struct's layout never needs to change to add a new rule type.
+    /// restriction (budget ceiling, per-tx cap, rolling window, protocol/asset/recipient scope, time
+    /// window) lives in `policy` as a dynamic field, never as a struct field here, so this struct's
+    /// layout never needs to change to add a new rule type.
     public struct AgentWallet<phantom T> has key {
         id: UID,
         owner: address,
@@ -245,7 +245,14 @@ module agent_wallet::agent_wallet {
     /// Adds a rule's receipt to the request, unblocking it — called by a rule module's own `prove`
     /// after that rule's invariant check passes. `_: Rule` can only be constructed inside the rule's
     /// own module, so no other code can forge a receipt for a rule it doesn't own.
-    public fun add_receipt<Rule: drop>(_: Rule, req: &mut SpendRequest) {
+    ///
+    /// This is the single funnel every rule's `prove` routes through, so it is also where the wallet a
+    /// rule read its config from is bound to the wallet the `SpendRequest` was minted against: without
+    /// this check, an agent could `prove` each rule against a separate, permissive, self-owned "shadow"
+    /// wallet while confirming the spend against the real (tightly restricted) one — `confirm_spend`
+    /// only checks `req.wallet == id(wallet)` for itself, not for each rule's own config lookup.
+    public fun add_receipt<T, Rule: drop>(_: Rule, wallet: &AgentWallet<T>, req: &mut SpendRequest) {
+        assert!(object::id(wallet) == req.wallet, E_WRONG_WALLET);
         req.receipts.insert(type_name::with_defining_ids<Rule>());
     }
 

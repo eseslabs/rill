@@ -6,6 +6,7 @@
 /// Abort codes:
 /// - `E_OUTSIDE_TIME_WINDOW` (1): the current clock time is before `not_before_ms` or at/after
 ///   `not_after_ms`.
+/// - `E_INVALID_TIME_WINDOW` (2): `add` was called with `not_before_ms >= not_after_ms`.
 module agent_wallet::time_window;
 
 use sui::clock::Clock;
@@ -13,6 +14,10 @@ use agent_wallet::agent_wallet::{Self as aw, AgentWallet, SpendRequest};
 use agent_wallet::version::Version;
 
 const E_OUTSIDE_TIME_WINDOW: u64 = 1;
+/// `add` was called with a window that cannot ever be satisfied (`not_before_ms >= not_after_ms`) —
+/// distinct from `E_OUTSIDE_TIME_WINDOW`, which is the runtime "current time falls outside the
+/// window" check; this is an attach-time configuration-mistake check.
+const E_INVALID_TIME_WINDOW: u64 = 2;
 
 public struct Rule has drop {}
 
@@ -31,7 +36,7 @@ public fun add<T>(
     not_after_ms: u64,
     ctx: &TxContext,
 ) {
-    assert!(not_before_ms < not_after_ms, E_OUTSIDE_TIME_WINDOW);
+    assert!(not_before_ms < not_after_ms, E_INVALID_TIME_WINDOW);
     aw::add_rule<T, Rule, Config>(Rule {}, wallet, version, Config { not_before_ms, not_after_ms }, ctx);
 }
 
@@ -47,7 +52,7 @@ public fun prove<T>(req: &mut SpendRequest, wallet: &AgentWallet<T>, version: &V
     let cfg: &Config = aw::rule_config<T, Rule, Config>(Rule {}, wallet);
     let now = clock.timestamp_ms();
     assert!(now >= cfg.not_before_ms && now < cfg.not_after_ms, E_OUTSIDE_TIME_WINDOW);
-    aw::add_receipt(Rule {}, req);
+    aw::add_receipt(Rule {}, wallet, req);
 }
 
 public fun not_before_ms(cfg: &Config): u64 { cfg.not_before_ms }

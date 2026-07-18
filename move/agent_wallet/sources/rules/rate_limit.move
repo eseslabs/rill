@@ -64,7 +64,7 @@ public fun prove<T>(req: &mut SpendRequest, wallet: &mut AgentWallet<T>, version
     assert!(cfg.spent_in_window + amount <= cfg.window_max, E_OVER_WINDOW);
     cfg.spent_in_window = cfg.spent_in_window + amount;
 
-    aw::add_receipt(Rule {}, req);
+    aw::add_receipt(Rule {}, wallet, req);
 }
 
 public fun window_ms(cfg: &Config): u64 { cfg.window_ms }

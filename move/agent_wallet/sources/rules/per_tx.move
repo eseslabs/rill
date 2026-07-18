@@ -32,7 +32,7 @@ public fun prove<T>(req: &mut SpendRequest, wallet: &AgentWallet<T>, version: &V
     version.check_is_valid();
     let cfg: &Config = aw::rule_config<T, Rule, Config>(Rule {}, wallet);
     assert!(req.request_amount() <= cfg.max_mist, E_OVER_PER_TX);
-    aw::add_receipt(Rule {}, req);
+    aw::add_receipt(Rule {}, wallet, req);
 }
 
 public fun max_mist(cfg: &Config): u64 { cfg.max_mist }
