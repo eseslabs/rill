@@ -9,14 +9,14 @@ import { ProtocolLogo } from "@/components/flow/protocol-logo";
 import { WIRE_IN, WIRE_OUT } from "@/lib/wire-inference";
 import { isGuardrailMinValueValid } from "@/lib/publish-gate";
 import {
-  actionAmountError,
+  DEFAULT_MIN_SWAP_OUTPUT,
   defaultActionConfig,
   otherSwapToken,
-  TOKEN_COIN_TYPE,
   type ActionConfig,
   type SwapTokenSymbol,
 } from "@/lib/action-config";
 import { TokenBadge, TokenSelect } from "@/components/flow/token-select";
+import { useOpenCapabilities } from "@/lib/open-capabilities-context";
 
 export type ActionNodeData = {
   protocol: string;
@@ -54,13 +54,20 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
   const c = colorMap[data.color] ?? colorMap.mint;
   const ports = data.ports;
   const { setNodes } = useReactFlow();
+  const openCapabilities = useOpenCapabilities();
 
   const patchConfig = useCallback(
     (patch: ActionConfig) => {
       setNodes((nodes) =>
         nodes.map((n) =>
           n.id === id
-            ? { ...n, data: { ...(n.data as ActionNodeData), config: { ...(data.config ?? {}), ...patch } } }
+            ? {
+                ...n,
+                data: {
+                  ...(n.data as ActionNodeData),
+                  config: { ...(data.config ?? {}), ...patch },
+                },
+              }
             : n,
         ),
       );
@@ -76,20 +83,11 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
   const cfg: ActionConfig = {
     ...defaultActionConfig(
       data.protocolId,
-      data.actionId ?? (isCetusSwap ? "swap" : isHaedalStake ? "stake" : isDeepbookLimit ? "limit_order" : ""),
+      data.actionId ??
+        (isCetusSwap ? "swap" : isHaedalStake ? "stake" : isDeepbookLimit ? "limit_order" : ""),
     ),
     ...data.config,
   };
-
-  // R5: the amount field's decimals depend on the coin it's denominated in — Cetus swap's
-  // `amount` is in tokenIn units, Haedal stake is always SUI. Same predicate that gates
-  // simulate/publish (publish-gate.ts) drives this inline error, mirroring the guardrail pattern.
-  const amountCoinType = isCetusSwap
-    ? (TOKEN_COIN_TYPE[(cfg.tokenIn as SwapTokenSymbol) || "SUI"] ?? TOKEN_COIN_TYPE.SUI)
-    : TOKEN_COIN_TYPE.SUI;
-  const amountError =
-    isCetusSwap || isHaedalStake ? actionAmountError(cfg.amount, amountCoinType) : null;
-  const amountValid = amountError === null;
 
   const fieldCls =
     "nodrag nowheel w-full rounded-md border border-border bg-background px-2 py-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-primary/40";
@@ -103,10 +101,18 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
         selected ? "ring-2 ring-primary/60" : ""
       }`}
     >
-      <div className={`px-3 py-2 rounded-t-2xl ${c.bg} ${c.text} flex items-center justify-between gap-2`}>
+      <div
+        className={`px-3 py-2 rounded-t-2xl ${c.bg} ${c.text} flex items-center justify-between gap-2`}
+      >
         <div className="flex items-center gap-2 min-w-0">
-          <ProtocolLogo protocolId={data.protocolId} name={data.protocol} className="h-5 w-5 ring-background/40" />
-          <span className="text-[11px] font-semibold uppercase tracking-wider truncate">{data.protocol}</span>
+          <ProtocolLogo
+            protocolId={data.protocolId}
+            name={data.protocol}
+            className="h-5 w-5 ring-background/40"
+          />
+          <span className="text-[11px] font-semibold uppercase tracking-wider truncate">
+            {data.protocol}
+          </span>
           {data.module && (
             <span className="text-[10px] font-mono opacity-70 truncate">::{data.module}</span>
           )}
@@ -144,74 +150,56 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
         {isCetusSwap && (
           <div className="mt-3 space-y-2">
             <label className="block">
-              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Token in</span>
+              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">
+                Token in
+              </span>
               <TokenSelect
                 value={(cfg.tokenIn ?? "SUI") as SwapTokenSymbol}
                 onChange={(tokenIn) => patchConfig({ tokenIn, tokenOut: otherSwapToken(tokenIn) })}
               />
             </label>
             <label className="block">
-              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Token out</span>
+              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">
+                Token out
+              </span>
               <TokenSelect
                 value={(cfg.tokenOut ?? "USDC") as SwapTokenSymbol}
-                onChange={(tokenOut) => patchConfig({ tokenOut, tokenIn: otherSwapToken(tokenOut) })}
+                onChange={(tokenOut) =>
+                  patchConfig({ tokenOut, tokenIn: otherSwapToken(tokenOut) })
+                }
               />
             </label>
             <label className="block">
-              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Amount</span>
-              <div className="mt-0.5 flex items-center gap-1.5">
-                <input
-                  type="number"
-                  min="0.000000001"
-                  step="any"
-                  className={`${fieldCls} ${!amountValid ? "border-destructive focus:ring-destructive/40" : ""}`}
-                  value={cfg.amount ?? "0.1"}
-                  onChange={(e) => patchConfig({ amount: e.target.value })}
-                  aria-invalid={!amountValid}
-                  aria-describedby={!amountValid ? `amount-error-${id}` : undefined}
-                />
-                <TokenBadge symbol={(cfg.tokenIn ?? "SUI") as SwapTokenSymbol} />
-              </div>
-              {!amountValid && (
-                <p id={`amount-error-${id}`} className="mt-1 text-[10px] text-destructive">
-                  {amountError}
-                </p>
-              )}
+              <span className="flex items-center justify-between text-[10px] text-muted-foreground uppercase tracking-wide">
+                <span>Min swap output</span>
+                <TokenBadge symbol={(cfg.tokenOut ?? "USDC") as SwapTokenSymbol} />
+              </span>
+              <input
+                type="number"
+                min="0"
+                step="any"
+                placeholder={DEFAULT_MIN_SWAP_OUTPUT}
+                className={fieldCls}
+                value={cfg.min_amount_out ?? ""}
+                onChange={(e) => patchConfig({ min_amount_out: e.target.value })}
+              />
             </label>
+            <AgentRuntimeNote onOpenCapabilities={openCapabilities} />
           </div>
         )}
 
         {isHaedalStake && (
           <div className="mt-3">
-            <label className="block">
-              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Stake amount</span>
-              <div className="mt-0.5 flex items-center gap-1.5">
-                <input
-                  type="number"
-                  min="1"
-                  step="any"
-                  className={`${fieldCls} ${!amountValid ? "border-destructive focus:ring-destructive/40" : ""}`}
-                  value={cfg.amount ?? "1"}
-                  onChange={(e) => patchConfig({ amount: e.target.value })}
-                  aria-invalid={!amountValid}
-                  aria-describedby={!amountValid ? `amount-error-${id}` : undefined}
-                />
-                <TokenBadge symbol="SUI" />
-              </div>
-              {!amountValid && (
-                <p id={`amount-error-${id}`} className="mt-1 text-[10px] text-destructive">
-                  {amountError}
-                </p>
-              )}
-              <p className="mt-1 text-[10px] text-muted-foreground">Minimum 1 SUI on testnet</p>
-            </label>
+            <AgentRuntimeNote onOpenCapabilities={openCapabilities} />
           </div>
         )}
 
         {isDeepbookLimit && (
           <div className="mt-3 space-y-2">
             <label className="block">
-              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Pool</span>
+              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">
+                Pool
+              </span>
               <input
                 className={fieldCls}
                 value={cfg.poolKey ?? "SUI_DBUSDC"}
@@ -219,7 +207,9 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
               />
             </label>
             <label className="block">
-              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">BalanceManager</span>
+              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">
+                BalanceManager
+              </span>
               <input
                 className={fieldCls}
                 placeholder="0x…"
@@ -229,7 +219,9 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
             </label>
             <div className="grid grid-cols-2 gap-2">
               <label className="block">
-                <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Price</span>
+                <span className="text-[10px] text-muted-foreground uppercase tracking-wide">
+                  Price
+                </span>
                 <input
                   type="number"
                   min="0"
@@ -240,7 +232,9 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
                 />
               </label>
               <label className="block">
-                <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Quantity</span>
+                <span className="text-[10px] text-muted-foreground uppercase tracking-wide">
+                  Quantity
+                </span>
                 <input
                   type="number"
                   min="0"
@@ -252,7 +246,9 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
               </label>
             </div>
             <label className="block">
-              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Deposit SUI</span>
+              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">
+                Deposit SUI
+              </span>
               <input
                 type="number"
                 min="0"
@@ -270,7 +266,9 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
             {data.inputs.map((i) => (
               <div key={i.key} className="flex items-center justify-between text-[11px]">
                 <span className="text-muted-foreground">{i.label}</span>
-                <span className="font-mono text-foreground/80 bg-muted px-1.5 py-0.5 rounded">{i.type}</span>
+                <span className="font-mono text-foreground/80 bg-muted px-1.5 py-0.5 rounded">
+                  {i.type}
+                </span>
               </div>
             ))}
           </div>
@@ -284,11 +282,33 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
   );
 }
 
+/**
+ * Part A: on-chain agent_wallet caps (budget/per_tx/rate_limit/time_window/scope) are
+ * WALLET-LEVEL — they bound the whole agent, not one action — so repeating them on every action
+ * node (the old "Bounded by" panel) read as per-node when they aren't. This replaces it with a
+ * single honest line plus a link straight to the dialog that actually owns them; `onOpenCapabilities`
+ * comes from `lib/open-capabilities-context.ts` since ReactFlow gives custom nodes no other way to
+ * reach a callback defined in `routes/builder.tsx`.
+ */
+function AgentRuntimeNote({ onOpenCapabilities }: { onOpenCapabilities: () => void }) {
+  return (
+    <p className="text-[10px] leading-relaxed text-muted-foreground">
+      Agent sets the amount at runtime — bounded by your wallet{" "}
+      <button
+        type="button"
+        onClick={onOpenCapabilities}
+        className="nodrag cursor-pointer font-medium text-foreground underline decoration-dotted underline-offset-2 hover:text-primary"
+      >
+        Capabilities
+      </button>
+      .
+    </p>
+  );
+}
+
 function PortLabelRow({ port, align }: { port: Port; align: "left" | "right" }) {
   return (
-    <div
-      className={`flex h-[22px] items-center gap-1.5 ${align === "right" ? "justify-end" : ""}`}
-    >
+    <div className={`flex h-[22px] items-center gap-1.5 ${align === "right" ? "justify-end" : ""}`}>
       {align === "right" && (
         <span className="font-mono text-[10px] text-muted-foreground">{port.type}</span>
       )}
@@ -360,7 +380,13 @@ function OutputNodeImpl({ data }: NodeProps<{ label: string; sub: string }>) {
           </div>
         </div>
       </div>
-      <NodePort id={WIRE_IN} type="target" side="left" placement="bottom" className="border-primary/20 bg-primary/[0.04]">
+      <NodePort
+        id={WIRE_IN}
+        type="target"
+        side="left"
+        placement="bottom"
+        className="border-primary/20 bg-primary/[0.04]"
+      >
         <FlowInLabels />
       </NodePort>
     </motion.div>
@@ -428,7 +454,9 @@ function GuardrailNodeImpl({ id, data, selected }: NodeProps<GuardrailNodeData>)
           <Shield className="h-3.5 w-3.5" />
         </span>
         <div>
-          <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Guardrail</div>
+          <div className="text-[11px] uppercase tracking-widest text-muted-foreground">
+            Guardrail
+          </div>
           <div className="text-sm font-semibold">Pre-flight checks</div>
         </div>
       </div>
@@ -441,7 +469,9 @@ function GuardrailNodeImpl({ id, data, selected }: NodeProps<GuardrailNodeData>)
       </ul>
       <div className="mt-3 space-y-2">
         <label className="block">
-          <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Min value (SUI)</span>
+          <span className="text-[10px] text-muted-foreground uppercase tracking-wide">
+            Min value (SUI)
+          </span>
           <input
             type="number"
             min="0"
@@ -460,7 +490,9 @@ function GuardrailNodeImpl({ id, data, selected }: NodeProps<GuardrailNodeData>)
           )}
         </label>
         <label className="block">
-          <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Coin type</span>
+          <span className="text-[10px] text-muted-foreground uppercase tracking-wide">
+            Coin type
+          </span>
           <input
             className={fieldCls}
             value={data.coinType ?? "0x2::sui::SUI"}

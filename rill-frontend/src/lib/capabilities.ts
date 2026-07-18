@@ -5,8 +5,10 @@
 import {
   CapabilityManifestSchema,
   RULE_KINDS,
+  toDeclaration,
   type AssetScopeRule,
   type BudgetRule,
+  type CapabilityDeclarationCap,
   type CapabilityManifest,
   type CapabilityRule,
   type PerTxRule,
@@ -235,5 +237,19 @@ export function validateManifest(manifest: CapabilityManifest): ManifestValidati
   return { ok: false, error: result.error.issues.map((issue) => issue.message).join("; ") };
 }
 
-export type { CapabilityManifest, CapabilityRule, RuleKind };
+// ---- Node-level cap filtering ----------------------------------------------------------------
+// (Part B added a node-local "Bounded by" panel filtered to on-chain spend caps; Part A removed
+// it — wallet-level caps (budget/per_tx/rate_limit/time_window/scope) are global, not per-action,
+// so repeating them on every node read as per-node when they aren't. That panel's only consumer
+// was nodes.tsx's `BoundedByPanel`, now gone, so its filtering helper (`boundedByCaps`) went with
+// it — action nodes link to the Capabilities dialog instead (`lib/open-capabilities-context.ts`).)
+
+/** All declared caps (label + value + enforcement) for a manifest, in rule order — template cards
+ *  render these so a preset advertises its FULL suggested capability set with values (e.g. "Budget
+ *  5 SUI"), not just the rule names. Same SDK projection the composer preview uses. */
+export function manifestCaps(manifest: CapabilityManifest): CapabilityDeclarationCap[] {
+  return toDeclaration(manifest).caps;
+}
+
+export type { CapabilityDeclarationCap, CapabilityManifest, CapabilityRule, RuleKind };
 export { RULE_KINDS };

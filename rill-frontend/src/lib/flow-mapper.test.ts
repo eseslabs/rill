@@ -51,9 +51,13 @@ describe("isBackendSupported", () => {
   });
 
   it("is false for an unknown protocol/action", () => {
-    expect(isBackendSupported(actionNode("n1", "unknown", "Foo").data as ActionNodeData)).toBe(false);
+    expect(isBackendSupported(actionNode("n1", "unknown", "Foo").data as ActionNodeData)).toBe(
+      false,
+    );
     // Same protocol, wrong action still fails — matching is per (protocolId, action) pair.
-    expect(isBackendSupported(actionNode("n2", "cetus", "Withdraw").data as ActionNodeData)).toBe(false);
+    expect(isBackendSupported(actionNode("n2", "cetus", "Withdraw").data as ActionNodeData)).toBe(
+      false,
+    );
   });
 });
 
@@ -119,11 +123,10 @@ describe("buildFlowGraph edge mapping", () => {
 });
 
 describe("applyWireConstraints", () => {
-  it("returns the correct change list for a swap -> stake wiring that needs correcting", () => {
-    // tokenIn "SUI" means the swap outputs USDC, which Haedal can't stake, and the
-    // stake amount (10) exceeds what the swap produces (0.1 SUI == 100000000 mist).
-    const src = cetusSwap("n1", { tokenIn: "SUI", tokenOut: "USDC", amount: "0.1" });
-    const tgt = haedalStake("n2", { amount: "10" });
+  it("returns the token-pair change list for a swap -> stake wiring whose swap doesn't output SUI", () => {
+    // tokenIn "SUI" means the swap outputs USDC, which Haedal can't stake.
+    const src = cetusSwap("n1", { tokenIn: "SUI", tokenOut: "USDC" });
+    const tgt = haedalStake("n2");
     const edges = [edge("e1", "n1", "n2")];
 
     const changes = applyWireConstraints([src, tgt], edges);
@@ -131,13 +134,22 @@ describe("applyWireConstraints", () => {
     expect(changes).toEqual([
       expect.objectContaining({ nodeId: "n1", field: "tokenIn", from: "SUI", to: "USDC" }),
       expect.objectContaining({ nodeId: "n1", field: "tokenOut", from: "USDC", to: "SUI" }),
-      expect.objectContaining({ nodeId: "n2", field: "amount", from: "10", to: "0.1" }),
     ]);
   });
 
-  it("returns an empty list when values already conform (toast-dedup contract)", () => {
-    const src = cetusSwap("n1", { tokenIn: "USDC", tokenOut: "SUI", amount: "1" });
-    const tgt = haedalStake("n2", { amount: "0.5" });
+  it("returns an empty list when the token pair already conforms (toast-dedup contract)", () => {
+    const src = cetusSwap("n1", { tokenIn: "USDC", tokenOut: "SUI" });
+    const tgt = haedalStake("n2");
+    const edges = [edge("e1", "n1", "n2")];
+
+    const changes = applyWireConstraints([src, tgt], edges);
+
+    expect(changes).toEqual([]);
+  });
+
+  it("no longer caps the stake amount to the swap output (Part B: amount is agent-supplied at runtime, not canvas-editable)", () => {
+    const src = cetusSwap("n1", { tokenIn: "USDC", tokenOut: "SUI", amount: "0.1" });
+    const tgt = haedalStake("n2", { amount: "999" });
     const edges = [edge("e1", "n1", "n2")];
 
     const changes = applyWireConstraints([src, tgt], edges);

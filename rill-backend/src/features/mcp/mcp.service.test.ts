@@ -155,7 +155,8 @@ test('describe_action publishes runtime parameters and local signing rules', asy
     defaultPoolKey: config.network === 'testnet' ? 'SUI_DBUSDC' : 'SUI_USDC',
     defaultPoolId: (config.network === 'testnet' ? testnetPools : mainnetPools)[config.network === 'testnet' ? 'SUI_DBUSDC' : 'SUI_USDC']?.address ?? '',
     requiredTargets: [
-      `${config.agentWallet?.packageId ?? '<agentWallet.packageId>'}::agent_wallet::spend`,
+      `${config.agentWallet?.packageId ?? '<agentWallet.packageId>'}::agent_wallet::request_spend`,
+      `${config.agentWallet?.packageId ?? '<agentWallet.packageId>'}::agent_wallet::confirm_spend`,
       `${deepbookPackageId}::balance_manager::deposit`,
       `${deepbookPackageId}::balance_manager::generate_proof_as_trader`,
       `${deepbookPackageId}::pool::place_limit_order`,
@@ -197,7 +198,9 @@ test('build_action uses the per-call public AgentWallet binding', async () => {
       arguments: {
         actionId: skill.id,
         sender: '0x1',
-        agentWallet: { packageId: '0x2', walletId: '0x3', capId: '0x6' },
+        agentWallet: {
+          packageId: '0x2', walletId: '0x3', capId: '0x6', versionId: '0x9', capabilityManifest: budgetManifest,
+        },
         params,
       },
     },
@@ -221,6 +224,8 @@ test('build_action uses the per-call public AgentWallet binding', async () => {
         walletId: '0x3',
         capId: '0x6',
         coinType: '0x2::sui::SUI',
+        versionId: '0x9',
+        capabilityManifest: budgetManifest,
       },
     },
   ]);
@@ -515,7 +520,9 @@ test('build_action surfaces a failed-simulation refusal as an MCP tool error, no
       arguments: {
         actionId: skill.id,
         sender: '0x1',
-        agentWallet: { packageId: '0x2', walletId: '0x3', capId: '0x6' },
+        agentWallet: {
+          packageId: '0x2', walletId: '0x3', capId: '0x6', versionId: '0x9', capabilityManifest: budgetManifest,
+        },
         params: {
           poolKey: 'SUI_DBUSDC',
           balanceManagerId: '0x4',

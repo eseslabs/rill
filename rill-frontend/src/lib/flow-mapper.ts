@@ -10,7 +10,12 @@ import {
   toMist,
   type SwapTokenSymbol,
 } from "@/lib/action-config";
-import { resolveBackendCoinHandles, wireKindFromEdge, WIRE_IN, WIRE_OUT } from "@/lib/wire-inference";
+import {
+  resolveBackendCoinHandles,
+  wireKindFromEdge,
+  WIRE_IN,
+  WIRE_OUT,
+} from "@/lib/wire-inference";
 
 const SUI = TOKEN_COIN_TYPE.SUI;
 
@@ -36,24 +41,21 @@ export type WireConstraintChange = {
   reason: string;
 };
 
-function mistToDecimalString(mist: bigint): string {
-  const negative = mist < 0n;
-  const abs = negative ? -mist : mist;
-  const whole = abs / 1_000_000_000n;
-  const frac = abs % 1_000_000_000n;
-  if (frac === 0n) return `${negative ? "-" : ""}${whole.toString()}`;
-  const fracStr = frac.toString().padStart(9, "0").replace(/0+$/, "");
-  return `${negative ? "-" : ""}${whole.toString()}.${fracStr}`;
-}
-
 /**
- * Swap wired into Haedal must output SUI; stake amount cannot exceed swap output.
+ * Swap wired into Haedal must output SUI (Haedal only ever accepts SUI as its stake coin).
  *
  * Pure — computes what SHOULD change on canvas-shaped node data and returns the
  * change list; mutates nothing. `buildFlowGraph` applies the list to its own
  * internal (compiled) copy so compiled output still reflects the constraint, and
  * also returns the list so the component layer can apply it to real canvas state
  * and explain the change instead of silently rewriting values at compile time.
+ *
+ * Part B: this used to also cap the stake amount to the swap's output amount (both were
+ * canvas-editable `cfg.amount` fields). Neither is user-editable anymore — action nodes no longer
+ * expose an Amount input (the agent supplies the real amount at runtime via MCP, bounded by
+ * capabilities), and `buildCetusSwapFlowConfig`/`buildHaedalStakeFlowConfig` both compile a fixed
+ * studio-preview amount regardless of `cfg.amount` — so there is nothing left to cap here. Only
+ * the token-pair correction (still driven by the canvas-editable Token in/out selects) remains.
  */
 export function applyWireConstraints(nodes: Node[], edges: Edge[]): WireConstraintChange[] {
   const changes: WireConstraintChange[] = [];
@@ -66,11 +68,11 @@ export function applyWireConstraints(nodes: Node[], edges: Edge[]): WireConstrai
     const srcData = src.data as ActionNodeData;
     const tgtData = tgt.data as ActionNodeData;
     const isSwap = srcData.protocolId === "cetus" && srcData.action.toLowerCase().includes("swap");
-    const isStake = tgtData.protocolId === "haedal" && tgtData.action.toLowerCase().includes("stake");
+    const isStake =
+      tgtData.protocolId === "haedal" && tgtData.action.toLowerCase().includes("stake");
     if (!isSwap || !isStake) continue;
 
     const srcCfg = srcData.config ?? {};
-    const tgtCfg = tgtData.config ?? {};
 
     const tokenIn = (srcCfg.tokenIn as SwapTokenSymbol) || "SUI";
     const derivedOutput = TOKEN_COIN_TYPE[otherSwapToken(tokenIn)];
@@ -83,19 +85,6 @@ export function applyWireConstraints(nodes: Node[], edges: Edge[]): WireConstrai
         from: String(srcCfg.tokenOut ?? "USDC"),
         to: "SUI",
         reason,
-      });
-    }
-
-    const swapOutMist = BigInt(toMist(String(srcCfg.amount ?? "0.1"), "0"));
-    const stakeMist = BigInt(toMist(String(tgtCfg.amount ?? "1"), "0"));
-    if (stakeMist > swapOutMist) {
-      const cappedHuman = mistToDecimalString(swapOutMist);
-      changes.push({
-        nodeId: tgt.id,
-        field: "amount",
-        from: String(tgtCfg.amount ?? "1"),
-        to: cappedHuman,
-        reason: `${nodeLabel(tgt)} can't stake more than the swap produces — capped to ${cappedHuman} SUI.`,
       });
     }
   }
@@ -176,10 +165,17 @@ function mapEdge(edge: Edge, nodes: Node[]): EdgeMapResult | null {
   if (source.type === "action" && target.type === "guardrail") {
     const sourceData = source.data as ActionNodeData;
     if (!isBackendSupported(sourceData)) {
-      return skip(`${nodeLabel(source)} doesn't compile yet, so the guardrail has no coin to assert.`);
+      return skip(
+        `${nodeLabel(source)} doesn't compile yet, so the guardrail has no coin to assert.`,
+      );
     }
     return {
-      edge: { source: edge.source, sourceHandle: "coin_out", target: edge.target, targetHandle: "in" },
+      edge: {
+        source: edge.source,
+        sourceHandle: "coin_out",
+        target: edge.target,
+        targetHandle: "in",
+      },
     };
   }
 
@@ -191,7 +187,9 @@ function mapEdge(edge: Edge, nodes: Node[]): EdgeMapResult | null {
 
   if (source.type !== "action" || target.type !== "action") {
     // guardrail -> guardrail, or any other backend-relevant-but-unpaired combination.
-    return skip(`${nodeLabel(source)} → ${nodeLabel(target)} isn't a wiring the compiler understands.`);
+    return skip(
+      `${nodeLabel(source)} → ${nodeLabel(target)} isn't a wiring the compiler understands.`,
+    );
   }
 
   const targetData = target.data as ActionNodeData;
