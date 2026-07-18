@@ -25,6 +25,7 @@ import {
   ChevronRight,
   ScanSearch,
   Shield,
+  ShieldCheck,
   Layers,
   LayoutTemplate,
 } from "lucide-react";
@@ -44,6 +45,7 @@ import { TemplateDialog } from "@/components/flow/template-dialog";
 import { ProtocolLogo } from "@/components/flow/protocol-logo";
 import { DeletableEdge } from "@/components/flow/deletable-edge";
 import { SimulateDialog } from "@/components/flow/simulate-dialog";
+import { CapabilitiesDialog } from "@/components/flow/capabilities-dialog";
 import { applyWireConstraints } from "@/lib/flow-mapper";
 import {
   inferWireKindFromConnection,
@@ -57,6 +59,7 @@ import { getActionPorts } from "@/lib/action-ports";
 import { FLOW_TEMPLATES } from "@/lib/flow-templates";
 import { rillApi } from "@/lib/rill-api";
 import { loadDraftFromStorage, saveDraftToStorage, maxNodeId } from "@/lib/draft-storage";
+import { emptyManifest, type CapabilityManifest } from "@/lib/capabilities";
 import type { DiscoveredFunction, IntrospectionResult } from "@/lib/rill-types";
 
 export const Route = createFileRoute("/builder")({
@@ -114,6 +117,11 @@ function Builder() {
   const [discoverOpen, setDiscoverOpen] = useState(false);
   const [templateOpen, setTemplateOpen] = useState(false);
   const [simulateOpen, setSimulateOpen] = useState(false);
+  const [capabilitiesOpen, setCapabilitiesOpen] = useState(false);
+  // Wallet-level CapabilityManifest (U7) — composed in the Capabilities dialog, persisted
+  // alongside nodes/edges below. Deliberately NOT wired into /simulate or /publish yet (next
+  // phase); this phase is compose + honest live preview + persist only.
+  const [manifest, setManifest] = useState<CapabilityManifest>(() => emptyManifest());
   // Cosmetic seed data for a new guardrail node's checklist (see DEFAULT_GUARDRAILS
   // doc comment) — not enforcement state, so it's a constant, not a setter pair.
   const guardrails = DEFAULT_GUARDRAILS;
@@ -154,6 +162,7 @@ function Builder() {
     if (result.status === "restored") {
       setNodes(result.draft.nodes);
       setEdges(result.draft.edges);
+      setManifest(result.draft.manifest);
       idRef.current = maxNodeId(result.draft.nodes) + 1;
     } else if (result.status === "corrupt") {
       toast.error("Previous draft couldn't be restored");
@@ -161,16 +170,17 @@ function Builder() {
   }, []);
 
   // Debounced autosave (R16): waits for a ~800ms pause in canvas activity
-  // (drags, wiring, node adds) before persisting, so continuous in-flight
-  // changes don't hammer localStorage on every intermediate frame. Standard
-  // effect-cleanup debounce — each nodes/edges change clears the previous
-  // pending save and schedules a fresh one.
+  // (drags, wiring, node adds, capability-manifest edits) before persisting,
+  // so continuous in-flight changes don't hammer localStorage on every
+  // intermediate frame. Standard effect-cleanup debounce — each
+  // nodes/edges/manifest change clears the previous pending save and
+  // schedules a fresh one.
   useEffect(() => {
     const timer = setTimeout(() => {
-      saveDraftToStorage(nodes, edges);
+      saveDraftToStorage(nodes, edges, manifest);
     }, 800);
     return () => clearTimeout(timer);
-  }, [nodes, edges]);
+  }, [nodes, edges, manifest]);
 
   // Warn on tab close/reload once the canvas has diverged from the default
   // trigger->output starter graph (R16) — registered once and reads live
@@ -569,11 +579,17 @@ function Builder() {
             <div className="flex flex-wrap gap-2 justify-end">
               {(
                 [
-                  { label: "Add PTB", icon: Layers, onClick: addPtb },
-                  { label: "Guardrails", icon: Shield, onClick: addGuardrail },
-                  { label: "Simulate", icon: Play, onClick: openSimulate },
+                  { label: "Add PTB", icon: Layers, onClick: addPtb, badge: undefined },
+                  { label: "Guardrails", icon: Shield, onClick: addGuardrail, badge: undefined },
+                  {
+                    label: "Capabilities",
+                    icon: ShieldCheck,
+                    onClick: () => setCapabilitiesOpen(true),
+                    badge: manifest.rules.length > 0 ? manifest.rules.length : undefined,
+                  },
+                  { label: "Simulate", icon: Play, onClick: openSimulate, badge: undefined },
                 ] as const
-              ).map(({ label, icon: Icon, onClick }) => (
+              ).map(({ label, icon: Icon, onClick, badge }) => (
                 <motion.button
                   key={label}
                   whileHover={{ scale: 1.04, y: -2 }}
@@ -583,6 +599,11 @@ function Builder() {
                   className="inline-flex cursor-pointer items-center gap-2 rounded-full bg-card/90 backdrop-blur border border-border px-3.5 py-2 text-sm font-medium shadow-[var(--shadow-soft)]"
                 >
                   <Icon className="h-4 w-4" /> {label}
+                  {badge !== undefined && (
+                    <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold text-primary-foreground">
+                      {badge}
+                    </span>
+                  )}
                 </motion.button>
               ))}
               <motion.button
@@ -702,6 +723,14 @@ function Builder() {
             edges={edges}
             open
             onOpenChange={(o) => !o && setSimulateOpen(false)}
+          />
+        )}
+        {capabilitiesOpen && (
+          <CapabilitiesDialog
+            open
+            onOpenChange={(o) => !o && setCapabilitiesOpen(false)}
+            manifest={manifest}
+            onChange={setManifest}
           />
         )}
       </AnimatePresence>
