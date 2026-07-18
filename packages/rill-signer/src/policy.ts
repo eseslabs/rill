@@ -4,7 +4,8 @@ import { Transaction } from '@mysten/sui/transactions';
 import { normalizeSuiAddress } from '@mysten/sui/utils';
 import { decimalToBaseUnits, parseU64String } from '../../rill-sdk/src/amounts';
 import { assertExecutionEnvelope, digestUnsignedPtb } from '../../rill-sdk/src/execution-envelope';
-import type { ExecutionEnvelope, RillNetwork } from '../../rill-sdk/src/types';
+import type { EnvelopeStep, ExecutionEnvelope, RillNetwork } from '../../rill-sdk/src/types';
+import { stepValidators } from './steps/registry';
 import {
   expectNormalizedMatch,
   makeReader,
@@ -652,4 +653,96 @@ export function inspectOnboarding(transaction: Transaction, allow: OnboardingAll
   }
 
   return { targets, totalSplitMist, transferRecipients };
+}
+
+// ── inspectGeneric ─────────────────────────────────────────────────────────────────────────────
+//
+// The generalized replacement for inspect()'s hardcoded single-DeepBook walk: it knows only the
+// universal funding chokepoint (one agent_wallet::spend) and the universal PTB-wide invariants
+// (command manifest, terminal merge-to-gas); everything protocol-specific is delegated to the
+// per-nodeType validators in ./steps/registry, each of which independently re-derives its own Move
+// fragment's exact shape from the PTB bytes.
+//
+// NOT wired into validateExecutionEnvelope / LocalSignerPolicy in this unit — LocalSignerPolicy does
+// not have a `steps` field yet (that generalization is a later, separate task). This function takes
+// an explicit params object instead of the policy type so it stays fully decoupled from the
+// still-DeepBook-shaped LocalSignerPolicy until that generalization lands.
+
+export interface InspectGenericParams {
+  walletPackageId: string;
+  walletId: string;
+  agentCapId: string;
+  steps: EnvelopeStep[];
+}
+
+export function inspectGeneric(transaction: Transaction, params: InspectGenericParams) {
+  const data = transaction.getData();
+  const reader = makeReader(data);
+
+  // 1. Universal funding chokepoint: exactly one agent_wallet::spend, SUI, walletId/capId/clock pinned.
+  const walletTarget = normalizeTarget(`${params.walletPackageId}::agent_wallet::spend`);
+  const spendIndex = data.commands.findIndex((command) => targetOf(command) === walletTarget);
+  const spend = data.commands[spendIndex];
+  if (!spend || spend.$kind !== 'MoveCall') throw new Error('PTB is missing the wallet spend.');
+  reader.exactArity(spend.MoveCall.arguments, 4, 'wallet spend');
+  assertTypeArguments(spend.MoveCall.typeArguments, [SUI_COIN_TYPE], 'wallet spend');
+  expectNormalizedMatch(
+    reader.objectArgument(spend.MoveCall.arguments[0], 'wallet'),
+    params.walletId,
+    'walletId mismatch.',
+  );
+  expectNormalizedMatch(
+    reader.objectArgument(spend.MoveCall.arguments[1], 'cap'),
+    params.agentCapId,
+    'agentCapId mismatch.',
+  );
+  expectNormalizedMatch(reader.objectArgument(spend.MoveCall.arguments[3], 'clock'), '0x6', 'clock mismatch.');
+  const spendAmountMist = reader.u64(spend.MoveCall.arguments[2], 'spend amount');
+
+  // 2. Walk the owner-approved steps in order; each validator asserts its own fragment fail-closed.
+  let cursor = spendIndex + 1;
+  const targets: string[] = [];
+  const objectIds: string[] = [normalized(params.walletId), normalized(params.agentCapId), normalized('0x6')];
+  const guards: string[] = [];
+  for (const step of params.steps) {
+    const validate = stepValidators[step.nodeType];
+    if (!validate) throw new Error(`No validator for step ${step.nodeType}.`);
+    const result = validate({ data, reader, cursor, spendIndex, spendAmountMist }, step);
+    cursor = result.cursor;
+    targets.push(...result.targets);
+    objectIds.push(...result.objectIds);
+    guards.push(...result.guards);
+  }
+
+  // 3. Universal command manifest + terminal merge-to-gas of the spend remainder — inherently
+  // whole-transaction invariants that apply once regardless of how many steps compose the PTB
+  // (deepbook.ts deliberately omits these; they belong here, not in any per-step validator).
+  const allowedCommands = data.commands.every(
+    (command) => command.$kind === 'MoveCall' || command.$kind === 'SplitCoins' || command.$kind === 'MergeCoins',
+  );
+  if (!allowedCommands) throw new Error('PTB has an unsupported command kind.');
+  const mergeIndex = data.commands.findIndex((command) => command.$kind === 'MergeCoins');
+  const merge = data.commands[mergeIndex];
+  const mergeSource = merge?.$kind === 'MergeCoins' ? merge.MergeCoins.sources[0] : undefined;
+  if (
+    merge?.$kind !== 'MergeCoins' ||
+    mergeIndex !== data.commands.length - 1 ||
+    merge.MergeCoins.destination.$kind !== 'GasCoin' ||
+    merge.MergeCoins.sources.length !== 1 ||
+    mergeSource?.$kind !== 'Result' ||
+    mergeSource.Result !== spendIndex
+  ) {
+    throw new Error('PTB must end by merging only the wallet spend remainder into gas.');
+  }
+
+  return {
+    targets: [...new Set(targets)],
+    callTargets: data.commands.flatMap((command) => {
+      const target = targetOf(command);
+      return target ? [target] : [];
+    }),
+    objectIds: [...new Set(objectIds)],
+    guards: [...new Set(guards)],
+    spendAmountMist,
+  };
 }
