@@ -232,10 +232,10 @@ const protocolScopeRuleSchema = {
 const slippageFloorRuleSchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['kind', 'minBps'],
+  required: ['kind', 'minOutMist'],
   properties: {
     kind: { type: 'string', enum: ['slippage_floor'] },
-    minBps: { type: 'number', minimum: 0, maximum: 10000 },
+    minOutMist: { type: 'string' },
   },
 } as const;
 
@@ -296,9 +296,8 @@ const capabilityManifestSchema = {
 
 const onChainRuleParamsSchema = {
   type: 'object',
-  required: ['ruleWitness', 'module', 'config'],
+  required: ['module', 'config'],
   properties: {
-    ruleWitness: { type: 'string', description: 'The Move witness struct identifying this rule.' },
     module: { type: 'string', description: 'The Move module the rule\'s prove/config-attach functions live in.' },
     config: { type: 'object', additionalProperties: true },
   },
@@ -314,7 +313,7 @@ const signerPolicySchema = {
       properties: { windowMs: { type: 'string' }, maxMist: { type: 'string' } },
     },
     allowedPackages: { type: 'array', items: { type: 'string' } },
-    minSlippageBps: { type: 'number' },
+    minSlippageOutMist: { type: 'string' },
     allowedCoinTypes: { type: 'array', items: { type: 'string' } },
     allowedRecipients: { type: 'array', items: { type: 'string' } },
     timeWindow: {
@@ -591,7 +590,7 @@ export function buildOpenApiDocument(publicBaseUrl: string) {
                     rules: [
                       { kind: 'budget', totalMist: '5000000000' },
                       { kind: 'rate_limit', windowMs: '3600000', maxMist: '1000000000' },
-                      { kind: 'slippage_floor', minBps: 50 },
+                      { kind: 'slippage_floor', minOutMist: '990000000' },
                     ],
                   },
                 },

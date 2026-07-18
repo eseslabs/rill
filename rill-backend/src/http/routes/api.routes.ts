@@ -137,7 +137,6 @@ function serializeOnChainRuleParams(rules: OnChainRuleParams[]) {
     typeof value === 'bigint' ? value.toString() : value;
 
   return rules.map((rule) => ({
-    ruleWitness: rule.ruleWitness,
     module: rule.module,
     config: Object.fromEntries(
       Object.entries(rule.config).map(([key, value]) => [key, serializeValue(value)]),

@@ -23,7 +23,7 @@ const manifest: CapabilityManifest = {
   rules: [
     { kind: 'budget', totalMist: '5000000000' },
     { kind: 'rate_limit', windowMs: '3600000', maxMist: '1000000000' },
-    { kind: 'slippage_floor', minBps: 50 },
+    { kind: 'slippage_floor', minOutMist: '990000000' },
   ],
 };
 
@@ -81,7 +81,7 @@ test('with a manifest (budget + rate_limit + slippage_floor) it declares all thr
   }
   expect(doc).toContain('Budget');
   expect(doc).toContain('Rate limit');
-  expect(doc).toContain('Slippage floor');
+  expect(doc).toContain('Min swap output');
   expect(doc).not.toContain(NO_MANIFEST_DECLARATION);
 
   assertNoPrivateKeyMaterial(doc);

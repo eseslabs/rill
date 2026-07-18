@@ -185,18 +185,11 @@ export class CompilerService {
    * `compileFlow` call bypassing the HTTP schema layer, same defense-in-depth reasoning as
    * `findFlowStructureIssues` above).
    *
-   * `slippage_floor`'s `prove<T, OutT>(req, wallet, version, coin_out: &Coin<OutT>)` needs a REAL
-   * coin to check against, but at this point in the PTB — before `confirm_spend` has released
-   * anything and before any action has run — no swap output exists yet to borrow (the Move rule's
-   * own test fixture confirms `coin_out` must already exist pre-`confirm_spend`; it is deliberately
-   * NOT the wallet's own budget coin, see `slippage_floor.move`'s doc comment). Reconciling with the
-   * existing guardrail pass-through (`protocols/guard.ts`'s `injectMinOutAssert`, left completely
-   * untouched — it still runs against a swap's REAL output later, exactly as today): this method
-   * satisfies the rule with a coin representing the amount actually being authorized here — split
-   * from `tx.gas` for exactly `amount`, checked against the owner's on-chain-configured floor, then
-   * left in `extraCoins` for the normal settle sweep (KTD-3) to merge back into gas. This is a real,
-   * honest comparison (not a rigged always-pass), just scoped to "this spend meets the floor" rather
-   * than "this swap's fill met the floor" — the latter stays enforced by the untouched pass-through.
+   * `slippage_floor` is enforced PRE-FLIGHT, not on-chain (see `capability-manifest.ts`'s
+   * `toOnChainRuleParams` doc comment) — it never projects a rule module here, so this method emits
+   * no `prove` call and no shadow coin for it. Only the on-chain rule kinds (`budget`, `per_tx`,
+   * `rate_limit`, `protocol_scope`, `asset_scope`, `recipient_allowlist`, `time_window`) reach the
+   * loop below.
    */
   private buildManifestGatedSpend(
     tx: Transaction,
@@ -262,20 +255,14 @@ export class CompilerService {
 
     for (const rule of toOnChainRuleParams(manifest)) {
       const args: unknown[] = [req, tx.object(walletId), tx.object(versionId)];
-      let ruleTypeArgs = typeArgs;
 
       if (rule.module === 'rate_limit' || rule.module === 'time_window') {
         args.push(tx.object(SUI_CLOCK_ID));
-      } else if (rule.module === 'slippage_floor') {
-        const [shadow] = tx.splitCoins(tx.gas, [amount]);
-        args.push(shadow);
-        extraCoins.push({ value: shadow, coinType: SUI_COIN_TYPE });
-        ruleTypeArgs = [coinType, coinType]; // <T, OutT> — OutT is SUI here (see doc comment above).
       }
 
       tx.moveCall({
         target: `${packageId}::${rule.module}::prove`,
-        typeArguments: ruleTypeArgs,
+        typeArguments: typeArgs,
         arguments: args as never[],
       });
     }

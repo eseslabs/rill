@@ -24,7 +24,7 @@ const manifest: CapabilityManifest = {
     { kind: 'per_tx', maxMist: '1000000000' },
     { kind: 'rate_limit', windowMs: '3600000', maxMist: '2000000000' },
     { kind: 'protocol_scope', allowedPackages: [`0x${'a'.repeat(64)}`] },
-    { kind: 'slippage_floor', minBps: 50 },
+    { kind: 'slippage_floor', minOutMist: '990000000' },
     { kind: 'asset_scope', allowedCoinTypes: ['0x2::sui::SUI'] },
     { kind: 'recipient_allowlist', addresses: [`0x${'b'.repeat(64)}`] },
     { kind: 'time_window', notBeforeMs: '1000', notAfterMs: '2000' },
@@ -82,11 +82,19 @@ test('declaration matches toDeclaration output field-for-field (summaryLines + c
 test('onChainRules serializes u64 config fields as decimal strings, not numbers or raw bigint', async () => {
   const response = await previewRequest({ manifest });
   const body = await response.json() as {
-    data: { onChainRules: Array<{ ruleWitness: string; module: string; config: Record<string, unknown> }> };
+    data: { onChainRules: Array<{ module: string; config: Record<string, unknown> }> };
   };
-  const budgetRule = body.data.onChainRules.find((r) => r.ruleWitness === 'BudgetRule');
+  const budgetRule = body.data.onChainRules.find((r) => r.module === 'budget');
   expect(budgetRule?.config.totalMist).toBe('5000000000');
   expect(typeof budgetRule?.config.totalMist).toBe('string');
+});
+
+test('slippage_floor is pre-flight only — absent from onChainRules', async () => {
+  const response = await previewRequest({ manifest });
+  const body = await response.json() as {
+    data: { onChainRules: Array<{ module: string; config: Record<string, unknown> }> };
+  };
+  expect(body.data.onChainRules.some((r) => r.module === 'slippage_floor')).toBe(false);
 });
 
 test('an unknown rule kind is rejected with 422', async () => {

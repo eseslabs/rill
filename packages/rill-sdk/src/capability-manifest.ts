@@ -106,8 +106,14 @@ const ProtocolScopeRuleSchema = z.object({
 
 const SlippageFloorRuleSchema = z.object({
   kind: z.literal('slippage_floor'),
-  /** Minimum acceptable output, expressed in basis points (0..10000) of the quoted amount. */
-  minBps: z.number().finite().min(0).max(10000),
+  /** Minimum acceptable swap output, in base units (absolute, not basis points) — mirrors the
+   *  on-chain guard `rill_guard::guard::assert_min_value(coin, min)`, which only ever compares
+   *  against an absolute floor. Enforced PRE-FLIGHT, never on-chain: at PTB rule-prove time the
+   *  swap's real output does not exist yet (it is the value being computed), so there is nothing
+   *  on-chain to compare against. The floor is enforced twice, earlier in the pipeline — the
+   *  compiler's min-out guardrail refuses to build a PTB whose quoted output undercuts it, and the
+   *  signer independently re-checks the actual swap output before countersigning. */
+  minOutMist: u64String('rules[slippage_floor].minOutMist'),
 }).strict();
 
 const AssetScopeRuleSchema = z.object({
@@ -200,9 +206,14 @@ export const CapabilityManifestSchema = z.object({
 
 export type CapabilityManifest = z.infer<typeof CapabilityManifestSchema>;
 
-// ---- Move module / witness naming ----------------------------------------------------------------
-// One name per rule kind, reused by both `toOnChainRuleParams` (module for the `add_rule<Witness>`
-// call target) and any future U1 Move source that needs to agree on naming with the SDK.
+// ---- Move module naming ---------------------------------------------------------------------------
+// One name per rule kind, reused by both `toOnChainRuleParams` (module for the `add_rule` call
+// target) and any future U1 Move source that needs to agree on naming with the SDK.
+//
+// There is deliberately no per-kind witness name here (removed post-review, M2): every Move rule
+// module's witness struct is literally `Rule`, disambiguated by module path, not by a distinct
+// per-kind type name — and the `add()` wrappers take no witness type argument. A prior version of
+// this file fabricated names like `BudgetRule`/`PerTxRule` that matched nothing on-chain.
 
 const RULE_MODULE_BY_KIND: Record<RuleKind, string> = {
   budget: 'budget',
@@ -215,15 +226,25 @@ const RULE_MODULE_BY_KIND: Record<RuleKind, string> = {
   time_window: 'time_window',
 };
 
-const RULE_WITNESS_BY_KIND: Record<RuleKind, string> = {
-  budget: 'BudgetRule',
-  per_tx: 'PerTxRule',
-  rate_limit: 'RateLimitRule',
-  protocol_scope: 'ProtocolScopeRule',
-  slippage_floor: 'SlippageFloorRule',
-  asset_scope: 'AssetScopeRule',
-  recipient_allowlist: 'RecipientAllowlistRule',
-  time_window: 'TimeWindowRule',
+// ---- Cap enforcement layer --------------------------------------------------------------------
+// Which layer actually enforces each rule kind, exposed on `CapabilityDeclarationCap.enforcement`
+// so downstream renderers can label caps honestly rather than implying every cap is an on-chain
+// guarantee. `on-chain` rules are proved via `add_rule`/`prove` against the real PTB and cannot be
+// bypassed by a misbehaving compiler or signer. `pre-flight` rules (review finding C2) are enforced
+// by the trusted compiler + signer instead, because an on-chain rule can only see self-declared PTB
+// metadata (e.g. a "protocol" argument the PTB itself asserts, not an independently observed fact) —
+// it is not a weaker guarantee in practice (compiler + signer are both trusted), but it is a
+// different one, and the declaration should say so.
+
+const CAP_ENFORCEMENT_BY_KIND: Record<RuleKind, 'on-chain' | 'pre-flight'> = {
+  budget: 'on-chain',
+  per_tx: 'on-chain',
+  rate_limit: 'on-chain',
+  time_window: 'on-chain',
+  protocol_scope: 'pre-flight',
+  slippage_floor: 'pre-flight',
+  asset_scope: 'pre-flight',
+  recipient_allowlist: 'pre-flight',
 };
 
 // ---- Projection 1: on-chain add_rule/prove params -------------------------------------------------
@@ -234,10 +255,7 @@ const RULE_WITNESS_BY_KIND: Record<RuleKind, string> = {
 export type OnChainRuleConfigValue = bigint | number | string | readonly string[] | readonly number[];
 
 export interface OnChainRuleParams {
-  /** The Move witness struct name identifying this rule (combines with the deployed package +
-   *  `module` to form the full `add_rule<Witness>` type argument once U1 ships the Move source). */
-  ruleWitness: string;
-  /** The Move module this rule's `prove`/config-attach functions live in. */
+  /** The Move module this rule's `add_rule`/`prove`/config-attach functions live in. */
   module: string;
   /** Normalized constructor args for that module's rule config, keyed by field name. */
   config: Record<string, OnChainRuleConfigValue>;
@@ -245,48 +263,62 @@ export interface OnChainRuleParams {
 
 /**
  * Projects a validated `CapabilityManifest` to the `add_rule`/`prove` argument shapes U5's
- * compiler assembles into a PTB — one entry per rule, in manifest order. u64-string fields are
- * parsed to `bigint` via `parseU64String` (never floating point); everything else is the
- * schema-validated value unchanged.
+ * compiler assembles into a PTB — one entry per rule that is actually enforced on-chain, in
+ * manifest order. u64-string fields are parsed to `bigint` via `parseU64String` (never floating
+ * point); everything else is the schema-validated value unchanged.
+ *
+ * NOT every rule kind projects here: `slippage_floor` is enforced PRE-FLIGHT (the compiler's
+ * min-out guardrail + the signer), never on-chain, because at PTB rule-prove time the swap's real
+ * output does not exist yet — see `SlippageFloorRuleSchema`'s doc comment. It is intentionally
+ * absent from this projection's output; see `CAP_ENFORCEMENT_BY_KIND` / `toDeclaration` for the
+ * honest per-cap enforcement label surfaced to owners/agents instead.
  */
 export function toOnChainRuleParams(manifest: CapabilityManifest): OnChainRuleParams[] {
-  return manifest.rules.map((rule): OnChainRuleParams => {
-    const ruleWitness = RULE_WITNESS_BY_KIND[rule.kind];
+  const params: OnChainRuleParams[] = [];
+  for (const rule of manifest.rules) {
     const module = RULE_MODULE_BY_KIND[rule.kind];
     switch (rule.kind) {
       case 'budget':
-        return { ruleWitness, module, config: { totalMist: parseU64String(rule.totalMist, 'totalMist') } };
+        params.push({ module, config: { totalMist: parseU64String(rule.totalMist, 'totalMist') } });
+        break;
       case 'per_tx':
-        return { ruleWitness, module, config: { maxMist: parseU64String(rule.maxMist, 'maxMist') } };
+        params.push({ module, config: { maxMist: parseU64String(rule.maxMist, 'maxMist') } });
+        break;
       case 'rate_limit':
-        return {
-          ruleWitness,
+        params.push({
           module,
           config: {
             windowMs: parseU64String(rule.windowMs, 'windowMs'),
             maxMist: parseU64String(rule.maxMist, 'maxMist'),
           },
-        };
+        });
+        break;
       case 'protocol_scope':
-        return { ruleWitness, module, config: { allowedPackages: rule.allowedPackages } };
+        params.push({ module, config: { allowedPackages: rule.allowedPackages } });
+        break;
       case 'slippage_floor':
-        return { ruleWitness, module, config: { minBps: rule.minBps } };
+        // Pre-flight only (see doc comment above and on `SlippageFloorRuleSchema`) — no
+        // add_rule/prove projection exists for this rule kind.
+        break;
       case 'asset_scope':
-        return { ruleWitness, module, config: { allowedCoinTypes: rule.allowedCoinTypes } };
+        params.push({ module, config: { allowedCoinTypes: rule.allowedCoinTypes } });
+        break;
       case 'recipient_allowlist':
-        return { ruleWitness, module, config: { addresses: rule.addresses } };
+        params.push({ module, config: { addresses: rule.addresses } });
+        break;
       case 'time_window':
         // Move `time_window::add(not_before_ms, not_after_ms)` — both required.
-        return {
-          ruleWitness,
+        params.push({
           module,
           config: {
             notBeforeMs: parseU64String(rule.notBeforeMs, 'notBeforeMs'),
             notAfterMs: parseU64String(rule.notAfterMs, 'notAfterMs'),
           },
-        };
+        });
+        break;
     }
-  });
+  }
+  return params;
 }
 
 // ---- Projection 2: signer pre-flight policy (SHAPE ONLY, U6 contract) -----------------------------
@@ -296,7 +328,9 @@ export interface SignerPolicy {
   perTxMaxMist?: string;
   window?: { windowMs: string; maxMist: string };
   allowedPackages?: string[];
-  minSlippageBps?: number;
+  /** Absolute minimum acceptable swap output, in base units — the floor the signer checks against
+   *  the real swap output before countersigning (see `SlippageFloorRuleSchema`'s doc comment). */
+  minSlippageOutMist?: string;
   allowedCoinTypes?: string[];
   allowedRecipients?: string[];
   timeWindow?: { notBeforeMs: string; notAfterMs: string };
@@ -328,7 +362,7 @@ export function toSignerPolicy(manifest: CapabilityManifest): SignerPolicy {
         policy.allowedPackages = rule.allowedPackages;
         break;
       case 'slippage_floor':
-        policy.minSlippageBps = rule.minBps;
+        policy.minSlippageOutMist = rule.minOutMist;
         break;
       case 'asset_scope':
         policy.allowedCoinTypes = rule.allowedCoinTypes;
@@ -351,6 +385,11 @@ export function toSignerPolicy(manifest: CapabilityManifest): SignerPolicy {
 export interface CapabilityDeclarationCap {
   label: string;
   value: string;
+  /** Which layer actually enforces this cap — `'on-chain'` (proved against the real PTB via
+   *  `add_rule`/`prove`) or `'pre-flight'` (enforced by the trusted compiler + signer instead,
+   *  because an on-chain rule can only see self-declared PTB metadata — review finding C2). See
+   *  `CAP_ENFORCEMENT_BY_KIND` for the per-kind assignment. */
+  enforcement: 'on-chain' | 'pre-flight';
 }
 
 export interface CapabilityDeclaration {
@@ -389,53 +428,74 @@ function formatWindow(windowMs: string): string {
   return `${windowMs}ms`;
 }
 
-/** Formats a `time_window` rule as a `"not before <ISO>; not after <ISO>"` clause. Both bounds are
- *  always present (schema-required, mirroring Move `time_window::add`), so there is no vacuous case. */
+/** The largest millisecond offset JS `Date` can represent (`±8,640,000,000,000,000`, ECMA-262
+ *  20.4.1.1) — a schema-valid u64 ms value can exceed this by a wide margin. */
+const MAX_SAFE_DATE_MS = 8_640_000_000_000_000;
+
+/** Formats a millisecond timestamp as an ISO string, or — if it falls outside JS `Date`'s
+ *  representable range — the raw millisecond value with an explanatory suffix, rather than
+ *  constructing an `Invalid Date` and letting `.toISOString()` throw `RangeError`. */
+function formatDateMs(ms: string): string {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || Math.abs(n) > MAX_SAFE_DATE_MS) {
+    return `${ms} ms (beyond representable date)`;
+  }
+  return new Date(n).toISOString();
+}
+
+/** Formats a `time_window` rule as a `"not before <ISO>; before <ISO> (exclusive)"` clause,
+ *  matching Move's half-open `[notBefore, notAfter)` semantics — the upper bound is explicitly
+ *  marked exclusive rather than phrased as a symmetric "not after". Both bounds are always present
+ *  (schema-required, mirroring Move `time_window::add`), so there is no vacuous case. */
 function describeTimeWindow(rule: TimeWindowRule): string {
-  const before = new Date(Number(rule.notBeforeMs)).toISOString();
-  const after = new Date(Number(rule.notAfterMs)).toISOString();
-  return `not before ${before}; not after ${after}`;
+  const before = formatDateMs(rule.notBeforeMs);
+  const after = formatDateMs(rule.notAfterMs);
+  return `not before ${before}; before ${after} (exclusive)`;
 }
 
 /** Renders one rule to a `{summaryLine, cap}` pair of plain-language text (KTD-6: declares exactly
  *  the active rule, no aspirational claims). */
 function describeRule(rule: CapabilityRule, walletCoinType: string): { summaryLine: string; cap: CapabilityDeclarationCap } {
+  const enforcement = CAP_ENFORCEMENT_BY_KIND[rule.kind];
   switch (rule.kind) {
     case 'budget': {
       const value = formatAmount(rule.totalMist, walletCoinType);
-      return { summaryLine: `Budget ≤ ${value} total`, cap: { label: 'Budget', value } };
+      return { summaryLine: `Budget ≤ ${value} total`, cap: { label: 'Budget', value, enforcement } };
     }
     case 'per_tx': {
       const value = formatAmount(rule.maxMist, walletCoinType);
-      return { summaryLine: `Per-transaction ≤ ${value}`, cap: { label: 'Per-tx max', value } };
+      return { summaryLine: `Per-transaction ≤ ${value}`, cap: { label: 'Per-tx max', value, enforcement } };
     }
     case 'rate_limit': {
       const amount = formatAmount(rule.maxMist, walletCoinType);
       const window = formatWindow(rule.windowMs);
       return {
         summaryLine: `≤ ${amount} per ${window} window`,
-        cap: { label: 'Rate limit', value: `${amount} / ${window}` },
+        cap: { label: 'Rate limit', value: `${amount} / ${window}`, enforcement },
       };
     }
     case 'protocol_scope': {
       const value = rule.allowedPackages.join(', ');
-      return { summaryLine: `Only protocols: ${value}`, cap: { label: 'Allowed protocols', value } };
+      return { summaryLine: `Only protocols: ${value}`, cap: { label: 'Allowed protocols', value, enforcement } };
     }
     case 'slippage_floor': {
-      const value = `${rule.minBps} bps`;
-      return { summaryLine: `Slippage floor ${value}`, cap: { label: 'Slippage floor', value } };
+      const value = formatAmount(rule.minOutMist, walletCoinType);
+      return {
+        summaryLine: `Min swap output ≥ ${value}`,
+        cap: { label: 'Min swap output', value, enforcement },
+      };
     }
     case 'asset_scope': {
       const value = rule.allowedCoinTypes.join(', ');
-      return { summaryLine: `Only coins: ${value}`, cap: { label: 'Allowed coins', value } };
+      return { summaryLine: `Only coins: ${value}`, cap: { label: 'Allowed coins', value, enforcement } };
     }
     case 'recipient_allowlist': {
       const value = rule.addresses.join(', ');
-      return { summaryLine: `Only recipients: ${value}`, cap: { label: 'Allowed recipients', value } };
+      return { summaryLine: `Only recipients: ${value}`, cap: { label: 'Allowed recipients', value, enforcement } };
     }
     case 'time_window': {
       const value = describeTimeWindow(rule);
-      return { summaryLine: `Time window: ${value}`, cap: { label: 'Time window', value } };
+      return { summaryLine: `Time window: ${value}`, cap: { label: 'Time window', value, enforcement } };
     }
   }
 }

@@ -556,7 +556,7 @@ test('request_spend carries amount/target_package/recipient from the flow and op
   assertEveryProducedCoinConsumedExactlyOnce(result.transaction);
 });
 
-test('a swap+slippage manifest injects the slippage_floor prove', async () => {
+test('a swap+slippage manifest injects NO slippage_floor prove — enforced pre-flight, not on-chain', async () => {
   const flow = { nodes: [cetusSwapNode('s1')], edges: [] };
 
   const result = await compilerService.compileFlow(flow, {
@@ -565,7 +565,7 @@ test('a swap+slippage manifest injects the slippage_floor prove', async () => {
       ...manifestWallet,
       capabilityManifest: manifest([
         { kind: 'budget', totalMist: '5000000000' },
-        { kind: 'slippage_floor', minBps: 50 },
+        { kind: 'slippage_floor', minOutMist: '990000000' },
       ]),
     },
   });
@@ -573,14 +573,12 @@ test('a swap+slippage manifest injects the slippage_floor prove', async () => {
   const slippageProve = commands.find(
     (c) => c.$kind === 'MoveCall' && c.MoveCall.function === 'prove' && c.MoveCall.module === 'slippage_floor',
   );
-  expect(slippageProve?.$kind).toBe('MoveCall');
-  if (slippageProve?.$kind !== 'MoveCall') throw new Error('expected a MoveCall');
-  // prove<T, OutT>(req, wallet, version, coin_out) — 4 arguments, 2 type arguments.
-  expect(slippageProve.MoveCall.arguments).toHaveLength(4);
-  expect(slippageProve.MoveCall.typeArguments).toEqual([SUI, SUI]);
+  // slippage_floor is pre-flight only (see capability-manifest.ts's toOnChainRuleParams) — it never
+  // projects a rule module, so no prove call (and no shadow-coin split) is ever emitted for it.
+  expect(slippageProve).toBeUndefined();
 
   assertEveryProducedCoinConsumedExactlyOnce(result.transaction, {
-    expectedProveModules: ['budget', 'slippage_floor'],
+    expectedProveModules: ['budget'],
   });
 });
 
