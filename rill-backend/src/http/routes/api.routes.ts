@@ -17,6 +17,7 @@ import {
   HERO_ACTION_NAME,
 } from '../../features/mcp/tool-schema';
 import { buildSkillDoc } from '../../features/mcp/skill-doc';
+import { renderAgentInstructions } from '../../features/mcp/agent-instructions';
 import { handleMcpJsonRpc } from '../../features/mcp/mcp.service';
 import { prepareSetupPlan } from '../../features/setup/setup.service';
 import { walrusAuditService } from '../../features/walrus/audit.service';
@@ -232,6 +233,16 @@ apiRouter.get('/skills/:id/skill.md', (c) => {
   const skill = skillsStore.get(c.req.param('id'));
   if (!skill) return c.text('Skill not found', 404);
   return c.text(buildSkillDoc(skill), 200, { 'content-type': 'text/markdown; charset=utf-8' });
+});
+
+/** Ready-to-paste agent-instructions template (task 4 / R10) — the mcp-add commands, the correct
+ *  tool sequence, and the active guardrails declared honestly. `PublishedSkill` does not carry a
+ *  `CapabilityManifest` yet (owner-set manifest wiring is a later unit), so this renders the honest
+ *  no-wallet-budget branch until that lands. */
+apiRouter.get('/skills/:id/instructions.md', (c) => {
+  const skill = skillsStore.get(c.req.param('id'));
+  if (!skill) return c.text('Skill not found', 404);
+  return c.text(renderAgentInstructions(skill), 200, { 'content-type': 'text/markdown; charset=utf-8' });
 });
 
 apiRouter.get('/skills', (c) => {
