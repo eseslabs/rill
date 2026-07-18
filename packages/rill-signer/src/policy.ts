@@ -57,6 +57,25 @@ export interface LocalSignerPolicy {
     payWithDeep: boolean;
     expiration: string;
   };
+  /**
+   * WS2 generic signer policy: an owner-approved, ORDERED plan of composed-flow steps (Cetus swap,
+   * Haedal stake, DeepBook order, ...). OPTIONAL and purely additive — `version` stays '1' because
+   * every existing run-set on disk has no `steps` field and must keep validating through the
+   * untouched legacy DeepBook path below unchanged. When `steps` IS present (and the envelope also
+   * declares `steps`), `validateExecutionEnvelope` takes the NEW generic branch instead: it requires
+   * `envelope.steps` to deep-equal this array exactly (the owner approved exactly this plan), then
+   * walks `inspectGeneric`'s per-nodeType structural validators against the actual PTB bytes. The two
+   * branches are mutually exclusive and share no validation code, by design — see the dispatcher in
+   * `validateExecutionEnvelope` below.
+   */
+  steps?: EnvelopeStep[];
+  /**
+   * WS2 generic signer policy: informational custody-model annotation carried on the policy file,
+   * mirroring `config.ts`'s `CustodyMode`. Not read by `validateExecutionEnvelope` or
+   * `assertCapabilitiesActive` in this unit — reserved for a later onboarding/`wallet_status` wiring
+   * that wants to know which custody model a given run-set's policy was written for.
+   */
+  custodyMode?: 'bounded' | 'direct';
 }
 
 export interface ValidatedEnvelope {
@@ -310,6 +329,35 @@ export async function validateExecutionEnvelope(
   gasCeilingMist?: bigint,
 ): Promise<ValidatedEnvelope> {
   const envelope = assertExecutionEnvelope(value);
+  // WS2 generic signer policy — branch point. A step-bearing envelope validated against a
+  // step-bearing policy takes the NEW generic path (inspectGeneric + per-step structural
+  // validators); every other combination — including every existing run-set, which has no
+  // `policy.steps` — takes the EXISTING DeepBook `inspect()` path completely UNCHANGED. The two
+  // paths share no validation code below this point, by design: the legacy path must stay
+  // byte-for-byte identical to what it validated before this branch existed (it is the audited,
+  // proven hero flow — R5-R11), so it is reproduced verbatim in validateLegacyEnvelope rather than
+  // partially merged with the new generic logic in validateGenericEnvelope.
+  if (envelope.steps !== undefined && policy.steps !== undefined) {
+    return validateGenericEnvelope(envelope, signerAddress, signerNetwork, policy, now, gasCeilingMist);
+  }
+  return validateLegacyEnvelope(envelope, signerAddress, signerNetwork, policy, now, gasCeilingMist);
+}
+
+/**
+ * The ORIGINAL, single-DeepBook `validateExecutionEnvelope` body — reproduced verbatim (identical
+ * checks, identical order, identical error text) behind the branch above. Every pre-existing test in
+ * policy.test.ts exercises this function through the dispatcher and must keep passing unmodified. Do
+ * not "improve" or reorder anything in here without re-auditing every one of those tests — this is
+ * the proven, audited hero path (R5-R11).
+ */
+async function validateLegacyEnvelope(
+  envelope: ExecutionEnvelope,
+  signerAddress: string,
+  signerNetwork: RillNetwork,
+  policy: LocalSignerPolicy,
+  now: number,
+  gasCeilingMist: bigint | undefined,
+): Promise<ValidatedEnvelope> {
   const expiresAt = Date.parse(envelope.expiresAt);
   if (!Number.isFinite(expiresAt)) throw new Error('ExecutionEnvelope expiresAt is invalid.');
   if (expiresAt <= now) throw new Error('ExecutionEnvelope expired.');
@@ -448,6 +496,213 @@ export async function validateExecutionEnvelope(
   };
 }
 
+/**
+ * WS2 generic signer policy: recursively sorts object keys (arrays keep their order — step ORDER is
+ * security-relevant and must not be normalized away) so two structurally-equal step manifests compare
+ * equal by JSON.stringify regardless of property insertion order, including inside nested objects
+ * (e.g. a `deepbook_limit_order` step's `order` field). A naive `JSON.stringify(value, Object.keys(...))`
+ * replacer-array approach would silently blank out nested objects whose own keys are not in the
+ * top-level key list — this walks the whole structure instead.
+ */
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value !== null && typeof value === 'object') {
+    return Object.keys(value as Record<string, unknown>)
+      .sort()
+      .reduce<Record<string, unknown>>((acc, key) => {
+        acc[key] = canonicalize((value as Record<string, unknown>)[key]);
+        return acc;
+      }, {});
+  }
+  return value;
+}
+
+/** WS2 generic signer policy: the owner approved exactly this ordered plan — envelope.steps must
+ * deep-equal policy.steps field-by-field (including nested fields and array order), not merely have
+ * matching top-level shape. */
+function stepsEqual(a: readonly EnvelopeStep[], b: readonly EnvelopeStep[]): boolean {
+  return JSON.stringify(canonicalize(a)) === JSON.stringify(canonicalize(b));
+}
+
+/**
+ * WS2 generic signer policy: the SAME per-nodeType "which objects does this step declare" knowledge
+ * the step validators in ./steps/*.ts independently encode in their own StepResult.objectIds —
+ * written again here, derived straight from policy.steps rather than from inspectGeneric's internal
+ * walk, as a second, independent derivation. This mirrors the legacy path's `policyObjectIds` above
+ * (computed straight from policy fields, not reused from inspect()'s own Set): defense in depth
+ * against a bug in a step validator silently under- or over-reporting its objects.
+ */
+function stepDeclaredObjectIds(step: EnvelopeStep): string[] {
+  switch (step.nodeType) {
+    case 'cetus_swap':
+      return [step.poolId];
+    case 'haedal_stake':
+      return [];
+    case 'deepbook_limit_order':
+      return [step.balanceManagerId, step.tradeCapId, step.poolId];
+    default: {
+      const exhaustive: never = step;
+      throw new Error(`Unknown step nodeType ${(exhaustive as { nodeType?: string }).nodeType}.`);
+    }
+  }
+}
+
+/**
+ * WS2 generic signer policy: validates a step-bearing envelope against a step-bearing policy. Shares
+ * no code with validateLegacyEnvelope by design (see the dispatcher's comment) — every "keep verbatim"
+ * universal invariant below is reproduced with IDENTICAL logic and error text to its legacy twin,
+ * rather than factored into a shared helper, so neither path can be destabilized by a change aimed at
+ * the other.
+ */
+async function validateGenericEnvelope(
+  envelope: ExecutionEnvelope,
+  signerAddress: string,
+  signerNetwork: RillNetwork,
+  policy: LocalSignerPolicy,
+  now: number,
+  gasCeilingMist: bigint | undefined,
+): Promise<ValidatedEnvelope> {
+  const policySteps = policy.steps;
+  const envelopeSteps = envelope.steps;
+  if (!policySteps || !envelopeSteps) {
+    // Unreachable in practice: the dispatcher only calls this function when both are already
+    // defined. This guard exists purely so TypeScript can narrow `EnvelopeStep[] | undefined` to
+    // `EnvelopeStep[]` for the rest of this function.
+    throw new Error('Generic envelope validation requires both envelope.steps and policy.steps.');
+  }
+
+  const expiresAt = Date.parse(envelope.expiresAt);
+  if (!Number.isFinite(expiresAt)) throw new Error('ExecutionEnvelope expiresAt is invalid.');
+  if (expiresAt <= now) throw new Error('ExecutionEnvelope expired.');
+  if (expiresAt > now + 5 * 60_000) {
+    throw new Error('ExecutionEnvelope exceeds the five-minute maximum TTL.');
+  }
+  if (envelope.network !== signerNetwork || envelope.network !== policy.network) {
+    throw new Error('ExecutionEnvelope network mismatch.');
+  }
+  if (
+    normalized(envelope.sender) !== normalized(signerAddress) ||
+    normalized(envelope.sender) !== normalized(policy.sender)
+  ) {
+    throw new Error('ExecutionEnvelope sender mismatch.');
+  }
+  if (envelope.actionId !== policy.actionId) throw new Error('ExecutionEnvelope actionId mismatch.');
+
+  // Only the three identity fields every node type shares are pinned here (walletPackageId/
+  // walletId/agentCapId) — unlike the legacy path, balanceManagerId/tradeCapId are NOT universal
+  // (a pure Cetus->Haedal plan has neither); any DeepBook step's own balanceManagerId/tradeCapId are
+  // instead pinned per-step by deepbookStepValidator inside inspectGeneric below.
+  const identityPairs: Array<[string, string, string]> = [
+    ['walletPackageId', envelope.walletPackageId, policy.walletPackageId],
+    ['walletId', envelope.walletId, policy.walletId],
+    ['agentCapId', envelope.agentCapId, policy.agentCapId],
+  ];
+  for (const [name, actual, expected] of identityPairs) {
+    if (normalized(actual) !== normalized(expected)) {
+      throw new Error(`ExecutionEnvelope ${name} mismatch.`);
+    }
+  }
+
+  // The owner approved exactly this ordered plan — replaces the legacy path's resolvedParams/
+  // demoParams equality checks (which are DeepBook-shaped and meaningless for a generic flow).
+  if (!stepsEqual(envelopeSteps, policySteps)) {
+    throw new Error('ExecutionEnvelope steps differ from the local policy.');
+  }
+
+  if (!envelope.simulation.ok || envelope.simulation.verification !== 'verified') {
+    throw new Error('ExecutionEnvelope simulation is not a verified success.');
+  }
+  if (gasCeilingMist !== undefined) {
+    const gasEstimateMist = nonNegativeIntegerMist(
+      envelope.simulation.gasEstimate,
+      'ExecutionEnvelope simulation gasEstimate',
+    );
+    if (gasEstimateMist > gasCeilingMist) {
+      throw new Error('ExecutionEnvelope simulation gasEstimate exceeds the local gas ceiling.');
+    }
+  }
+  const requiredGuards = policy.requiredGuards.map(normalizeTarget);
+  if (!sameValues(envelope.requiredGuards.map(normalizeTarget), requiredGuards)) {
+    throw new Error('ExecutionEnvelope required guard policy mismatch.');
+  }
+  if (await digestUnsignedPtb(envelope.unsignedPtb) !== envelope.actionDigest) {
+    throw new Error('ExecutionEnvelope actionDigest mismatch.');
+  }
+
+  let transaction: Transaction;
+  try {
+    transaction = Transaction.from(Buffer.from(envelope.unsignedPtb, 'base64').toString('utf8'));
+  } catch {
+    throw new Error('ExecutionEnvelope unsignedPtb is invalid.');
+  }
+
+  // The signer trusts ITS OWN approved plan (policySteps), not the backend's envelope.steps, to
+  // drive structural inspection — the deep-equal check above already proved the two agree, but
+  // inspectGeneric is handed the locally-loaded one on principle (mirrors the legacy path always
+  // inspecting against `policy`, never `envelope`, fields).
+  const inspected = inspectGeneric(transaction, {
+    walletPackageId: policy.walletPackageId,
+    walletId: policy.walletId,
+    agentCapId: policy.agentCapId,
+    steps: policySteps,
+  });
+  const data = transaction.getData();
+  if (typeof data.sender !== 'string' || normalized(data.sender) !== normalized(envelope.sender)) {
+    throw new Error('PTB sender mismatch.');
+  }
+  const envelopeTargets = envelope.allowedTargets.map(normalizeTarget);
+  const policyTargets = policy.allowedTargets.map(normalizeTarget);
+  if (!sameValues(inspected.targets, envelopeTargets)) {
+    throw new Error('PTB target manifest mismatch.');
+  }
+  const policyTargetSet = new Set(policyTargets);
+  const offScope = inspected.targets.find((target) => !policyTargetSet.has(target));
+  if (offScope) throw new Error(`PTB contains off-scope target ${offScope}.`);
+  if (
+    inspected.callTargets.length !== policyTargets.length ||
+    !inspected.callTargets.every((target, index) => target === policyTargets[index])
+  ) {
+    throw new Error('PTB target sequence differs from the local policy.');
+  }
+  for (const guard of requiredGuards) {
+    if (!inspected.targets.includes(guard)) throw new Error(`PTB is missing required guard ${guard}.`);
+  }
+  const envelopeObjects = envelope.requiredObjectIds.map(normalized);
+  if (!sameValues(inspected.objectIds, envelopeObjects)) {
+    throw new Error('PTB requiredObjectIds manifest mismatch.');
+  }
+  const expectedObjectIds = [
+    policy.walletId,
+    policy.agentCapId,
+    '0x6',
+    ...policySteps.flatMap(stepDeclaredObjectIds),
+  ].map(normalized);
+  if (!sameValues(inspected.objectIds, expectedObjectIds)) {
+    throw new Error('PTB object policy must contain exactly the step-declared objects and Sui clock.');
+  }
+  // Independent hard cap, checked BEFORE the sum-of-steps equality below — mirrors the legacy path's
+  // maxAmountMist-before-demoParams ordering (R10): the local policy's absolute ceiling and the
+  // steps' declared total are two unrelated bounds, so neither can be satisfied by loosening the
+  // other.
+  if (inspected.spendAmountMist > parseU64String(policy.maxAmountMist, 'Local policy maxAmountMist')) {
+    throw new Error('PTB amount exceeds maxAmountMist.');
+  }
+  const expectedStepsSpendMist = policySteps.reduce(
+    (sum, step) => sum + parseU64String(step.spendAmountMist, `Local policy step ${step.nodeType} spendAmountMist`),
+    0n,
+  );
+  if (inspected.spendAmountMist !== expectedStepsSpendMist) {
+    throw new Error('PTB amount differs from the sum of the declared steps.');
+  }
+
+  return {
+    transaction,
+    targets: inspected.targets,
+    objectIds: inspected.objectIds,
+    spendAmountMist: inspected.spendAmountMist,
+  };
+}
+
 export async function assertCapabilitiesActive(
   client: Pick<SuiGrpcClient, 'getObject'>,
   policy: LocalSignerPolicy,
@@ -489,10 +744,27 @@ export async function assertCapabilitiesActive(
     throw new Error('AgentWallet balance would fall below minimumRemainingMist after this action.');
   }
 
-  const capabilities = [
+  // WS2 generic signer policy: AgentCap is always checked. TradeCap is checked ONLY when a
+  // deepbook_limit_order step is present — reading ITS OWN tradeCapId/balanceManagerId, not the
+  // legacy policy.tradeCapId/balanceManagerId fields, so a mixed multi-step plan is bound to whatever
+  // BalanceManager/TradeCap pair that specific step actually declares. When policy.steps is absent
+  // entirely (the legacy path), behavior is EXACTLY the prior hardcoded [AgentCap, TradeCap] pair —
+  // unchanged, still reading policy.tradeCapId/policy.balanceManagerId.
+  const policySteps = policy.steps;
+  const capabilities: Array<readonly [string, string, string, string]> = [
     ['AgentCap', policy.agentCapId, 'wallet', policy.walletId],
-    ['TradeCap', policy.tradeCapId, 'balance_manager_id', policy.balanceManagerId],
-  ] as const;
+  ];
+  if (policySteps === undefined) {
+    capabilities.push(['TradeCap', policy.tradeCapId, 'balance_manager_id', policy.balanceManagerId]);
+  } else {
+    const deepbookStep = policySteps.find(
+      (step): step is Extract<EnvelopeStep, { nodeType: 'deepbook_limit_order' }> =>
+        step.nodeType === 'deepbook_limit_order',
+    );
+    if (deepbookStep) {
+      capabilities.push(['TradeCap', deepbookStep.tradeCapId, 'balance_manager_id', deepbookStep.balanceManagerId]);
+    }
+  }
   for (const [label, objectId, bindingField, expectedBinding] of capabilities) {
     const object = await client.getObject({
       objectId,
