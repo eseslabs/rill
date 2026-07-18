@@ -267,11 +267,15 @@ export interface OnChainRuleParams {
  * manifest order. u64-string fields are parsed to `bigint` via `parseU64String` (never floating
  * point); everything else is the schema-validated value unchanged.
  *
- * NOT every rule kind projects here: `slippage_floor` is enforced PRE-FLIGHT (the compiler's
- * min-out guardrail + the signer), never on-chain, because at PTB rule-prove time the swap's real
- * output does not exist yet — see `SlippageFloorRuleSchema`'s doc comment. It is intentionally
- * absent from this projection's output; see `CAP_ENFORCEMENT_BY_KIND` / `toDeclaration` for the
- * honest per-cap enforcement label surfaced to owners/agents instead.
+ * NOT every rule kind projects here: only `budget`, `per_tx`, `rate_limit`, and `time_window` are
+ * proved against the real PTB on-chain. `protocol_scope`, `asset_scope`, `recipient_allowlist`,
+ * and `slippage_floor` are enforced PRE-FLIGHT instead — by the trusted compiler cross-check plus
+ * the signer, never on-chain — because an on-chain rule can only ever compare against a single
+ * self-declared PTB metadata value, which review finding C2 identified as decorative rather than
+ * a real guarantee (and, for `slippage_floor` specifically, the swap's real output does not exist
+ * yet at PTB rule-prove time — see `SlippageFloorRuleSchema`'s doc comment). These four kinds are
+ * intentionally absent from this projection's output; see `CAP_ENFORCEMENT_BY_KIND` /
+ * `toDeclaration` for the honest per-cap enforcement label surfaced to owners/agents instead.
  */
 export function toOnChainRuleParams(manifest: CapabilityManifest): OnChainRuleParams[] {
   const params: OnChainRuleParams[] = [];
@@ -294,17 +298,12 @@ export function toOnChainRuleParams(manifest: CapabilityManifest): OnChainRulePa
         });
         break;
       case 'protocol_scope':
-        params.push({ module, config: { allowedPackages: rule.allowedPackages } });
-        break;
       case 'slippage_floor':
-        // Pre-flight only (see doc comment above and on `SlippageFloorRuleSchema`) — no
-        // add_rule/prove projection exists for this rule kind.
-        break;
       case 'asset_scope':
-        params.push({ module, config: { allowedCoinTypes: rule.allowedCoinTypes } });
-        break;
       case 'recipient_allowlist':
-        params.push({ module, config: { addresses: rule.addresses } });
+        // Pre-flight only (see doc comment above) — no add_rule/prove projection exists for
+        // these rule kinds; an on-chain check of a single self-declared metadata value is
+        // decorative (review C2).
         break;
       case 'time_window':
         // Move `time_window::add(not_before_ms, not_after_ms)` — both required.

@@ -11,8 +11,7 @@
 /// stored, or discarded — the transaction can only succeed by routing it through `confirm_spend`,
 /// which asserts every attached rule's receipt is present.
 ///
-/// Rules are independent modules (`agent_wallet::budget`, `::per_tx`, `::rate_limit`,
-/// `::protocol_scope`, `::asset_scope`, `::recipient_allowlist`, `::time_window`)
+/// Rules are independent modules (`agent_wallet::budget`, `::per_tx`, `::rate_limit`, `::time_window`)
 /// that attach their config as a dynamic field on `SpendPolicy`, keyed by their own witness type —
 /// mirroring `sui::transfer_policy::add_rule`. Because rule configs live in dynamic fields rather than
 /// `AgentWallet`/`SpendPolicy` struct fields, new rule types ship via in-place package upgrade
@@ -71,9 +70,9 @@ module agent_wallet::agent_wallet {
 
     /// Shared object: the agent's capped, revocable wallet. `T` = the budget coin type (any token).
     /// Deliberately minimal — custody + identity + hard kill-switch only. Every *composable*
-    /// restriction (budget ceiling, per-tx cap, rolling window, protocol/asset/recipient scope, time
-    /// window) lives in `policy` as a dynamic field, never as a struct field here, so this struct's
-    /// layout never needs to change to add a new rule type.
+    /// restriction (budget ceiling, per-tx cap, rolling window, time window) lives in `policy` as a
+    /// dynamic field, never as a struct field here, so this struct's layout never needs to change to
+    /// add a new rule type.
     public struct AgentWallet<phantom T> has key {
         id: UID,
         owner: address,
@@ -124,10 +123,6 @@ module agent_wallet::agent_wallet {
     public struct SpendRequest {
         wallet: ID,
         amount: u64,
-        target_package: address,
-        coin_in: TypeName,
-        coin_out: TypeName,
-        recipient: address,
         receipts: VecSet<TypeName>,
     }
 
@@ -215,10 +210,6 @@ module agent_wallet::agent_wallet {
         cap: &AgentCap,
         version: &Version,
         amount: u64,
-        target_package: address,
-        coin_in: TypeName,
-        coin_out: TypeName,
-        recipient: address,
         clock: &Clock,
         ctx: &TxContext,
     ): SpendRequest {
@@ -231,15 +222,7 @@ module agent_wallet::agent_wallet {
         assert!(amount > 0, E_ZERO_AMOUNT);
         assert!(amount <= wallet.budget.value(), E_INSUFFICIENT_FUNDS);
 
-        SpendRequest {
-            wallet: object::id(wallet),
-            amount,
-            target_package,
-            coin_in,
-            coin_out,
-            recipient,
-            receipts: vec_set::empty(),
-        }
+        SpendRequest { wallet: object::id(wallet), amount, receipts: vec_set::empty() }
     }
 
     /// Adds a rule's receipt to the request, unblocking it — called by a rule module's own `prove`
@@ -270,15 +253,7 @@ module agent_wallet::agent_wallet {
         ctx: &mut TxContext,
     ): Coin<T> {
         version.check_is_valid();
-        let SpendRequest {
-            wallet: req_wallet,
-            amount,
-            target_package: _,
-            coin_in: _,
-            coin_out: _,
-            recipient: _,
-            receipts,
-        } = req;
+        let SpendRequest { wallet: req_wallet, amount, receipts } = req;
         assert!(req_wallet == object::id(wallet), E_WRONG_WALLET);
         assert!(!wallet.revoked, E_REVOKED);
         assert!(clock.timestamp_ms() < wallet.expires_at_ms, E_EXPIRED);
@@ -306,10 +281,6 @@ module agent_wallet::agent_wallet {
     // ── SpendRequest views (used by rule modules' `prove`) ──
     public fun request_wallet(req: &SpendRequest): ID { req.wallet }
     public fun request_amount(req: &SpendRequest): u64 { req.amount }
-    public fun request_target_package(req: &SpendRequest): address { req.target_package }
-    public fun request_coin_in(req: &SpendRequest): TypeName { req.coin_in }
-    public fun request_coin_out(req: &SpendRequest): TypeName { req.coin_out }
-    public fun request_recipient(req: &SpendRequest): address { req.recipient }
 
     // ══════════════════════════════════════════════════════════════════════
     // Rule attach/detach — owner-only (R4: the agent can never mutate rules)

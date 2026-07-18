@@ -21,20 +21,6 @@ export interface AgentWalletBinding {
    * Gates `create_wallet`/`request_spend`/`confirm_spend`/every rule's `prove` (U1).
    */
   versionId?: string;
-  /**
-   * `request_spend`'s `target_package` metadata — the protocol package this spend authorizes
-   * interacting with, checked by an attached `protocol_scope` rule. Required when
-   * `capabilityManifest` is set (no safe default: unlike `recipient`, there is no flow-derived
-   * fallback that is honest for an arbitrary flow shape).
-   */
-  targetPackage?: string;
-  /**
-   * `request_spend`'s `recipient` metadata, checked by an attached `recipient_allowlist` rule.
-   * Falls back to `CompileOptions.sender` (the owner) when a manifest is present and this is
-   * omitted — a spend's proceeds default to going back to the flow's sender absent a more specific
-   * recipient.
-   */
-  recipient?: string;
 }
 
 export function loadAgentWalletFromEnv(): AgentWalletBinding | undefined {

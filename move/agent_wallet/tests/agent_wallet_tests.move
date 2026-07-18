@@ -1,6 +1,5 @@
 #[test_only]
 module agent_wallet::agent_wallet_tests {
-    use std::type_name;
     use sui::test_scenario as ts;
     use sui::coin;
     use sui::sui::SUI;
@@ -11,18 +10,11 @@ module agent_wallet::agent_wallet_tests {
     use agent_wallet::budget;
     use agent_wallet::per_tx;
     use agent_wallet::rate_limit;
-    use agent_wallet::protocol_scope;
-    use agent_wallet::asset_scope;
-    use agent_wallet::recipient_allowlist;
     use agent_wallet::time_window;
 
     const OWNER: address = @0xA;
     const AGENT: address = @0xB;
     const NEW_AGENT: address = @0xD;
-    const PKG_A: address = @0xCAFE;
-    const PKG_B: address = @0xBEEF;
-    const RECIPIENT_A: address = @0x1234;
-    const RECIPIENT_B: address = @0x5678;
 
     // Mirror agent_wallet::agent_wallet's abort codes (constants are module-private).
     const E_NOT_OWNER: u64 = 1;
@@ -40,9 +32,6 @@ module agent_wallet::agent_wallet_tests {
     const BUDGET_E_OVER_BUDGET: u64 = 1;
     const PER_TX_E_OVER_PER_TX: u64 = 1;
     const RATE_LIMIT_E_OVER_WINDOW: u64 = 1;
-    const PROTOCOL_SCOPE_E_NOT_ALLOWED: u64 = 1;
-    const ASSET_SCOPE_E_NOT_ALLOWED: u64 = 1;
-    const RECIPIENT_E_NOT_ALLOWED: u64 = 1;
     const TIME_WINDOW_E_OUTSIDE: u64 = 1;
 
     // Mirror agent_wallet::version's own (private) abort codes.
@@ -53,10 +42,6 @@ module agent_wallet::agent_wallet_tests {
     /// `sui::package::test_claim` — any droppable value defined *within* the `agent_wallet` package
     /// works, since `Publisher::from_package` only compares the package address, not the module.
     public struct TEST_OTW has drop {}
-
-    /// A test-only coin-type stand-in, distinct from `SUI`, for exercising `asset_scope`'s rejection
-    /// path (its `TypeName` differs from `SUI`'s; it never needs to exist as an actual `Coin`).
-    public struct OTHER_COIN has drop {}
 
     // ══════════════════════════════════════════════════════════════════════
     // helpers
@@ -104,22 +89,9 @@ module agent_wallet::agent_wallet_tests {
         cap: &AgentCap,
         version: &Version,
         amount: u64,
-        target_package: address,
-        recipient: address,
         clk: &Clock,
     ): SpendRequest {
-        aw::request_spend<SUI>(
-            wallet,
-            cap,
-            version,
-            amount,
-            target_package,
-            type_name::with_defining_ids<SUI>(),
-            type_name::with_defining_ids<SUI>(),
-            recipient,
-            clk,
-            ts::ctx(scenario),
-        )
+        aw::request_spend<SUI>(wallet, cap, version, amount, clk, ts::ctx(scenario))
     }
 
     /// Consume a `SpendRequest` (the hot potato has no `drop`, so every code path — including ones
@@ -150,7 +122,7 @@ module agent_wallet::agent_wallet_tests {
         ts::next_tx(&mut sc, AGENT);
         let (v, mut wallet, cap) = take_agent_side(&sc);
         let clk = clock::create_for_testing(ts::ctx(&mut sc));
-        let mut req = new_request(&mut sc, &wallet, &cap, &v, 300, PKG_A, RECIPIENT_A, &clk);
+        let mut req = new_request(&mut sc, &wallet, &cap, &v, 300, &clk);
 
         // Only `budget` proves; `per_tx` is attached but never gets a receipt.
         budget::prove<SUI>(&mut req, &mut wallet, &v);
@@ -173,17 +145,17 @@ module agent_wallet::agent_wallet_tests {
         let (v, mut wallet) = take_owner_side(&sc);
         budget::add<SUI>(&mut wallet, &v, 5_000, ts::ctx(&mut sc));
         per_tx::add<SUI>(&mut wallet, &v, 5_000, ts::ctx(&mut sc));
-        protocol_scope::add<SUI>(&mut wallet, &v, vector[PKG_A], ts::ctx(&mut sc));
+        rate_limit::add<SUI>(&mut wallet, &v, 1_000, 5_000, ts::ctx(&mut sc));
         return_owner_side(v, wallet);
 
         ts::next_tx(&mut sc, AGENT);
         let (v, mut wallet, cap) = take_agent_side(&sc);
         let clk = clock::create_for_testing(ts::ctx(&mut sc));
-        let mut req = new_request(&mut sc, &wallet, &cap, &v, 300, PKG_A, RECIPIENT_A, &clk);
+        let mut req = new_request(&mut sc, &wallet, &cap, &v, 300, &clk);
 
         budget::prove<SUI>(&mut req, &mut wallet, &v);
         per_tx::prove<SUI>(&mut req, &wallet, &v);
-        protocol_scope::prove<SUI>(&mut req, &wallet, &v);
+        rate_limit::prove<SUI>(&mut req, &mut wallet, &v, &clk);
 
         let out = aw::confirm_spend<SUI>(&mut wallet, req, &v, &clk, ts::ctx(&mut sc));
         assert!(coin::value(&out) == 300, 0);
@@ -211,7 +183,7 @@ module agent_wallet::agent_wallet_tests {
         ts::next_tx(&mut sc, AGENT);
         let (v, mut wallet, cap) = take_agent_side(&sc);
         let clk = clock::create_for_testing(ts::ctx(&mut sc));
-        let mut req1 = new_request(&mut sc, &wallet, &cap, &v, 100, PKG_A, RECIPIENT_A, &clk);
+        let mut req1 = new_request(&mut sc, &wallet, &cap, &v, 100, &clk);
         budget::prove<SUI>(&mut req1, &mut wallet, &v);
         let out1 = aw::confirm_spend<SUI>(&mut wallet, req1, &v, &clk, ts::ctx(&mut sc));
         coin::burn_for_testing(out1);
@@ -226,7 +198,7 @@ module agent_wallet::agent_wallet_tests {
         // Now confirm requires zero receipts — an unproven request still succeeds.
         ts::next_tx(&mut sc, AGENT);
         let (v, mut wallet, cap) = take_agent_side(&sc);
-        let req2 = new_request(&mut sc, &wallet, &cap, &v, 100, PKG_A, RECIPIENT_A, &clk);
+        let req2 = new_request(&mut sc, &wallet, &cap, &v, 100, &clk);
         let out2 = aw::confirm_spend<SUI>(&mut wallet, req2, &v, &clk, ts::ctx(&mut sc));
         assert!(coin::value(&out2) == 100, 0);
 
@@ -337,7 +309,7 @@ module agent_wallet::agent_wallet_tests {
         let mut wallet_w = ts::take_shared_by_id<AgentWallet<SUI>>(&sc, wallet_w_id);
         let cap_w = ts::take_from_sender_by_id<AgentCap>(&sc, cap_w_id);
         let clk = clock::create_for_testing(ts::ctx(&mut sc));
-        let mut req = new_request(&mut sc, &wallet_w, &cap_w, &v, 100_000, PKG_A, RECIPIENT_A, &clk);
+        let mut req = new_request(&mut sc, &wallet_w, &cap_w, &v, 100_000, &clk);
 
         let wallet_w2 = ts::take_shared_by_id<AgentWallet<SUI>>(&sc, wallet_w2_id);
         // Without the FIX 1 wallet-binding check, per_tx's own assert would pass here (100_000 <=
@@ -370,7 +342,7 @@ module agent_wallet::agent_wallet_tests {
         ts::next_tx(&mut sc, AGENT);
         let (v, mut wallet, cap) = take_agent_side(&sc);
         let clk = clock::create_for_testing(ts::ctx(&mut sc));
-        let mut req = new_request(&mut sc, &wallet, &cap, &v, 300, PKG_A, RECIPIENT_A, &clk);
+        let mut req = new_request(&mut sc, &wallet, &cap, &v, 300, &clk);
         budget::prove<SUI>(&mut req, &mut wallet, &v);
         let out = aw::confirm_spend<SUI>(&mut wallet, req, &v, &clk, ts::ctx(&mut sc));
         assert!(coin::value(&out) == 300, 0);
@@ -393,7 +365,7 @@ module agent_wallet::agent_wallet_tests {
         ts::next_tx(&mut sc, AGENT);
         let (v, mut wallet, cap) = take_agent_side(&sc);
         let clk = clock::create_for_testing(ts::ctx(&mut sc));
-        let mut req = new_request(&mut sc, &wallet, &cap, &v, 600, PKG_A, RECIPIENT_A, &clk); // 600 > 500
+        let mut req = new_request(&mut sc, &wallet, &cap, &v, 600, &clk); // 600 > 500
         budget::prove<SUI>(&mut req, &mut wallet, &v);
 
         drain(&mut sc, &mut wallet, req, &v, &clk);
@@ -424,12 +396,12 @@ module agent_wallet::agent_wallet_tests {
         let clk = clock::create_for_testing(ts::ctx(&mut sc));
 
         // First request_spend + budget::prove, still unconfirmed: eagerly commits cfg.spent = 80.
-        let mut req1 = new_request(&mut sc, &wallet, &cap, &v, 80, PKG_A, RECIPIENT_A, &clk);
+        let mut req1 = new_request(&mut sc, &wallet, &cap, &v, 80, &clk);
         budget::prove<SUI>(&mut req1, &mut wallet, &v);
 
         // Second request_spend + budget::prove in the same batch, BEFORE req1 is confirmed:
         // wallet.spent() is still 0, but cfg.spent is already 80 — 80 + 80 > 150 must abort here.
-        let mut req2 = new_request(&mut sc, &wallet, &cap, &v, 80, PKG_A, RECIPIENT_A, &clk);
+        let mut req2 = new_request(&mut sc, &wallet, &cap, &v, 80, &clk);
         budget::prove<SUI>(&mut req2, &mut wallet, &v);
 
         // Unreachable: the second prove above always aborts first.
@@ -456,7 +428,7 @@ module agent_wallet::agent_wallet_tests {
         ts::next_tx(&mut sc, AGENT);
         let (v, mut wallet, cap) = take_agent_side(&sc);
         let clk = clock::create_for_testing(ts::ctx(&mut sc));
-        let mut req = new_request(&mut sc, &wallet, &cap, &v, 500, PKG_A, RECIPIENT_A, &clk); // == cap
+        let mut req = new_request(&mut sc, &wallet, &cap, &v, 500, &clk); // == cap
         per_tx::prove<SUI>(&mut req, &wallet, &v);
         let out = aw::confirm_spend<SUI>(&mut wallet, req, &v, &clk, ts::ctx(&mut sc));
         assert!(coin::value(&out) == 500, 0);
@@ -479,7 +451,7 @@ module agent_wallet::agent_wallet_tests {
         ts::next_tx(&mut sc, AGENT);
         let (v, mut wallet, cap) = take_agent_side(&sc);
         let clk = clock::create_for_testing(ts::ctx(&mut sc));
-        let mut req = new_request(&mut sc, &wallet, &cap, &v, 600, PKG_A, RECIPIENT_A, &clk); // 600 > 500
+        let mut req = new_request(&mut sc, &wallet, &cap, &v, 600, &clk); // 600 > 500
         per_tx::prove<SUI>(&mut req, &wallet, &v);
 
         drain(&mut sc, &mut wallet, req, &v, &clk);
@@ -506,11 +478,11 @@ module agent_wallet::agent_wallet_tests {
         let mut clk = clock::create_for_testing(ts::ctx(&mut sc));
         clk.set_for_testing(0);
 
-        let mut req1 = new_request(&mut sc, &wallet, &cap, &v, 200, PKG_A, RECIPIENT_A, &clk);
+        let mut req1 = new_request(&mut sc, &wallet, &cap, &v, 200, &clk);
         rate_limit::prove<SUI>(&mut req1, &mut wallet, &v, &clk);
         let out1 = aw::confirm_spend<SUI>(&mut wallet, req1, &v, &clk, ts::ctx(&mut sc));
 
-        let mut req2 = new_request(&mut sc, &wallet, &cap, &v, 300, PKG_A, RECIPIENT_A, &clk);
+        let mut req2 = new_request(&mut sc, &wallet, &cap, &v, 300, &clk);
         rate_limit::prove<SUI>(&mut req2, &mut wallet, &v, &clk); // 200 + 300 == window_max
         let out2 = aw::confirm_spend<SUI>(&mut wallet, req2, &v, &clk, ts::ctx(&mut sc));
 
@@ -535,12 +507,12 @@ module agent_wallet::agent_wallet_tests {
         let mut clk = clock::create_for_testing(ts::ctx(&mut sc));
         clk.set_for_testing(0);
 
-        let mut req1 = new_request(&mut sc, &wallet, &cap, &v, 300, PKG_A, RECIPIENT_A, &clk);
+        let mut req1 = new_request(&mut sc, &wallet, &cap, &v, 300, &clk);
         rate_limit::prove<SUI>(&mut req1, &mut wallet, &v, &clk);
         let out1 = aw::confirm_spend<SUI>(&mut wallet, req1, &v, &clk, ts::ctx(&mut sc));
         coin::burn_for_testing(out1);
 
-        let mut req2 = new_request(&mut sc, &wallet, &cap, &v, 300, PKG_A, RECIPIENT_A, &clk);
+        let mut req2 = new_request(&mut sc, &wallet, &cap, &v, 300, &clk);
         rate_limit::prove<SUI>(&mut req2, &mut wallet, &v, &clk); // 300 + 300 > 500
 
         drain(&mut sc, &mut wallet, req2, &v, &clk);
@@ -563,13 +535,13 @@ module agent_wallet::agent_wallet_tests {
         let mut clk = clock::create_for_testing(ts::ctx(&mut sc));
         clk.set_for_testing(0);
 
-        let mut req1 = new_request(&mut sc, &wallet, &cap, &v, 500, PKG_A, RECIPIENT_A, &clk); // fills window
+        let mut req1 = new_request(&mut sc, &wallet, &cap, &v, 500, &clk); // fills window
         rate_limit::prove<SUI>(&mut req1, &mut wallet, &v, &clk);
         let out1 = aw::confirm_spend<SUI>(&mut wallet, req1, &v, &clk, ts::ctx(&mut sc));
 
         // Advance past window_start_ms(0) + window_ms(1000): the window rolls over.
         clk.set_for_testing(1_000);
-        let mut req2 = new_request(&mut sc, &wallet, &cap, &v, 500, PKG_A, RECIPIENT_A, &clk);
+        let mut req2 = new_request(&mut sc, &wallet, &cap, &v, 500, &clk);
         rate_limit::prove<SUI>(&mut req2, &mut wallet, &v, &clk); // would over-window if not reset
         let out2 = aw::confirm_spend<SUI>(&mut wallet, req2, &v, &clk, ts::ctx(&mut sc));
 
@@ -579,159 +551,6 @@ module agent_wallet::agent_wallet_tests {
 
         coin::burn_for_testing(out1);
         coin::burn_for_testing(out2);
-        clock::destroy_for_testing(clk);
-        return_agent_side(&sc, v, wallet, cap);
-        ts::end(sc);
-    }
-
-    // ══════════════════════════════════════════════════════════════════════
-    // rules::protocol_scope
-    // ══════════════════════════════════════════════════════════════════════
-
-    #[test]
-    fun protocol_scope_passes_allowed_target() {
-        let mut sc = ts::begin(OWNER);
-        create(&mut sc, 100_000, 1_000_000);
-        ts::next_tx(&mut sc, OWNER);
-        let (v, mut wallet) = take_owner_side(&sc);
-        protocol_scope::add<SUI>(&mut wallet, &v, vector[PKG_A], ts::ctx(&mut sc));
-        return_owner_side(v, wallet);
-
-        ts::next_tx(&mut sc, AGENT);
-        let (v, mut wallet, cap) = take_agent_side(&sc);
-        let clk = clock::create_for_testing(ts::ctx(&mut sc));
-        let mut req = new_request(&mut sc, &wallet, &cap, &v, 100, PKG_A, RECIPIENT_A, &clk);
-        protocol_scope::prove<SUI>(&mut req, &wallet, &v);
-        let out = aw::confirm_spend<SUI>(&mut wallet, req, &v, &clk, ts::ctx(&mut sc));
-
-        coin::burn_for_testing(out);
-        clock::destroy_for_testing(clk);
-        return_agent_side(&sc, v, wallet, cap);
-        ts::end(sc);
-    }
-
-    #[test, expected_failure(abort_code = PROTOCOL_SCOPE_E_NOT_ALLOWED, location = protocol_scope)]
-    fun protocol_scope_blocks_non_allowlisted_target() {
-        let mut sc = ts::begin(OWNER);
-        create(&mut sc, 100_000, 1_000_000);
-        ts::next_tx(&mut sc, OWNER);
-        let (v, mut wallet) = take_owner_side(&sc);
-        protocol_scope::add<SUI>(&mut wallet, &v, vector[PKG_A], ts::ctx(&mut sc));
-        return_owner_side(v, wallet);
-
-        ts::next_tx(&mut sc, AGENT);
-        let (v, mut wallet, cap) = take_agent_side(&sc);
-        let clk = clock::create_for_testing(ts::ctx(&mut sc));
-        let mut req = new_request(&mut sc, &wallet, &cap, &v, 100, PKG_B, RECIPIENT_A, &clk); // not allowed
-        protocol_scope::prove<SUI>(&mut req, &wallet, &v);
-
-        drain(&mut sc, &mut wallet, req, &v, &clk);
-        clock::destroy_for_testing(clk);
-        return_agent_side(&sc, v, wallet, cap);
-        ts::end(sc);
-    }
-
-    // ══════════════════════════════════════════════════════════════════════
-    // rules::asset_scope
-    // ══════════════════════════════════════════════════════════════════════
-
-    #[test]
-    fun asset_scope_passes_allowed_assets() {
-        let mut sc = ts::begin(OWNER);
-        create(&mut sc, 100_000, 1_000_000);
-        ts::next_tx(&mut sc, OWNER);
-        let (v, mut wallet) = take_owner_side(&sc);
-        asset_scope::add<SUI>(&mut wallet, &v, vector[type_name::with_defining_ids<SUI>()], ts::ctx(&mut sc));
-        return_owner_side(v, wallet);
-
-        ts::next_tx(&mut sc, AGENT);
-        let (v, mut wallet, cap) = take_agent_side(&sc);
-        let clk = clock::create_for_testing(ts::ctx(&mut sc));
-        let mut req = new_request(&mut sc, &wallet, &cap, &v, 100, PKG_A, RECIPIENT_A, &clk); // coin_in=coin_out=SUI
-        asset_scope::prove<SUI>(&mut req, &wallet, &v);
-        let out = aw::confirm_spend<SUI>(&mut wallet, req, &v, &clk, ts::ctx(&mut sc));
-
-        coin::burn_for_testing(out);
-        clock::destroy_for_testing(clk);
-        return_agent_side(&sc, v, wallet, cap);
-        ts::end(sc);
-    }
-
-    #[test, expected_failure(abort_code = ASSET_SCOPE_E_NOT_ALLOWED, location = asset_scope)]
-    fun asset_scope_blocks_non_allowlisted_asset() {
-        let mut sc = ts::begin(OWNER);
-        create(&mut sc, 100_000, 1_000_000);
-        ts::next_tx(&mut sc, OWNER);
-        let (v, mut wallet) = take_owner_side(&sc);
-        // Only SUI is allowed; the request below carries OTHER_COIN as coin_out.
-        asset_scope::add<SUI>(&mut wallet, &v, vector[type_name::with_defining_ids<SUI>()], ts::ctx(&mut sc));
-        return_owner_side(v, wallet);
-
-        ts::next_tx(&mut sc, AGENT);
-        let (v, mut wallet, cap) = take_agent_side(&sc);
-        let clk = clock::create_for_testing(ts::ctx(&mut sc));
-        let mut req = aw::request_spend<SUI>(
-            &wallet,
-            &cap,
-            &v,
-            100,
-            PKG_A,
-            type_name::with_defining_ids<SUI>(),
-            type_name::with_defining_ids<OTHER_COIN>(), // not allowlisted
-            RECIPIENT_A,
-            &clk,
-            ts::ctx(&mut sc),
-        );
-        asset_scope::prove<SUI>(&mut req, &wallet, &v);
-
-        drain(&mut sc, &mut wallet, req, &v, &clk);
-        clock::destroy_for_testing(clk);
-        return_agent_side(&sc, v, wallet, cap);
-        ts::end(sc);
-    }
-
-    // ══════════════════════════════════════════════════════════════════════
-    // rules::recipient_allowlist
-    // ══════════════════════════════════════════════════════════════════════
-
-    #[test]
-    fun recipient_allowlist_passes_allowed_recipient() {
-        let mut sc = ts::begin(OWNER);
-        create(&mut sc, 100_000, 1_000_000);
-        ts::next_tx(&mut sc, OWNER);
-        let (v, mut wallet) = take_owner_side(&sc);
-        recipient_allowlist::add<SUI>(&mut wallet, &v, vector[RECIPIENT_A], ts::ctx(&mut sc));
-        return_owner_side(v, wallet);
-
-        ts::next_tx(&mut sc, AGENT);
-        let (v, mut wallet, cap) = take_agent_side(&sc);
-        let clk = clock::create_for_testing(ts::ctx(&mut sc));
-        let mut req = new_request(&mut sc, &wallet, &cap, &v, 100, PKG_A, RECIPIENT_A, &clk);
-        recipient_allowlist::prove<SUI>(&mut req, &wallet, &v);
-        let out = aw::confirm_spend<SUI>(&mut wallet, req, &v, &clk, ts::ctx(&mut sc));
-
-        coin::burn_for_testing(out);
-        clock::destroy_for_testing(clk);
-        return_agent_side(&sc, v, wallet, cap);
-        ts::end(sc);
-    }
-
-    #[test, expected_failure(abort_code = RECIPIENT_E_NOT_ALLOWED, location = recipient_allowlist)]
-    fun recipient_allowlist_blocks_foreign_recipient() {
-        let mut sc = ts::begin(OWNER);
-        create(&mut sc, 100_000, 1_000_000);
-        ts::next_tx(&mut sc, OWNER);
-        let (v, mut wallet) = take_owner_side(&sc);
-        recipient_allowlist::add<SUI>(&mut wallet, &v, vector[RECIPIENT_A], ts::ctx(&mut sc));
-        return_owner_side(v, wallet);
-
-        ts::next_tx(&mut sc, AGENT);
-        let (v, mut wallet, cap) = take_agent_side(&sc);
-        let clk = clock::create_for_testing(ts::ctx(&mut sc));
-        let mut req = new_request(&mut sc, &wallet, &cap, &v, 100, PKG_A, RECIPIENT_B, &clk); // not allowed
-        recipient_allowlist::prove<SUI>(&mut req, &wallet, &v);
-
-        drain(&mut sc, &mut wallet, req, &v, &clk);
         clock::destroy_for_testing(clk);
         return_agent_side(&sc, v, wallet, cap);
         ts::end(sc);
@@ -754,7 +573,7 @@ module agent_wallet::agent_wallet_tests {
         let (v, mut wallet, cap) = take_agent_side(&sc);
         let mut clk = clock::create_for_testing(ts::ctx(&mut sc));
         clk.set_for_testing(2_000); // inside [1000, 5000)
-        let mut req = new_request(&mut sc, &wallet, &cap, &v, 100, PKG_A, RECIPIENT_A, &clk);
+        let mut req = new_request(&mut sc, &wallet, &cap, &v, 100, &clk);
         time_window::prove<SUI>(&mut req, &wallet, &v, &clk);
         let out = aw::confirm_spend<SUI>(&mut wallet, req, &v, &clk, ts::ctx(&mut sc));
 
@@ -777,7 +596,7 @@ module agent_wallet::agent_wallet_tests {
         let (v, mut wallet, cap) = take_agent_side(&sc);
         let mut clk = clock::create_for_testing(ts::ctx(&mut sc));
         clk.set_for_testing(6_000); // outside [1000, 5000)
-        let mut req = new_request(&mut sc, &wallet, &cap, &v, 100, PKG_A, RECIPIENT_A, &clk);
+        let mut req = new_request(&mut sc, &wallet, &cap, &v, 100, &clk);
         time_window::prove<SUI>(&mut req, &wallet, &v, &clk);
 
         drain(&mut sc, &mut wallet, req, &v, &clk);
@@ -798,7 +617,7 @@ module agent_wallet::agent_wallet_tests {
         let (v, mut wallet, cap) = take_agent_side(&sc);
         let mut clk = clock::create_for_testing(ts::ctx(&mut sc));
         clk.set_for_testing(1000);
-        let req = new_request(&mut sc, &wallet, &cap, &v, 0, PKG_A, RECIPIENT_A, &clk);
+        let req = new_request(&mut sc, &wallet, &cap, &v, 0, &clk);
 
         drain(&mut sc, &mut wallet, req, &v, &clk);
         clock::destroy_for_testing(clk);
@@ -814,7 +633,7 @@ module agent_wallet::agent_wallet_tests {
         let (v, mut wallet, cap) = take_agent_side(&sc);
         let mut clk = clock::create_for_testing(ts::ctx(&mut sc));
         clk.set_for_testing(1000);
-        let req = new_request(&mut sc, &wallet, &cap, &v, 2000, PKG_A, RECIPIENT_A, &clk); // > 1000 funded
+        let req = new_request(&mut sc, &wallet, &cap, &v, 2000, &clk); // > 1000 funded
 
         drain(&mut sc, &mut wallet, req, &v, &clk);
         clock::destroy_for_testing(clk);
@@ -831,7 +650,7 @@ module agent_wallet::agent_wallet_tests {
         let mut clk = clock::create_for_testing(ts::ctx(&mut sc));
         clk.set_for_testing(10_000); // ts == expiry → not (ts < expiry) → expired
         assert!(!aw::is_active(&wallet, &clk), 0);
-        let req = new_request(&mut sc, &wallet, &cap, &v, 100, PKG_A, RECIPIENT_A, &clk);
+        let req = new_request(&mut sc, &wallet, &cap, &v, 100, &clk);
 
         drain(&mut sc, &mut wallet, req, &v, &clk);
         clock::destroy_for_testing(clk);
@@ -855,7 +674,7 @@ module agent_wallet::agent_wallet_tests {
         let (v, mut wallet, cap) = take_agent_side(&sc);
         let mut clk = clock::create_for_testing(ts::ctx(&mut sc));
         clk.set_for_testing(1000);
-        let req = new_request(&mut sc, &wallet, &cap, &v, 100, PKG_A, RECIPIENT_A, &clk);
+        let req = new_request(&mut sc, &wallet, &cap, &v, 100, &clk);
 
         drain(&mut sc, &mut wallet, req, &v, &clk);
         clock::destroy_for_testing(clk);
@@ -918,7 +737,7 @@ module agent_wallet::agent_wallet_tests {
         let (v, mut wallet, old_cap) = take_agent_side(&sc);
         let mut clk = clock::create_for_testing(ts::ctx(&mut sc));
         clk.set_for_testing(1000);
-        let req = new_request(&mut sc, &wallet, &old_cap, &v, 100, PKG_A, RECIPIENT_A, &clk);
+        let req = new_request(&mut sc, &wallet, &old_cap, &v, 100, &clk);
 
         drain(&mut sc, &mut wallet, req, &v, &clk);
         clock::destroy_for_testing(clk);
@@ -943,7 +762,7 @@ module agent_wallet::agent_wallet_tests {
         let new_cap = ts::take_from_sender<AgentCap>(&sc);
         let mut clk = clock::create_for_testing(ts::ctx(&mut sc));
         clk.set_for_testing(1000);
-        let req = new_request(&mut sc, &wallet, &new_cap, &v, 100, PKG_A, RECIPIENT_A, &clk);
+        let req = new_request(&mut sc, &wallet, &new_cap, &v, 100, &clk);
         let out = aw::confirm_spend<SUI>(&mut wallet, req, &v, &clk, ts::ctx(&mut sc));
         assert!(coin::value(&out) == 100, 1);
 
@@ -1024,7 +843,7 @@ module agent_wallet::agent_wallet_tests {
 
         ts::next_tx(&mut sc, AGENT);
         let (v, mut wallet, cap) = take_agent_side(&sc);
-        let req = new_request(&mut sc, &wallet, &cap, &v, 100, PKG_A, RECIPIENT_A, &clk);
+        let req = new_request(&mut sc, &wallet, &cap, &v, 100, &clk);
         let out = aw::confirm_spend<SUI>(&mut wallet, req, &v, &clk, ts::ctx(&mut sc));
         assert!(coin::value(&out) == 100, 2);
 
@@ -1060,7 +879,7 @@ module agent_wallet::agent_wallet_tests {
         av::set_for_testing(&mut v, av::current_for_testing() + 1);
         let mut clk = clock::create_for_testing(ts::ctx(&mut sc));
         clk.set_for_testing(1000);
-        let req = new_request(&mut sc, &wallet, &cap, &v, 100, PKG_A, RECIPIENT_A, &clk);
+        let req = new_request(&mut sc, &wallet, &cap, &v, 100, &clk);
 
         drain(&mut sc, &mut wallet, req, &v, &clk);
         clock::destroy_for_testing(clk);
@@ -1096,7 +915,7 @@ module agent_wallet::agent_wallet_tests {
         let (v, mut wallet, cap) = take_agent_side(&sc);
         let mut clk = clock::create_for_testing(ts::ctx(&mut sc));
         clk.set_for_testing(1000);
-        let req = new_request(&mut sc, &wallet, &cap, &v, 100, PKG_A, RECIPIENT_A, &clk);
+        let req = new_request(&mut sc, &wallet, &cap, &v, 100, &clk);
 
         drain(&mut sc, &mut wallet, req, &v, &clk);
         clock::destroy_for_testing(clk);

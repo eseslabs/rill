@@ -229,22 +229,20 @@ test('a slippage_floor minOutMist that is not a valid decimal u64 string is reje
 });
 
 // --- toOnChainRuleParams: witness + module + config per rule --------------------------------------
+// Only budget/per_tx/rate_limit/time_window project on-chain. protocol_scope, asset_scope,
+// recipient_allowlist, and slippage_floor are PRE-FLIGHT only (compiler cross-check + signer) —
+// an on-chain check of a single self-declared metadata value is decorative (review C2).
 
-test('toOnChainRuleParams maps the full 8-rule manifest to expected module/config, excluding slippage_floor', () => {
+test('toOnChainRuleParams maps the full 8-rule manifest to only the 4 on-chain kinds, in manifest order', () => {
   const manifest = CapabilityManifestSchema.parse(fullManifest());
   const params = toOnChainRuleParams(manifest);
   expect(params).toEqual([
     { module: 'budget', config: { totalMist: 5000000000n } },
     { module: 'per_tx', config: { maxMist: 1000000000n } },
     { module: 'rate_limit', config: { windowMs: 3600000n, maxMist: 2000000000n } },
-    { module: 'protocol_scope', config: { allowedPackages: [hex(1), hex(2)] } },
-    // slippage_floor is intentionally absent: it is enforced PRE-FLIGHT (compiler min-out
-    // guardrail + signer), never on-chain, so it has no add_rule/prove projection.
-    {
-      module: 'asset_scope',
-      config: { allowedCoinTypes: ['0x2::sui::SUI', USDC_MAINNET] },
-    },
-    { module: 'recipient_allowlist', config: { addresses: [hex(3)] } },
+    // protocol_scope, slippage_floor, asset_scope, and recipient_allowlist are intentionally
+    // absent: all four are enforced PRE-FLIGHT (compiler cross-check + signer), never on-chain,
+    // so none has an add_rule/prove projection.
     {
       module: 'time_window',
       config: { notBeforeMs: 1700000000000n, notAfterMs: 1800000000000n },
@@ -252,14 +250,30 @@ test('toOnChainRuleParams maps the full 8-rule manifest to expected module/confi
   ]);
 });
 
-test('toOnChainRuleParams has no ruleWitness key and excludes slippage_floor entirely', () => {
+test('toOnChainRuleParams has no ruleWitness key and excludes all pre-flight-only kinds entirely', () => {
   const manifest = CapabilityManifestSchema.parse(fullManifest());
   const params = toOnChainRuleParams(manifest);
-  expect(params).toHaveLength(7);
+  expect(params).toHaveLength(4);
   expect(params.find((p) => p.module === 'slippage_floor')).toBeUndefined();
+  expect(params.find((p) => p.module === 'protocol_scope')).toBeUndefined();
+  expect(params.find((p) => p.module === 'asset_scope')).toBeUndefined();
+  expect(params.find((p) => p.module === 'recipient_allowlist')).toBeUndefined();
   for (const p of params) {
     expect(p).not.toHaveProperty('ruleWitness');
   }
+});
+
+test('toOnChainRuleParams never emits protocol_scope, asset_scope, or recipient_allowlist (pre-flight only)', () => {
+  const manifest = CapabilityManifestSchema.parse({
+    walletCoinType: '0x2::sui::SUI',
+    rules: [
+      { kind: 'protocol_scope', allowedPackages: [hex(1)] },
+      { kind: 'asset_scope', allowedCoinTypes: ['0x2::sui::SUI'] },
+      { kind: 'recipient_allowlist', addresses: [hex(3)] },
+    ],
+  });
+  const params = toOnChainRuleParams(manifest);
+  expect(params).toEqual([]);
 });
 
 test('toOnChainRuleParams emits both time_window bounds as bigint', () => {
@@ -426,9 +440,11 @@ test('a full 8-rule manifest round-trips through all 3 projections without losin
   const signerPolicy = toSignerPolicy(manifest);
   const declaration = toDeclaration(manifest);
 
-  // 8 rules total, but slippage_floor projects to no on-chain entry (pre-flight only) — so
-  // onChain has 7 entries while declaration.caps (which covers every rule) still has 8.
-  expect(onChain).toHaveLength(7);
+  // 8 rules total, but only budget/per_tx/rate_limit/time_window project on-chain — protocol_scope,
+  // slippage_floor, asset_scope, and recipient_allowlist are all pre-flight only (compiler
+  // cross-check + signer, review C2) — so onChain has 4 entries while signerPolicy and
+  // declaration.caps (which cover every rule) still carry all 8 rules' data.
+  expect(onChain).toHaveLength(4);
   expect(declaration.caps).toHaveLength(8);
 
   // Budget: on-chain bigint, signer string, declaration text all agree it's 5 SUI / 5000000000 mist.
@@ -436,13 +452,23 @@ test('a full 8-rule manifest round-trips through all 3 projections without losin
   expect(signerPolicy.maxAmountMist).toBe('5000000000');
   expect(declaration.caps.find((c) => c.label === 'Budget')?.value).toContain('5 SUI');
 
-  // protocol_scope addresses agree across on-chain config and signer policy.
-  expect(onChain.find((p) => p.module === 'protocol_scope')?.config).toEqual({ allowedPackages: [hex(1), hex(2)] });
+  // protocol_scope is pre-flight only: no on-chain entry, but the signer policy and declaration
+  // still carry the allowed packages, and the declaration honestly labels it 'pre-flight'.
+  expect(onChain.find((p) => p.module === 'protocol_scope')).toBeUndefined();
   expect(signerPolicy.allowedPackages).toEqual([hex(1), hex(2)]);
+  expect(declaration.caps.find((c) => c.label === 'Allowed protocols')?.enforcement).toBe('pre-flight');
 
-  // recipient_allowlist addresses agree across on-chain config and signer policy.
-  expect(onChain.find((p) => p.module === 'recipient_allowlist')?.config).toEqual({ addresses: [hex(3)] });
+  // recipient_allowlist is pre-flight only: no on-chain entry, but the signer policy and
+  // declaration still carry the allowed addresses, labeled 'pre-flight'.
+  expect(onChain.find((p) => p.module === 'recipient_allowlist')).toBeUndefined();
   expect(signerPolicy.allowedRecipients).toEqual([hex(3)]);
+  expect(declaration.caps.find((c) => c.label === 'Allowed recipients')?.enforcement).toBe('pre-flight');
+
+  // asset_scope is pre-flight only: no on-chain entry, but the signer policy and declaration
+  // still carry the allowed coin types, labeled 'pre-flight'.
+  expect(onChain.find((p) => p.module === 'asset_scope')).toBeUndefined();
+  expect(signerPolicy.allowedCoinTypes).toEqual(['0x2::sui::SUI', USDC_MAINNET]);
+  expect(declaration.caps.find((c) => c.label === 'Allowed coins')?.enforcement).toBe('pre-flight');
 
   // slippage_floor is pre-flight only: no on-chain entry, but the signer policy and declaration
   // agree on the absolute floor (1.5 SUI / 1500000000 mist), and the declaration honestly labels

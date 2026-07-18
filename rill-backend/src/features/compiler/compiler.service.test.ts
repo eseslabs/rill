@@ -460,13 +460,13 @@ test('a cycle in the flow -> ValidationError (422) via the topological sort', as
 const AGENT_WALLET_VERSION_ID = objectId(20);
 const RECIPIENT = objectId(21);
 
-/** `agentWallet` (no manifest) plus the fields the redesigned sequence needs, so a test only has to
- *  add `capabilityManifest` to opt into the new path. */
+/** `agentWallet` (no manifest) plus the field the redesigned sequence needs, so a test only has to
+ *  add `capabilityManifest` to opt into the new path. `request_spend` no longer takes a
+ *  `target_package`/`recipient` (see `compiler.service.ts`'s C2 pre-flight doc comments) — those are
+ *  cross-checked pre-flight against `protocol_scope`/`recipient_allowlist` instead, not passed here. */
 const manifestWallet = {
   ...agentWallet,
   versionId: AGENT_WALLET_VERSION_ID,
-  targetPackage: CETUS_INTEGRATE_PKG,
-  recipient: RECIPIENT,
 };
 
 function ruleProveTarget(module: string) {
@@ -493,7 +493,7 @@ test('a manifest with 3 rules compiles request_spend + 3 proves (in order) + con
       capabilityManifest: manifest([
         { kind: 'budget', totalMist: '5000000000' },
         { kind: 'per_tx', maxMist: '5000000000' },
-        { kind: 'protocol_scope', allowedPackages: [CETUS_INTEGRATE_PKG] },
+        { kind: 'rate_limit', windowMs: '3600000', maxMist: '5000000000' },
       ]),
     },
   });
@@ -510,7 +510,7 @@ test('a manifest with 3 rules compiles request_spend + 3 proves (in order) + con
   const proveIdxs = [
     targets.indexOf(ruleProveTarget('budget')),
     targets.indexOf(ruleProveTarget('per_tx')),
-    targets.indexOf(ruleProveTarget('protocol_scope')),
+    targets.indexOf(ruleProveTarget('rate_limit')),
   ];
   for (const idx of proveIdxs) {
     expect(idx).toBeGreaterThan(requestIdx);
@@ -519,11 +519,11 @@ test('a manifest with 3 rules compiles request_spend + 3 proves (in order) + con
   expect(proveIdxs).toEqual([...proveIdxs].sort((a, b) => a - b)); // manifest order preserved
 
   assertEveryProducedCoinConsumedExactlyOnce(result.transaction, {
-    expectedProveModules: ['budget', 'per_tx', 'protocol_scope'],
+    expectedProveModules: ['budget', 'per_tx', 'rate_limit'],
   });
 });
 
-test('request_spend carries amount/target_package/recipient from the flow and options', async () => {
+test('request_spend is a 5-arg call — wallet, cap, version, amount, clock — no target_package/coin_in/coin_out/recipient', async () => {
   const flow = { nodes: [cetusSwapNode('s1')], edges: [] };
 
   const result = await compilerService.compileFlow(flow, {
@@ -540,8 +540,10 @@ test('request_spend carries amount/target_package/recipient from the flow and op
   expect(requestCmd?.$kind).toBe('MoveCall');
   if (requestCmd?.$kind !== 'MoveCall') throw new Error('expected a MoveCall');
 
-  // arguments: [wallet, cap, version, amount, target_package, coin_in, coin_out, recipient, clock]
-  expect(requestCmd.MoveCall.arguments).toHaveLength(9);
+  // arguments: [wallet, cap, version, amount, clock] — the migrated `request_spend<T>` (agent_wallet
+  // .move) dropped target_package/coin_in/coin_out/recipient entirely (review C2: those are
+  // self-declared PTB metadata, now cross-checked pre-flight instead — see compiler.service.ts).
+  expect(requestCmd.MoveCall.arguments).toHaveLength(5);
   const inputs = result.transaction.getData().inputs;
   const pureArg = (arg: unknown) => {
     const a = arg as { $kind?: string; Input?: number };
@@ -553,11 +555,21 @@ test('request_spend carries amount/target_package/recipient from the flow and op
   expect(pureArg(requestCmd.MoveCall.arguments[3])).toBeDefined();
   expect(result.budgetSpendMist).toBe(1_000_000_000n);
 
+  // No `0x1::type_name::get` calls (coin_in/coin_out TypeName construction is gone) and every OTHER
+  // argument (wallet, cap, version, clock) is an object reference, never a second Pure.
+  expect(moveCallTargets(result.transaction).some((t) => t.endsWith('::type_name::get'))).toBe(false);
+  for (const idx of [0, 1, 2, 4]) {
+    expect(pureArg(requestCmd.MoveCall.arguments[idx])).toBeUndefined();
+  }
+
   assertEveryProducedCoinConsumedExactlyOnce(result.transaction);
 });
 
 test('a swap+slippage manifest injects NO slippage_floor prove — enforced pre-flight, not on-chain', async () => {
-  const flow = { nodes: [cetusSwapNode('s1')], edges: [] };
+  // min_amount_out must clear the manifest's floor (>=) — this test is about on-chain projection
+  // shape, not about the pre-flight cross-check itself (see the dedicated "slippage_floor" tests
+  // below for that), so the node's declared floor is set to satisfy the manifest's.
+  const flow = { nodes: [cetusSwapNode('s1', { min_amount_out: '990000000' })], edges: [] };
 
   const result = await compilerService.compileFlow(flow, {
     sender,
@@ -629,7 +641,10 @@ test('changing the manifest\'s rule set changes the injected proves', async () =
       capabilityManifest: manifest([
         { kind: 'budget', totalMist: '5000000000' },
         { kind: 'per_tx', maxMist: '5000000000' },
-        { kind: 'recipient_allowlist', addresses: [RECIPIENT] },
+        // `sender` (not RECIPIENT) — the recipient_allowlist pre-flight cross-check (compiler
+        // .service.ts's checkRecipientAllowlist) requires the effective recipient (`sender`) to be
+        // in this list, or compileFlow throws before this result is ever produced.
+        { kind: 'recipient_allowlist', addresses: [sender] },
       ]),
     },
   });
@@ -640,12 +655,14 @@ test('changing the manifest\'s rule set changes the injected proves', async () =
       .map((c) => (c.$kind === 'MoveCall' ? c.MoveCall.module : ''));
 
   expect(provesOf(resultA)).toEqual(['budget']);
-  expect(provesOf(resultB)).toEqual(['budget', 'per_tx', 'recipient_allowlist']);
+  // recipient_allowlist is pre-flight only (see toOnChainRuleParams) — attaching it changes the
+  // manifest's rule SET (asserted below via the coin-consumption pin) without adding a third prove.
+  expect(provesOf(resultB)).toEqual(['budget', 'per_tx']);
   expect(provesOf(resultA)).not.toEqual(provesOf(resultB));
 
   assertEveryProducedCoinConsumedExactlyOnce(resultA.transaction, { expectedProveModules: ['budget'] });
   assertEveryProducedCoinConsumedExactlyOnce(resultB.transaction, {
-    expectedProveModules: ['budget', 'per_tx', 'recipient_allowlist'],
+    expectedProveModules: ['budget', 'per_tx'],
   });
 });
 
@@ -681,13 +698,13 @@ test('an invalid manifest (unknown rule kind) -> ValidationError (422)', async (
   ).rejects.toThrow(ValidationError);
 });
 
-test('a manifest present but missing versionId/targetPackage -> ValidationError (422)', async () => {
+test('a manifest present but missing versionId -> ValidationError (422)', async () => {
   const flow = { nodes: [cetusSwapNode('s1')], edges: [] };
 
   await expect(
     compilerService.compileFlow(flow, {
       sender,
-      // no versionId/targetPackage on this binding
+      // no versionId on this binding
       agentWallet: { ...agentWallet, capabilityManifest: manifest([{ kind: 'budget', totalMist: '5000000000' }]) },
     }),
   ).rejects.toThrow(ValidationError);
@@ -717,4 +734,138 @@ test('a flow WITHOUT a manifest compiles the CURRENT spend() path — byte-ident
   expect(resultExplicitUndefined.transaction.getData().inputs).toEqual(resultLegacy.transaction.getData().inputs);
 
   assertEveryProducedCoinConsumedExactlyOnce(resultLegacy.transaction);
+});
+
+// --- Review C2: manifest pre-flight cross-check (real enforcement, not decorative) -------------
+//
+// `protocol_scope`, `recipient_allowlist`, `asset_scope`, and `slippage_floor` have no on-chain
+// `prove` projection (see `toOnChainRuleParams`'s doc comment) — `compiler.service.ts`'s
+// `enforceManifestPreflight` is the ONLY place they are actually enforced, cross-checked against the
+// real compiled PTB / resolved flow, fail-closed. `cetusSwapNode`'s pool mock (`beforeAll` above)
+// fixes `coinTypeA = FAKE_USDC`, `coinTypeB = SUI` — an `inputCoinType: SUI` swap (the default) is
+// therefore always b2a, outputting FAKE_USDC.
+
+test('a flow that satisfies a full manifest (all four pre-flight rules attached) compiles OK', async () => {
+  const flow = { nodes: [cetusSwapNode('s1', { min_amount_out: '990000000' })], edges: [] };
+
+  const result = await compilerService.compileFlow(flow, {
+    sender,
+    agentWallet: {
+      ...manifestWallet,
+      capabilityManifest: manifest([
+        { kind: 'budget', totalMist: '5000000000' },
+        { kind: 'protocol_scope', allowedPackages: [CETUS_INTEGRATE_PKG] },
+        { kind: 'recipient_allowlist', addresses: [sender] },
+        { kind: 'asset_scope', allowedCoinTypes: [SUI, FAKE_USDC] },
+        { kind: 'slippage_floor', minOutMist: '990000000' },
+      ]),
+    },
+  });
+
+  assertEveryProducedCoinConsumedExactlyOnce(result.transaction, { expectedProveModules: ['budget'] });
+});
+
+test('a flow calling a package NOT in protocol_scope.allowedPackages -> 422', async () => {
+  const flow = { nodes: [haedalStakeNode('h1')], edges: [] }; // targets objectId(300), not Cetus's package
+
+  await expect(
+    compilerService.compileFlow(flow, {
+      sender,
+      agentWallet: {
+        ...manifestWallet,
+        capabilityManifest: manifest([
+          { kind: 'budget', totalMist: '5000000000' },
+          { kind: 'protocol_scope', allowedPackages: [CETUS_INTEGRATE_PKG] },
+        ]),
+      },
+    }),
+  ).rejects.toThrow(/protocol_scope violation/);
+});
+
+test('options.sender not in recipient_allowlist.addresses -> 422', async () => {
+  const flow = { nodes: [cetusSwapNode('s1')], edges: [] };
+
+  await expect(
+    compilerService.compileFlow(flow, {
+      sender, // objectId(1) — not RECIPIENT
+      agentWallet: {
+        ...manifestWallet,
+        capabilityManifest: manifest([
+          { kind: 'budget', totalMist: '5000000000' },
+          { kind: 'recipient_allowlist', addresses: [RECIPIENT] },
+        ]),
+      },
+    }),
+  ).rejects.toThrow(/recipient_allowlist violation/);
+});
+
+test('recipient_allowlist attached but no `sender` given -> 422 (nothing to verify against)', async () => {
+  // No non-SUI leftover coin in this flow, so the settle sweep's own "no sender" guard never fires
+  // first — this isolates the recipient_allowlist pre-flight check's own sender requirement.
+  const flow = { nodes: [haedalStakeNode('h1')], edges: [] };
+
+  await expect(
+    compilerService.compileFlow(flow, {
+      agentWallet: {
+        ...manifestWallet,
+        capabilityManifest: manifest([
+          { kind: 'budget', totalMist: '5000000000' },
+          { kind: 'recipient_allowlist', addresses: [RECIPIENT] },
+        ]),
+      },
+    }),
+  ).rejects.toThrow(/recipient_allowlist violation/);
+});
+
+test('a swap coin type not in asset_scope.allowedCoinTypes -> 422', async () => {
+  const flow = { nodes: [cetusSwapNode('s1')], edges: [] }; // real output is FAKE_USDC (pool mock)
+
+  await expect(
+    compilerService.compileFlow(flow, {
+      sender,
+      agentWallet: {
+        ...manifestWallet,
+        capabilityManifest: manifest([
+          { kind: 'budget', totalMist: '5000000000' },
+          { kind: 'asset_scope', allowedCoinTypes: [SUI] }, // FAKE_USDC (the real output) is missing
+        ]),
+      },
+    }),
+  ).rejects.toThrow(/asset_scope violation/);
+});
+
+test('a swap min_amount_out below slippage_floor.minOutMist -> 422', async () => {
+  const flow = { nodes: [cetusSwapNode('s1', { min_amount_out: '1' })], edges: [] };
+
+  await expect(
+    compilerService.compileFlow(flow, {
+      sender,
+      agentWallet: {
+        ...manifestWallet,
+        capabilityManifest: manifest([
+          { kind: 'budget', totalMist: '5000000000' },
+          { kind: 'slippage_floor', minOutMist: '990000000' },
+        ]),
+      },
+    }),
+  ).rejects.toThrow(/slippage_floor violation/);
+});
+
+test('slippage_floor with no swap node in the flow is vacuously satisfied (warns, does not throw)', async () => {
+  const flow = { nodes: [haedalStakeNode('h1')], edges: [] };
+
+  const result = await compilerService.compileFlow(flow, {
+    sender,
+    agentWallet: {
+      ...manifestWallet,
+      capabilityManifest: manifest([
+        { kind: 'budget', totalMist: '5000000000' },
+        { kind: 'slippage_floor', minOutMist: '990000000' },
+      ]),
+    },
+  });
+
+  expect(
+    result.warnings.some((w) => w.includes('slippage_floor rule attached but the flow has no swap node')),
+  ).toBe(true);
 });
