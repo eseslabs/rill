@@ -246,6 +246,119 @@ test('wallet_status reports public budget and strategy eligibility', async () =>
   });
 });
 
+test('wallet_status reports custodyMode:bounded and honest all-true guarantees, reading the on-chain AgentWallet as today', async () => {
+  const handler = createWalletMcpHandler({
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
+    signer: {
+      address: policy.sender,
+      network: 'testnet',
+      client: {
+        getObject: async () => ({
+          object: {
+            json: {
+              budget: '30000000',
+              spent: '6000000',
+              per_tx_max: '10000000',
+              expires_at_ms: '9999999999999',
+              revoked: false,
+            },
+          },
+        }),
+      } as never,
+      hasKey: () => true,
+    },
+    policy,
+  });
+  const response = await handler({
+    jsonrpc: '2.0',
+    id: 100,
+    method: 'tools/call',
+    params: { name: 'wallet_status', arguments: {} },
+  });
+  const data = JSON.parse((response?.result as { content: [{ text: string }] }).content[0].text);
+
+  expect(data.custodyMode).toBe('bounded');
+  expect(data.guarantees).toEqual({
+    budgetCap: true,
+    perTxCap: true,
+    expiry: true,
+    revocable: true,
+  });
+  // The existing on-chain AgentWallet read is untouched.
+  expect(data.walletId).toBe(policy.walletId);
+  expect(data.remainingMist).toBe('30000000');
+});
+
+let originalCustodyMode: string | undefined;
+
+beforeEach(() => {
+  originalCustodyMode = process.env.RILL_CUSTODY_MODE;
+});
+
+afterEach(() => {
+  if (originalCustodyMode === undefined) delete process.env.RILL_CUSTODY_MODE;
+  else process.env.RILL_CUSTODY_MODE = originalCustodyMode;
+});
+
+test('wallet_status in direct mode reports custodyMode:direct, all-false guarantees with an honest note, and does NOT require a policy or read an on-chain wallet', async () => {
+  process.env.RILL_CUSTODY_MODE = 'direct';
+  const handler = createWalletMcpHandler({
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
+    signer: {
+      address: policy.sender,
+      network: 'testnet',
+      client: {
+        getObject: async () => {
+          throw new Error('wallet_status must not read an on-chain AgentWallet in direct mode');
+        },
+        getBalance: async () => ({
+          balance: { balance: '42000000', coinType: '0x2::sui::SUI', coinBalance: '42000000', addressBalance: '42000000' },
+        }),
+      } as never,
+      hasKey: () => true,
+    },
+    // No policy loaded — direct mode must not require one.
+  });
+  const response = await handler({
+    jsonrpc: '2.0',
+    id: 101,
+    method: 'tools/call',
+    params: { name: 'wallet_status', arguments: {} },
+  });
+  const data = JSON.parse((response?.result as { content: [{ text: string }] }).content[0].text);
+
+  expect((response?.result as { isError?: boolean }).isError).toBe(false);
+  expect(data.custodyMode).toBe('direct');
+  expect(data.guarantees).toEqual({
+    budgetCap: false,
+    perTxCap: false,
+    expiry: false,
+    revocable: false,
+    note:
+      'Direct-fund mode: the agent key holds the funds directly. If it is compromised, all funds are at risk. ' +
+      'There is no on-chain budget cap or revoke.',
+  });
+  expect(data.address).toBe(policy.sender);
+  expect(data.network).toBe('testnet');
+  expect(data.balanceMist).toBe('42000000');
+});
+
+test('wallet_status in bounded mode (default, no RILL_CUSTODY_MODE) still requires a loaded policy', async () => {
+  delete process.env.RILL_CUSTODY_MODE;
+  const handler = createWalletMcpHandler({
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
+    signer: { address: policy.sender, network: 'testnet', client: {} as never, hasKey: () => true },
+  });
+  const response = await handler({
+    jsonrpc: '2.0',
+    id: 102,
+    method: 'tools/call',
+    params: { name: 'wallet_status', arguments: {} },
+  });
+  expect((response?.result as { isError: boolean }).isError).toBe(true);
+  expect(JSON.parse((response?.result as { content: [{ text: string }] }).content[0].text).message).toMatch(/No signer policy loaded/);
+});
+
 test('wallet_status and list_capabilities require a loaded policy', async () => {
   const handler = createWalletMcpHandler({
     cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
