@@ -3,6 +3,8 @@ import {
   actionAmountError,
   buildCetusSwapFlowConfig,
   buildHaedalStakeFlowConfig,
+  DEFAULT_MIN_SWAP_OUTPUT,
+  defaultActionConfig,
   isValidActionAmount,
   parseActionAmount,
   TOKEN_COIN_TYPE,
@@ -42,6 +44,44 @@ describe("Part B: build*FlowConfig ignore cfg.amount — the agent supplies the 
   it("buildHaedalStakeFlowConfig always compiles the fixed 1 SUI preview amount, regardless of cfg.amount", () => {
     const cfg = buildHaedalStakeFlowConfig({ amount: "999" });
     expect(cfg.amount).toBe("1000000000"); // 1 SUI, not 999
+  });
+});
+
+describe("Part A: buildCetusSwapFlowConfig DOES read cfg.min_amount_out — the one genuinely per-swap cap", () => {
+  it("converts cfg.min_amount_out through the OUTPUT token's own decimals", () => {
+    // tokenIn SUI -> output USDC (6 decimals): 0.05 USDC -> 50000 base units.
+    const suiIn = buildCetusSwapFlowConfig({
+      tokenIn: "SUI",
+      tokenOut: "USDC",
+      min_amount_out: "0.05",
+    });
+    expect(suiIn.min_amount_out).toBe("50000");
+
+    // tokenIn USDC -> output SUI (9 decimals): 0.05 SUI -> 50000000 base units.
+    const usdcIn = buildCetusSwapFlowConfig({
+      tokenIn: "USDC",
+      tokenOut: "SUI",
+      min_amount_out: "0.05",
+    });
+    expect(usdcIn.min_amount_out).toBe("50000000");
+  });
+
+  it("falls back to DEFAULT_MIN_SWAP_OUTPUT when cfg.min_amount_out is absent (legacy config/draft)", () => {
+    const cfg = buildCetusSwapFlowConfig({ tokenIn: "SUI", tokenOut: "USDC" });
+    const expected = buildCetusSwapFlowConfig({
+      tokenIn: "SUI",
+      tokenOut: "USDC",
+      min_amount_out: DEFAULT_MIN_SWAP_OUTPUT,
+    });
+    expect(cfg.min_amount_out).toBe(expected.min_amount_out);
+    expect(cfg.min_amount_out).not.toBe("0");
+  });
+
+  it("a fresh cetus/swap node's default config already ships a positive min_amount_out", () => {
+    const cfg = defaultActionConfig("cetus", "swap");
+    expect(cfg.min_amount_out).toBe(DEFAULT_MIN_SWAP_OUTPUT);
+    const flowCfg = buildCetusSwapFlowConfig(cfg);
+    expect(BigInt(flowCfg.min_amount_out)).toBeGreaterThan(0n);
   });
 });
 

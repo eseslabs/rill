@@ -1,4 +1,4 @@
-import { memo, useCallback, useContext } from "react";
+import { memo, useCallback } from "react";
 import { Handle, Position, type NodeProps, useReactFlow } from "reactflow";
 import { motion } from "framer-motion";
 import { Shield, Layers, FileCode2, MessageSquareText, Plug } from "lucide-react";
@@ -9,14 +9,14 @@ import { ProtocolLogo } from "@/components/flow/protocol-logo";
 import { WIRE_IN, WIRE_OUT } from "@/lib/wire-inference";
 import { isGuardrailMinValueValid } from "@/lib/publish-gate";
 import {
+  DEFAULT_MIN_SWAP_OUTPUT,
   defaultActionConfig,
   otherSwapToken,
   type ActionConfig,
   type SwapTokenSymbol,
 } from "@/lib/action-config";
 import { TokenBadge, TokenSelect } from "@/components/flow/token-select";
-import { ManifestContext } from "@/lib/manifest-context";
-import { boundedByCaps, type CapabilityDeclarationCap } from "@/lib/capabilities";
+import { useOpenCapabilities } from "@/lib/open-capabilities-context";
 
 export type ActionNodeData = {
   protocol: string;
@@ -54,7 +54,7 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
   const c = colorMap[data.color] ?? colorMap.mint;
   const ports = data.ports;
   const { setNodes } = useReactFlow();
-  const manifest = useContext(ManifestContext);
+  const openCapabilities = useOpenCapabilities();
 
   const patchConfig = useCallback(
     (patch: ActionConfig) => {
@@ -88,16 +88,6 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
     ),
     ...data.config,
   };
-
-  // Part B: neither node type has an editable Amount field anymore — the agent supplies the real
-  // amount at runtime via MCP, bounded by the wallet's CapabilityManifest. `boundedByCaps` pulls
-  // just the on-chain spend caps (+ the pre-flight slippage floor for a swap) into the "Bounded
-  // by" panel below.
-  const boundedCaps = isCetusSwap
-    ? boundedByCaps(manifest, { includeSlippageFloor: true })
-    : isHaedalStake
-      ? boundedByCaps(manifest)
-      : [];
 
   const fieldCls =
     "nodrag nowheel w-full rounded-md border border-border bg-background px-2 py-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-primary/40";
@@ -179,16 +169,28 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
                 }
               />
             </label>
-            <BoundedByPanel
-              caps={boundedCaps}
-              tokenSymbol={(cfg.tokenIn ?? "SUI") as SwapTokenSymbol}
-            />
+            <label className="block">
+              <span className="flex items-center justify-between text-[10px] text-muted-foreground uppercase tracking-wide">
+                <span>Min swap output</span>
+                <TokenBadge symbol={(cfg.tokenOut ?? "USDC") as SwapTokenSymbol} />
+              </span>
+              <input
+                type="number"
+                min="0"
+                step="any"
+                placeholder={DEFAULT_MIN_SWAP_OUTPUT}
+                className={fieldCls}
+                value={cfg.min_amount_out ?? ""}
+                onChange={(e) => patchConfig({ min_amount_out: e.target.value })}
+              />
+            </label>
+            <AgentRuntimeNote onOpenCapabilities={openCapabilities} />
           </div>
         )}
 
         {isHaedalStake && (
           <div className="mt-3">
-            <BoundedByPanel caps={boundedCaps} tokenSymbol="SUI" />
+            <AgentRuntimeNote onOpenCapabilities={openCapabilities} />
           </div>
         )}
 
@@ -281,51 +283,26 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
 }
 
 /**
- * Part B: replaces the old manual Amount input on the Cetus swap / Haedal stake node bodies. The
- * agent supplies the real amount at runtime via MCP, bounded by whatever the wallet's
- * CapabilityManifest currently declares — this panel renders exactly those caps (read-only), so
- * the node stays honest about what actually bounds the agent instead of implying the studio-typed
- * number is what executes on-chain.
+ * Part A: on-chain agent_wallet caps (budget/per_tx/rate_limit/time_window/scope) are
+ * WALLET-LEVEL — they bound the whole agent, not one action — so repeating them on every action
+ * node (the old "Bounded by" panel) read as per-node when they aren't. This replaces it with a
+ * single honest line plus a link straight to the dialog that actually owns them; `onOpenCapabilities`
+ * comes from `lib/open-capabilities-context.ts` since ReactFlow gives custom nodes no other way to
+ * reach a callback defined in `routes/builder.tsx`.
  */
-function BoundedByPanel({
-  caps,
-  tokenSymbol,
-}: {
-  caps: CapabilityDeclarationCap[];
-  tokenSymbol: SwapTokenSymbol;
-}) {
+function AgentRuntimeNote({ onOpenCapabilities }: { onOpenCapabilities: () => void }) {
   return (
-    <div className="rounded-lg border border-border/70 bg-muted/30 px-2.5 py-2">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-[10px] text-muted-foreground uppercase tracking-wide">
-          Bounded by
-        </span>
-        <TokenBadge symbol={tokenSymbol} />
-      </div>
-      {caps.length === 0 ? (
-        <p className="mt-1.5 text-[10px] text-muted-foreground">
-          No spend cap yet — open Capabilities to bound the agent.
-        </p>
-      ) : (
-        <div className="mt-1.5 flex flex-wrap gap-1.5">
-          {caps.map((cap, i) => (
-            <span
-              key={`${cap.label}-${i}`}
-              title={cap.enforcement === "on-chain" ? "Proved on-chain" : "Enforced pre-flight"}
-              className="inline-flex items-center gap-1.5 rounded-full border border-border bg-background px-2 py-0.5 text-[10px] font-medium"
-            >
-              <span
-                className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                  cap.enforcement === "on-chain" ? "bg-mint-foreground" : "bg-amber-500"
-                }`}
-              />
-              {cap.label} <span className="font-mono text-muted-foreground">{cap.value}</span>
-            </span>
-          ))}
-        </div>
-      )}
-      <p className="mt-1.5 text-[10px] text-muted-foreground">Agent sets the amount at runtime.</p>
-    </div>
+    <p className="text-[10px] leading-relaxed text-muted-foreground">
+      Agent sets the amount at runtime — bounded by your wallet{" "}
+      <button
+        type="button"
+        onClick={onOpenCapabilities}
+        className="nodrag cursor-pointer font-medium text-foreground underline decoration-dotted underline-offset-2 hover:text-primary"
+      >
+        Capabilities
+      </button>
+      .
+    </p>
   );
 }
 

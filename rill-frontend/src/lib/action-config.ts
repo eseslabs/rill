@@ -44,9 +44,21 @@ export const TOKEN_COIN_TYPE: Record<SwapTokenSymbol, string> = Object.fromEntri
 
 export type ActionConfig = Record<string, string>;
 
+/** Sensible starting floor for a fresh swap node's per-swap "Min swap output" field — small and
+ *  positive (never the old server-side "1 mist" non-protection), in the OUTPUT token's own units.
+ *  The owner is expected to tune this to their actual slippage tolerance before onboarding; this
+ *  is just what a newly-dropped node (or a legacy draft with no `min_amount_out` in its config)
+ *  starts from. */
+export const DEFAULT_MIN_SWAP_OUTPUT = "0.01";
+
 export function defaultActionConfig(protocolId: string, actionId: string): ActionConfig {
   if (protocolId === "cetus" && actionId === "swap") {
-    return { tokenIn: "SUI", tokenOut: "USDC", amount: "0.1" };
+    return {
+      tokenIn: "SUI",
+      tokenOut: "USDC",
+      amount: "0.1",
+      min_amount_out: DEFAULT_MIN_SWAP_OUTPUT,
+    };
   }
   if (protocolId === "haedal" && actionId === "stake") {
     return { amount: "1" };
@@ -147,22 +159,34 @@ export function otherSwapToken(symbol: SwapTokenSymbol): SwapTokenSymbol {
 /** Build backend flow node config — FE owns protocol addresses, BE compiles from this payload.
  *
  *  Part B: `amount_in` is a fixed studio-preview default, not `cfg.amount` — this is an
- *  agent-driven action node now (no Amount input on the canvas, see nodes.tsx's "Bounded by"
- *  panel). Studio simulate always previews against this fixed amount; the real amount is supplied
- *  by the agent at runtime via MCP, bounded by the wallet's CapabilityManifest, never typed into
- *  this node. Coin-type/decimals logic (`toBaseUnitsString`, `TOKEN_COIN_TYPE`) is unchanged. */
+ *  agent-driven action node now (no Amount input on the canvas). Studio simulate always previews
+ *  against this fixed amount; the real amount is supplied by the agent at runtime via MCP, bounded
+ *  by the wallet's CapabilityManifest, never typed into this node. Coin-type/decimals logic
+ *  (`toBaseUnitsString`, `TOKEN_COIN_TYPE`) is unchanged.
+ *
+ *  Part A: `min_amount_out` is the one genuinely PER-SWAP cap — a wallet-level CapabilityManifest
+ *  can't express "this specific swap's slippage floor," only the amounts on a Cetus swap node can.
+ *  So unlike `amount_in` above, this DOES read `cfg.min_amount_out` — the owner-edited value from
+ *  the node's "Min swap output" field (nodes.tsx), a human decimal amount in the OUTPUT token's own
+ *  units — converted through the same `toBaseUnitsString` path every other amount on this canvas
+ *  uses. Falls back to `DEFAULT_MIN_SWAP_OUTPUT` only for a legacy draft/config that predates this
+ *  field; every node built by `defaultActionConfig`/the template builders already seeds it. */
 export function buildCetusSwapFlowConfig(cfg: ActionConfig) {
   const tokenIn = (cfg.tokenIn as SwapTokenSymbol) || "SUI";
   const m = TESTNET_MANIFEST.cetus_swap;
   const inputCoinType = TOKEN_COIN_TYPE[tokenIn] ?? TOKEN_COIN_TYPE.SUI;
+  const outputCoinType = TOKEN_COIN_TYPE[otherSwapToken(tokenIn)];
   return {
     integratePackageId: m.integratePackageId,
     globalConfigId: m.globalConfigId,
     pool: m.defaultPoolId,
     inputCoinType,
-    outputCoinType: TOKEN_COIN_TYPE[otherSwapToken(tokenIn)],
+    outputCoinType,
     amount_in: toBaseUnitsString("0.1", inputCoinType),
-    min_amount_out: "1",
+    min_amount_out: toBaseUnitsString(
+      cfg.min_amount_out ?? DEFAULT_MIN_SWAP_OUTPUT,
+      outputCoinType,
+    ),
     minSqrtPrice: m.minSqrtPrice,
     maxSqrtPrice: m.maxSqrtPrice,
   };

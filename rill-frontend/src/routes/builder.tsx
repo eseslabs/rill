@@ -16,7 +16,6 @@ import ReactFlow, {
   useReactFlow,
 } from "reactflow";
 import { motion, AnimatePresence } from "framer-motion";
-import gsap from "gsap";
 import { toast } from "sonner";
 import {
   Search,
@@ -24,10 +23,13 @@ import {
   Play,
   ChevronRight,
   ScanSearch,
-  Shield,
   ShieldCheck,
   Layers,
   LayoutTemplate,
+  LayoutGrid,
+  HelpCircle,
+  PanelLeft,
+  PanelLeftClose,
 } from "lucide-react";
 import { SiteHeader } from "@/components/site-chrome";
 import {
@@ -46,6 +48,7 @@ import { ProtocolLogo } from "@/components/flow/protocol-logo";
 import { DeletableEdge } from "@/components/flow/deletable-edge";
 import { SimulateDialog } from "@/components/flow/simulate-dialog";
 import { CapabilitiesDialog } from "@/components/flow/capabilities-dialog";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { applyWireConstraints } from "@/lib/flow-mapper";
 import {
   inferWireKindFromConnection,
@@ -57,29 +60,17 @@ import { computePublishGate } from "@/lib/publish-gate";
 import { applyProtocolRegistry, defaultActionConfig } from "@/lib/action-config";
 import { getActionPorts } from "@/lib/action-ports";
 import { FLOW_TEMPLATES, connectEdge } from "@/lib/flow-templates";
+import { computeAutoLayout } from "@/lib/auto-layout";
 import { rillApi } from "@/lib/rill-api";
 import { loadDraftFromStorage, saveDraftToStorage, maxNodeId } from "@/lib/draft-storage";
 import { emptyManifest, type CapabilityManifest } from "@/lib/capabilities";
 import { ManifestContext } from "@/lib/manifest-context";
+import { OpenCapabilitiesContext } from "@/lib/open-capabilities-context";
 import type { DiscoveredFunction, IntrospectionResult } from "@/lib/rill-types";
 
 export const Route = createFileRoute("/builder")({
   component: BuilderPage,
 });
-
-/** Cosmetic labels shown on a newly-created guardrail node's checklist — informational
- *  only; the guardrail's actually-enforced field is `minValue`/`coinType` (see
- *  nodes.tsx GuardrailNode and the read-only panel in simulate-dialog.tsx).
- *  Not exported — this module is the only remaining consumer. */
-type Guardrail = { id: string; label: string; enabled: boolean };
-
-const DEFAULT_GUARDRAILS: Guardrail[] = [
-  { id: "max_in", label: "Max amount_in ≤ 100 SUI", enabled: true },
-  { id: "slippage", label: "Slippage ≤ 1.0%", enabled: true },
-  { id: "allowlist", label: "Recipient must be on allowlist", enabled: false },
-  { id: "ttl", label: "Deadline within 60s", enabled: true },
-  { id: "dry_run", label: "Require successful dry-run", enabled: true },
-];
 
 const nodeTypes = {
   action: ActionNode,
@@ -112,6 +103,10 @@ const initialEdges: Edge[] = [];
 
 const easeOut = [0.22, 1, 0.36, 1] as const;
 
+// Part C: sidebar resize clamp (px).
+const MIN_SIDEBAR_WIDTH = 260;
+const MAX_SIDEBAR_WIDTH = 480;
+
 function BuilderPage() {
   return (
     <ReactFlowProvider>
@@ -133,12 +128,11 @@ function Builder() {
   // alongside nodes/edges below. Deliberately NOT wired into /simulate or /publish yet (next
   // phase); this phase is compose + honest live preview + persist only.
   const [manifest, setManifest] = useState<CapabilityManifest>(() => emptyManifest());
-  // Cosmetic seed data for a new guardrail node's checklist (see DEFAULT_GUARDRAILS
-  // doc comment) — not enforcement state, so it's a constant, not a setter pair.
-  const guardrails = DEFAULT_GUARDRAILS;
-  const [network, setNetwork] = useState<string | null>(null);
+  // Part C: sidebar collapse/width are pure UI state — not persisted to the draft (component
+  // state is enough; nothing about a canvas's meaning depends on how wide the library panel was).
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(320);
   const idRef = useRef(1);
-  const headlineRef = useRef<HTMLHeadingElement>(null);
   const { screenToFlowPosition } = useReactFlow();
 
   // "Latest ref" pattern (see lib/use-flow-request.ts) — kept current on every
@@ -156,13 +150,6 @@ function Builder() {
       .catch(() => {
         /* bundled TESTNET_MANIFEST is fallback */
       });
-    rillApi
-      .health()
-      .then((h) => {
-        const n = typeof h.network === "string" ? h.network : null;
-        if (n) setNetwork(n);
-      })
-      .catch(() => {});
   }, []);
 
   // Restore-on-mount (R16): a valid autosaved draft replaces the default
@@ -211,15 +198,6 @@ function Builder() {
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, []);
-
-  useEffect(() => {
-    if (!headlineRef.current) return;
-    gsap.fromTo(
-      headlineRef.current,
-      { opacity: 0, y: 16, filter: "blur(6px)" },
-      { opacity: 1, y: 0, filter: "blur(0px)", duration: 0.7, ease: "power3.out", delay: 0.1 },
-    );
-  }, [network]);
 
   const onConnect = useCallback(
     (c: Connection) => {
@@ -511,21 +489,54 @@ function Builder() {
   // keeps rendering.
   const actionNodeCount = useMemo(() => nodes.filter((n) => n.type === "action").length, [nodes]);
 
-  const addGuardrail = () => {
-    const id = `gr_${idRef.current++}`;
+  // Part D: re-lays-out the current canvas left-to-right in flow order (Trigger first, Output
+  // last, action nodes in between by dependency depth) — see lib/auto-layout.ts. Only positions
+  // change; node/edge data and ids are untouched.
+  const autoArrange = useCallback(() => {
+    const positions = computeAutoLayout(nodesRef.current, edgesRef.current);
     setNodes((nds) =>
-      nds.concat({
-        id,
-        type: "guardrail",
-        position: { x: 320, y: 480 },
-        data: {
-          rules: guardrails.filter((g) => g.enabled).map((g) => ({ id: g.id, label: g.label })),
-          minValue: "",
-          coinType: "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI",
-        },
-      } as Node),
+      nds.map((n) => (positions.has(n.id) ? { ...n, position: positions.get(n.id)! } : n)),
     );
-  };
+  }, [setNodes]);
+
+  // Part C: hand-rolled drag-resize (not react-resizable-panels — that library sizes panels by
+  // percentage of the group, and the ask here is a literal 260-480px clamp) — a mousedown on the
+  // aside's right-edge handle starts tracking window-level mousemove/mouseup so the drag keeps
+  // working even if the cursor leaves the handle's thin hit area mid-drag.
+  const sidebarResizeStartRef = useRef<{ startX: number; startWidth: number } | null>(null);
+
+  const onSidebarResizeMove = useCallback((e: MouseEvent) => {
+    const start = sidebarResizeStartRef.current;
+    if (!start) return;
+    const next = start.startWidth + (e.clientX - start.startX);
+    setSidebarWidth(Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, next)));
+  }, []);
+
+  const onSidebarResizeEnd = useCallback(() => {
+    sidebarResizeStartRef.current = null;
+    window.removeEventListener("mousemove", onSidebarResizeMove);
+    window.removeEventListener("mouseup", onSidebarResizeEnd);
+  }, [onSidebarResizeMove]);
+
+  const onSidebarResizeStart = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      sidebarResizeStartRef.current = { startX: e.clientX, startWidth: sidebarWidth };
+      window.addEventListener("mousemove", onSidebarResizeMove);
+      window.addEventListener("mouseup", onSidebarResizeEnd);
+    },
+    [sidebarWidth, onSidebarResizeMove, onSidebarResizeEnd],
+  );
+
+  // Drag listeners are registered/torn down per-drag (start/end above), but if the component
+  // unmounts mid-drag they'd otherwise leak — same cleanup-on-unmount shape as every other
+  // window listener in this file (see the beforeunload effect above).
+  useEffect(() => {
+    return () => {
+      window.removeEventListener("mousemove", onSidebarResizeMove);
+      window.removeEventListener("mouseup", onSidebarResizeEnd);
+    };
+  }, [onSidebarResizeMove, onSidebarResizeEnd]);
 
   return (
     <div className="h-[100dvh] flex flex-col overflow-hidden">
@@ -533,74 +544,128 @@ function Builder() {
         <SiteHeader />
       </div>
       <div className="flex flex-1 min-h-0 overflow-hidden">
-        {/* Sidebar */}
-        <aside className="w-[320px] shrink-0 border-r border-border/60 bg-card/40 backdrop-blur flex flex-col min-h-0">
-          <div className="p-4 border-b border-border/60 shrink-0">
-            <div className="text-xs uppercase tracking-widest text-muted-foreground">Library</div>
-            <h2 ref={headlineRef} className="mt-1 font-display text-2xl tracking-tight">
-              {network ? `Live on ${network}` : "Live on Sui"}
-            </h2>
-            <p className="mt-2 text-[11px] text-muted-foreground leading-relaxed">
-              1. Drag actions onto canvas
-              <br />
-              2. Wire <strong>out → in</strong> — solid = coin chain, dashed = sequence
-              <br />
-              3. <strong>Simulate</strong> → <strong>Compile & export</strong>
-            </p>
-            <motion.button
-              whileHover={{ scale: 1.02, y: -1 }}
-              whileTap={{ scale: 0.98 }}
-              transition={{ type: "spring", stiffness: 420, damping: 24 }}
-              onClick={() => setDiscoverOpen(true)}
-              className="mt-3 w-full inline-flex cursor-pointer items-center justify-center gap-2 rounded-lg bg-foreground text-background px-3 py-2 text-sm font-medium shadow-[var(--shadow-soft)]"
+        {/* Sidebar — Part C: collapsible to a thin rail + resizable (260-480px, drag handle on
+         *  the right edge). Width is plain component state, not persisted to the draft. */}
+        {sidebarCollapsed ? (
+          <aside className="w-11 shrink-0 border-r border-border/60 bg-card/40 backdrop-blur flex flex-col items-center min-h-0">
+            <button
+              type="button"
+              onClick={() => setSidebarCollapsed(false)}
+              aria-label="Expand library sidebar"
+              className="mt-3 inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition hover:bg-secondary/60 hover:text-foreground"
             >
-              <ScanSearch className="h-3.5 w-3.5" /> Discover / Import
-            </motion.button>
-            <motion.button
-              whileHover={{ scale: 1.02, y: -1 }}
-              whileTap={{ scale: 0.98 }}
-              transition={{ type: "spring", stiffness: 420, damping: 24 }}
-              onClick={() => setTemplateOpen(true)}
-              className="mt-2 w-full inline-flex cursor-pointer items-center justify-center gap-2 rounded-lg bg-background border border-border text-foreground px-3 py-2 text-sm font-medium shadow-[var(--shadow-soft)]"
-            >
-              <LayoutTemplate className="h-3.5 w-3.5" /> Template
-            </motion.button>
-            <div className="mt-3 relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-              <input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search actions…"
-                className="w-full rounded-lg bg-background border border-border pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40"
-              />
-            </div>
-          </div>
-          <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
-            <AnimatePresence mode="popLayout">
-              {filtered.map((p, i) => (
-                <motion.div
-                  key={p.id}
-                  layout
-                  initial={{ opacity: 0, x: -16 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  exit={{ opacity: 0, x: -8, scale: 0.98 }}
-                  transition={{ delay: i * 0.05, duration: 0.35, ease: easeOut }}
-                >
-                  <ProtocolGroup p={p} onAdd={addAction} onDragStart={onDragStart} />
-                </motion.div>
-              ))}
-            </AnimatePresence>
-            {filtered.length === 0 && (
-              <motion.p
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="text-sm text-muted-foreground text-center py-12"
+              <PanelLeft className="h-4 w-4" />
+            </button>
+          </aside>
+        ) : (
+          <aside
+            style={{ width: sidebarWidth }}
+            className="relative shrink-0 border-r border-border/60 bg-card/40 backdrop-blur flex flex-col min-h-0"
+          >
+            <div className="p-4 border-b border-border/60 shrink-0">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-xs uppercase tracking-widest text-muted-foreground">
+                  Library
+                </div>
+                <div className="flex items-center gap-1">
+                  <Popover>
+                    <PopoverTrigger asChild>
+                      <button
+                        type="button"
+                        aria-label="How it works"
+                        className="inline-flex h-5 w-5 cursor-pointer items-center justify-center rounded-full border border-border/70 text-muted-foreground transition hover:border-border hover:text-foreground"
+                      >
+                        <HelpCircle className="h-3 w-3" />
+                      </button>
+                    </PopoverTrigger>
+                    <PopoverContent
+                      side="bottom"
+                      align="end"
+                      className="w-64 text-[11px] leading-relaxed text-muted-foreground"
+                    >
+                      <p className="mb-1.5 text-xs font-semibold text-foreground">How it works</p>
+                      <p>
+                        1. Drag actions onto canvas
+                        <br />
+                        2. Wire <strong>out → in</strong> — solid = coin chain, dashed = sequence
+                        <br />
+                        3. <strong>Simulate</strong> → <strong>Compile & export</strong>
+                      </p>
+                    </PopoverContent>
+                  </Popover>
+                  <button
+                    type="button"
+                    onClick={() => setSidebarCollapsed(true)}
+                    aria-label="Collapse library sidebar"
+                    className="inline-flex h-5 w-5 cursor-pointer items-center justify-center rounded-full border border-border/70 text-muted-foreground transition hover:border-border hover:text-foreground"
+                  >
+                    <PanelLeftClose className="h-3 w-3" />
+                  </button>
+                </div>
+              </div>
+              <motion.button
+                whileHover={{ scale: 1.02, y: -1 }}
+                whileTap={{ scale: 0.98 }}
+                transition={{ type: "spring", stiffness: 420, damping: 24 }}
+                onClick={() => setDiscoverOpen(true)}
+                className="mt-3 w-full inline-flex cursor-pointer items-center justify-center gap-2 rounded-lg bg-foreground text-background px-3 py-2 text-sm font-medium shadow-[var(--shadow-soft)]"
               >
-                No matching actions.
-              </motion.p>
-            )}
-          </div>
-        </aside>
+                <ScanSearch className="h-3.5 w-3.5" /> Discover / Import
+              </motion.button>
+              <motion.button
+                whileHover={{ scale: 1.02, y: -1 }}
+                whileTap={{ scale: 0.98 }}
+                transition={{ type: "spring", stiffness: 420, damping: 24 }}
+                onClick={() => setTemplateOpen(true)}
+                className="mt-2 w-full inline-flex cursor-pointer items-center justify-center gap-2 rounded-lg bg-background border border-border text-foreground px-3 py-2 text-sm font-medium shadow-[var(--shadow-soft)]"
+              >
+                <LayoutTemplate className="h-3.5 w-3.5" /> Template
+              </motion.button>
+              <div className="mt-3 relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search actions…"
+                  className="w-full rounded-lg bg-background border border-border pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40"
+                />
+              </div>
+            </div>
+            <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
+              <AnimatePresence mode="popLayout">
+                {filtered.map((p, i) => (
+                  <motion.div
+                    key={p.id}
+                    layout
+                    initial={{ opacity: 0, x: -16 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: -8, scale: 0.98 }}
+                    transition={{ delay: i * 0.05, duration: 0.35, ease: easeOut }}
+                  >
+                    <ProtocolGroup p={p} onAdd={addAction} onDragStart={onDragStart} />
+                  </motion.div>
+                ))}
+              </AnimatePresence>
+              {filtered.length === 0 && (
+                <motion.p
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  className="text-sm text-muted-foreground text-center py-12"
+                >
+                  No matching actions.
+                </motion.p>
+              )}
+            </div>
+            {/* Resize handle — drag to resize within MIN/MAX_SIDEBAR_WIDTH above. */}
+            <div
+              onMouseDown={onSidebarResizeStart}
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Resize library sidebar"
+              className="absolute inset-y-0 right-0 z-10 w-1.5 cursor-col-resize hover:bg-primary/30 active:bg-primary/50"
+            />
+          </aside>
+        )}
 
         {/* Canvas — fixed viewport; pan/zoom inside ReactFlow only */}
         <main className="flex-1 min-h-0 relative overflow-hidden">
@@ -633,7 +698,12 @@ function Builder() {
               </div>
               {(
                 [
-                  { label: "Guardrails", icon: Shield, onClick: addGuardrail, badge: undefined },
+                  {
+                    label: "Auto-arrange",
+                    icon: LayoutGrid,
+                    onClick: autoArrange,
+                    badge: undefined,
+                  },
                   {
                     label: "Capabilities",
                     icon: ShieldCheck,
@@ -701,57 +771,64 @@ function Builder() {
           </motion.div>
 
           <div className="absolute inset-0 touch-none" onDrop={onDrop} onDragOver={onDragOver}>
-            {/* Part B: the only prop path from Builder's `manifest` state into the free-standing
-             *  ActionNode components ReactFlow renders internally — see lib/manifest-context.ts. */}
+            {/* Part B: the only prop path from Builder's `manifest`/`setCapabilitiesOpen` state
+             *  into the free-standing ActionNode components ReactFlow renders internally — see
+             *  lib/manifest-context.ts and lib/open-capabilities-context.ts. */}
             <ManifestContext.Provider value={manifest}>
-              <ReactFlow
-                nodes={nodes}
-                edges={edges}
-                onNodesChange={onNodesChange}
-                onEdgesChange={onEdgesChange}
-                onConnect={onConnect}
-                onConnectStart={onConnectStart}
-                onConnectEnd={onConnectEnd}
-                isValidConnection={isValidConnection}
-                nodeTypes={nodeTypes as any}
-                edgeTypes={edgeTypes as any}
-                fitView
-                className="h-full w-full"
-                proOptions={{ hideAttribution: true }}
-                defaultEdgeOptions={{ type: "deletable", animated: true }}
-                edgesDeletable
-                deleteKeyCode={["Backspace", "Delete"]}
-                connectionRadius={28}
-                connectionLineStyle={{ stroke: "var(--color-primary)", strokeWidth: 2 }}
-                preventScrolling
-                panOnScroll
-                zoomOnScroll
-              >
-                <Background
-                  variant={BackgroundVariant.Dots}
-                  gap={22}
-                  size={1.2}
-                  color="oklch(0.85 0.02 90)"
-                />
-                <Controls showInteractive={false} />
-                <MiniMap
-                  pannable
-                  zoomable
-                  style={{
-                    background: "var(--color-card)",
-                    borderRadius: 12,
-                    border: "1px solid var(--color-border)",
-                  }}
-                  nodeColor={(n) => {
-                    const c = (n.data as ActionNodeData)?.color;
-                    if (c === "mint") return "oklch(0.9 0.06 165)";
-                    if (c === "peach") return "oklch(0.9 0.06 50)";
-                    if (c === "sky") return "oklch(0.9 0.06 230)";
-                    if (c === "lilac") return "oklch(0.9 0.06 305)";
-                    return "oklch(0.7 0.02 250)";
-                  }}
-                />
-              </ReactFlow>
+              <OpenCapabilitiesContext.Provider value={() => setCapabilitiesOpen(true)}>
+                <ReactFlow
+                  nodes={nodes}
+                  edges={edges}
+                  onNodesChange={onNodesChange}
+                  onEdgesChange={onEdgesChange}
+                  onConnect={onConnect}
+                  onConnectStart={onConnectStart}
+                  onConnectEnd={onConnectEnd}
+                  isValidConnection={isValidConnection}
+                  nodeTypes={nodeTypes as any}
+                  edgeTypes={edgeTypes as any}
+                  fitView
+                  className="h-full w-full"
+                  proOptions={{ hideAttribution: true }}
+                  defaultEdgeOptions={{ type: "deletable", animated: true }}
+                  edgesDeletable
+                  deleteKeyCode={["Backspace", "Delete"]}
+                  connectionRadius={28}
+                  connectionLineStyle={{ stroke: "var(--color-primary)", strokeWidth: 2 }}
+                  preventScrolling
+                  panOnScroll
+                  zoomOnScroll
+                >
+                  <Background
+                    variant={BackgroundVariant.Dots}
+                    gap={22}
+                    size={1.2}
+                    color="oklch(0.85 0.02 90)"
+                  />
+                  <Controls showInteractive={false} />
+                  {/* Part E: shrunk from ReactFlow's default (~200x150) — it was crowding the
+                   *  bottom-right corner of the canvas. */}
+                  <MiniMap
+                    pannable
+                    zoomable
+                    style={{
+                      width: 140,
+                      height: 100,
+                      background: "var(--color-card)",
+                      borderRadius: 12,
+                      border: "1px solid var(--color-border)",
+                    }}
+                    nodeColor={(n) => {
+                      const c = (n.data as ActionNodeData)?.color;
+                      if (c === "mint") return "oklch(0.9 0.06 165)";
+                      if (c === "peach") return "oklch(0.9 0.06 50)";
+                      if (c === "sky") return "oklch(0.9 0.06 230)";
+                      if (c === "lilac") return "oklch(0.9 0.06 305)";
+                      return "oklch(0.7 0.02 250)";
+                    }}
+                  />
+                </ReactFlow>
+              </OpenCapabilitiesContext.Provider>
             </ManifestContext.Provider>
           </div>
         </main>

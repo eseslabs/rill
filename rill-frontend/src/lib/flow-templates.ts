@@ -1,7 +1,7 @@
 import type { Edge, Node } from "reactflow";
 import type { LucideIcon } from "lucide-react";
 import { ArrowLeftRight, ListOrdered, PiggyBank, ShieldCheck, Workflow } from "lucide-react";
-import type { ActionNodeData, GuardrailNodeData } from "@/components/flow/nodes";
+import type { ActionNodeData } from "@/components/flow/nodes";
 import { PROTOCOLS } from "@/lib/protocols";
 import { defaultActionConfig, type ActionConfig } from "@/lib/action-config";
 import { getActionPorts } from "@/lib/action-ports";
@@ -21,11 +21,10 @@ import {
 /**
  * FLOW-ONLY preset canvases for the "Start from a template" gallery
  * (template-dialog.tsx). Deliberately mirrors the exact node/edge shapes
- * Builder itself constructs (buildActionData/addAction in routes/builder.tsx,
- * addGuardrail, and the onConnect edge shape) so a template-built canvas is
- * indistinguishable from one a user assembled by hand — it renders, wires,
- * simulates, and (where the underlying actions are backend-supported)
- * publishes exactly the same way.
+ * Builder itself constructs (buildActionData/addAction in routes/builder.tsx
+ * and the onConnect edge shape) so a template-built canvas is indistinguishable
+ * from one a user assembled by hand — it renders, wires, simulates, and (where
+ * the underlying actions are backend-supported) publishes exactly the same way.
  *
  * Part C: each template also ships an optional, schema-valid `manifest` — a suggested
  * wallet-level CapabilityManifest bundled via `lib/capabilities.ts`'s rule builders.
@@ -99,23 +98,6 @@ function actionNode(
   } as Node;
 }
 
-/** Same checklist labels `addGuardrail` (routes/builder.tsx) seeds a new
- *  guardrail node with — cosmetic only (see DEFAULT_GUARDRAILS doc comment
- *  there); the actually-enforced fields are `minValue`/`coinType` below. */
-function guardrailNode(id: string, position: { x: number; y: number }, minValue: string): Node {
-  const data: GuardrailNodeData = {
-    rules: [
-      { id: "max_in", label: "Max amount_in ≤ 100 SUI" },
-      { id: "slippage", label: "Slippage ≤ 1.0%" },
-      { id: "ttl", label: "Deadline within 60s" },
-      { id: "dry_run", label: "Require successful dry-run" },
-    ],
-    minValue,
-    coinType: "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI",
-  };
-  return { id, type: "guardrail", position, data } as Node;
-}
-
 /** Same edge shape Builder's `onConnect` constructs for a drawn wire — the
  *  wire kind (coin vs flow) is derived from the endpoint node pair via
  *  `inferWireKind`, exactly like the canvas does for a hand-drawn connection,
@@ -146,8 +128,7 @@ export type FlowTemplate = {
    *  the description. */
   icon: LucideIcon;
   /** Ordered protocol ids this template's action nodes touch, e.g. `["cetus","haedal"]` — drives
-   *  the step-preview row of protocol icons/labels on the gallery card. Not necessarily 1:1 with
-   *  `build()`'s node list (a guardrail node isn't a protocol step). */
+   *  the step-preview row of protocol icons/labels on the gallery card. */
   steps: string[];
   /** Suggested wallet-level CapabilityManifest — schema-valid, built from `lib/capabilities.ts`'s
    *  rule builders. `applyTemplate` (routes/builder.tsx) sets this as the canvas's manifest when
@@ -159,13 +140,27 @@ export type FlowTemplate = {
   build: (makeId: () => string) => FlowTemplateBuild;
 };
 
-const BASE_X = 80;
-const STEP_X = 360;
+// Part D: BASE_X sits well right of the mandatory Trigger scaffold node (routes/builder.tsx's
+// `initialNodes`, x:40, ~228px wide) so a freshly-applied template never stacks its first action
+// node on top of the Trigger — Trigger -> action(s) -> Output reads left-to-right with no overlap.
+// STEP_X is comfortably wider than the widest action-node card renders (measured: Cetus swap
+// ~371px, DeepBook limit order ~449px, both since Part A's per-swap "Min swap output" field and
+// existing multi-field cards grew node height/width) — that alone guarantees adjacent template
+// nodes never overlap horizontally, regardless of the y stagger below.
+//
+// Output stays wherever the canvas already has it (applyTemplate, routes/builder.tsx) — by
+// default `initialNodes`' y:200, height ~213 (so occupying roughly y:[200,413]) — rather than
+// being pushed dynamically. A multi-node template's LAST node (odd i) sits close enough in x to
+// possibly reach Output's x-range too (e.g. swap-stake's Haedal node), so STAGGER_Y has to clear
+// that y-band on its own: 400 puts an odd-index node's top at 540, well below 413.
+const BASE_X = 360;
+const STEP_X = 480;
 const BASE_Y = 140;
-const STAGGER_Y = 90;
+const STAGGER_Y = 400;
 
-/** Spread-out position for the i-th node of a template (x steps of ~360,
- *  staggered y so multi-node templates don't render in a dead-straight row). */
+/** Spread-out position for the i-th node of a template (x steps of ~480, staggered y so
+ *  multi-node templates don't render in a dead-straight row — and so a template's last node,
+ *  which may sit x-adjacent to the canvas's existing Output node, never y-overlaps it either). */
 function slot(i: number): { x: number; y: number } {
   return { x: BASE_X + i * STEP_X, y: BASE_Y + (i % 2) * STAGGER_Y };
 }
@@ -234,7 +229,8 @@ export const FLOW_TEMPLATES: FlowTemplate[] = [
   {
     id: "guarded-swap",
     name: "Guarded swap",
-    description: "A Cetus swap with a guardrail enforcing a minimum output value.",
+    description:
+      "A Cetus swap with an owner-set minimum output — the per-swap slippage floor lives on the swap node itself, no separate guardrail needed.",
     icon: ShieldCheck,
     steps: ["cetus"],
     manifest: manifestOf(
@@ -242,13 +238,9 @@ export const FLOW_TEMPLATES: FlowTemplate[] = [
       slippageFloorRule("0.05"),
       assetScopeRule(WALLET_COIN_TYPE),
     ),
-    build: (makeId) => {
-      const swap = actionNode(makeId(), "cetus", "swap", slot(0));
-      const guardrail = guardrailNode(makeId(), slot(1), "0.05");
-      return {
-        nodes: [swap, guardrail],
-        edges: [connectEdge(makeId(), swap, guardrail)],
-      };
-    },
+    build: (makeId) => ({
+      nodes: [actionNode(makeId(), "cetus", "swap", slot(0), { min_amount_out: "0.05" })],
+      edges: [],
+    }),
   },
 ];
