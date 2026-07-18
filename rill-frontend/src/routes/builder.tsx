@@ -425,9 +425,9 @@ function Builder() {
   const makeId = useCallback(() => `n_${idRef.current++}`, []);
 
   // Template gallery (FLOW-ONLY presets, template-dialog.tsx / lib/flow-templates.ts):
-  // fully REPLACES the canvas with the chosen preset, mirroring the draft-restore
-  // block above — same setNodes/setEdges/idRef-reseed sequence. Confirms first if
-  // the canvas already has content so a template never silently wipes in-progress
+  // replaces the ACTION nodes/edges with the chosen preset while ALWAYS keeping the
+  // mandatory Trigger + Output scaffolding (see below). Confirms first if the canvas
+  // already has content so a template never silently wipes in-progress
   // work (mirrors the beforeunload "hasContent" check). Part C: also replaces the
   // wallet-level manifest with the template's suggested preset (or an empty one if the
   // template doesn't ship one), so picking a template seeds both canvas AND capabilities
@@ -441,7 +441,12 @@ function Builder() {
         edgesRef.current.length > 0;
       if (hasContent && !window.confirm("Replace the current flow with this template?")) return;
       const built = template.build(makeId);
-      setNodes(built.nodes);
+      // Trigger + Output are MANDATORY scaffolding on every flow — a template swaps the action
+      // nodes/edges but must never wipe them. Keep the current trigger/output (preserving any
+      // position the user moved them to), falling back to the defaults if either was removed.
+      const trigger = nodesRef.current.find((n) => n.type === "trigger") ?? initialNodes[0];
+      const output = nodesRef.current.find((n) => n.type === "output") ?? initialNodes[1];
+      setNodes([trigger, output, ...built.nodes]);
       setEdges(built.edges);
       setManifest(template.manifest ?? emptyManifest());
       idRef.current = maxNodeId(built.nodes) + 1;
