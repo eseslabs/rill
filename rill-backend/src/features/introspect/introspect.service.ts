@@ -1,112 +1,25 @@
-import { suiClient } from '../../core/config';
-import { DiscoveredFunction, MoveParameter } from './types';
+import { AppError } from '../../core/errors';
+import { DiscoveredFunction } from './types';
 
 export class IntrospectService {
   /**
    * Introspects a Move package and extracts public/entry functions.
+   *
+   * R15: this build genuinely cannot do this (the gRPC client this backend uses doesn't expose
+   * package bytecode) — `/introspect` must say so honestly (501, stable `type`) instead of a plain
+   * `Error` that the global handler downgrades to an opaque 500. `/resolve`'s curated manifests
+   * (`resolver.service.ts`) don't depend on this method; only its dynamic fallback does, and it now
+   * surfaces the same honest 501 instead of a generic crash.
    */
-  async introspectPackage(packageId: string): Promise<DiscoveredFunction[]> {
-    try {
-      const modules = await suiClient.getNormalizedMoveModulesByPackage({
-        package: packageId,
-      }) as Record<string, any>;
-
-      const result: DiscoveredFunction[] = [];
-
-      for (const [moduleName, moduleDef] of Object.entries(modules)) {
-        if (!moduleDef || !moduleDef.exposedFunctions) continue;
-        
-        for (const [functionName, functionDef] of Object.entries(moduleDef.exposedFunctions) as [string, any][]) {
-          // We only expose public or entry functions to the UI/agent
-          if (!functionDef.isEntry && functionDef.visibility?.toLowerCase() !== 'public') {
-            continue;
-          }
-
-          const typeParameters = (functionDef.typeParameters || []).map((tp: any, idx: number) => ({
-            index: idx,
-            abilities: tp.abilities || [],
-          }));
-
-          const parameters = (functionDef.parameters || []).map((paramType: any, idx: number) => {
-            const typeStr = this.normalizeTypeToString(paramType);
-            const classified = this.classifyParameter(typeStr);
-
-            return {
-              index: idx,
-              name: null,
-              moveType: typeStr,
-              class: classified,
-            };
-          });
-
-          result.push({
-            packageId,
-            module: moduleName,
-            name: functionName,
-            isEntry: functionDef.isEntry,
-            typeParameters,
-            parameters,
-          });
-        }
-      }
-
-      return result;
-    } catch (error: any) {
-      throw new Error(`Failed to introspect package ${packageId}: ${error.message}`);
-    }
-  }
-
-  /**
-   * Helper to convert Move normalized type to string representation.
-   */
-  private normalizeTypeToString(type: any): string {
-    if (typeof type === 'string') {
-      return type;
-    }
-    if (type.Reference) {
-      return `&${this.normalizeTypeToString(type.Reference)}`;
-    }
-    if (type.MutableReference) {
-      return `&mut ${this.normalizeTypeToString(type.MutableReference)}`;
-    }
-    if (type.Vector) {
-      return `vector<${this.normalizeTypeToString(type.Vector)}>`;
-    }
-    if (type.Struct) {
-      const struct = type.Struct;
-      const typeParams = (struct.typeArguments || []).map((ta: any) => this.normalizeTypeToString(ta)).join(', ');
-      const suffix = typeParams ? `<${typeParams}>` : '';
-      return `${struct.address}::${struct.module}::${struct.name}${suffix}`;
-    }
-    if (type.TypeParameter !== undefined) {
-      return `T${type.TypeParameter}`;
-    }
-    return JSON.stringify(type);
-  }
-
-  /**
-   * Categorizes a normalized type representation into standard categories.
-   */
-  private classifyParameter(typeStr: string): MoveParameter['class'] {
-    if (typeStr.includes('0x2::tx_context::TxContext') || typeStr.includes('0x2::clock::Clock')) {
-      return 'system';
-    }
-    if (typeStr.startsWith('T') && !typeStr.includes('::')) {
-      return 'generic';
-    }
-    if (typeStr.includes('0x2::coin::Coin')) {
-      return 'coin';
-    }
-    if (typeStr.startsWith('vector<')) {
-      return 'vector';
-    }
-    if (typeStr.includes('option::Option')) {
-      return 'option';
-    }
-    if (typeStr.includes('::') && (typeStr.includes('&') || !['u8','u16','u32','u64','u128','u256','bool','address'].some(t => typeStr.includes(t)))) {
-      return 'object';
-    }
-    return 'pure';
+  async introspectPackage(_packageId: string): Promise<DiscoveredFunction[]> {
+    const err = new AppError(
+      'Move package introspection is not supported in this build — the gRPC client used here does '
+        + 'not expose package bytecode/ABI. Use /resolve with a curated packageId/moduleName/'
+        + 'functionName (e.g. Cetus, Haedal) instead of dynamic discovery.',
+      501,
+    );
+    err.name = 'NotImplemented';
+    throw err;
   }
 }
 

@@ -1,115 +1,296 @@
 #!/usr/bin/env bun
-/**
- * @rill/signer — live MCP-path battle-test.
- *
- * Spawns the stdio MCP server (src/mcp.ts) and drives it like a real MCP client:
- *   1. initialize handshake
- *   2. sui_execute_ptb with a REAL unsignedPtb from Rill /api/compile → asserts on-chain success (digest)
- *   3. sui_execute_ptb with a PTB that fails re-simulation → asserts isError + NO submission (guard holds)
- *
- * Env: RILL_SUI_PRIVATE_KEY, AGENT_WALLET_PACKAGE_ID (unused here), RILL_BACKEND (default :3002), SUI_NETWORK.
- */
-const BACKEND = process.env.RILL_BACKEND || 'http://localhost:3002';
-const KEY = process.env.RILL_SUI_PRIVATE_KEY!;
+import { assertExecutionEnvelope, type ExecutionEnvelope } from '../../rill-sdk/src';
+
+const BACKEND = (process.env.RILL_BACKEND || 'http://localhost:3002').replace(/\/$/, '');
+const ACTION_ID = process.env.RILL_ACTION_ID;
 const NETWORK = process.env.SUI_NETWORK || 'testnet';
-if (!KEY) throw new Error('Set RILL_SUI_PRIVATE_KEY');
 
-// Derive sender from the key (so Rill builds the PTB for us).
-import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
-const ME = Ed25519Keypair.fromSecretKey(KEY).getPublicKey().toSuiAddress();
-
-let passed = 0;
-let failed = 0;
-const check = (c: boolean, label: string, d = '') => {
-  if (c) { passed++; console.log(`  ✅ ${label} ${d}`); } else { failed++; console.log(`  ❌ ${label} ${d}`); }
-};
-
-async function compile(minAmountOut: string): Promise<string> {
-  const res = await fetch(`${BACKEND}/api/compile`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      sender: ME,
-      flow: { nodes: [{ id: 'n1', type: 'cetus_swap', inputs: { amount_in: '20000000', min_amount_out: minAmountOut } }], edges: [] },
-    }),
-  });
-  const json = await res.json();
-  const ptb = (json.data ?? json).unsignedPtb;
-  if (!ptb) throw new Error(`compile failed: ${JSON.stringify(json).slice(0, 300)}`);
-  return ptb;
+if (!ACTION_ID) throw new Error('RILL_ACTION_ID is required.');
+if (!process.env.RILL_SIGNER_POLICY_PATH) throw new Error('RILL_SIGNER_POLICY_PATH is required.');
+if (!process.env.RILL_SUI_PRIVATE_KEY && !process.env.SUI_PRIVATE_KEY) {
+  throw new Error('Set the local signer key in the launching shell environment.');
 }
 
-// Minimal stdio MCP client over the spawned server.
+type ToolResult = {
+  content?: { type: string; text: string }[];
+  isError?: boolean;
+};
+
+type RpcResponse = {
+  id?: number | string | null;
+  result?: ToolResult & {
+    serverInfo?: { name?: string };
+    tools?: { name: string }[];
+  };
+  error?: { code: number; message: string };
+};
+
+type WalletStatus = {
+  address?: string;
+  strategyEligible: boolean;
+};
+
+type Capabilities = {
+  actionId: string;
+  walletPackageId: string;
+  walletId: string;
+  agentCapId: string;
+  balanceManagerId: string;
+  tradeCapId: string;
+  demoParams: Record<string, unknown>;
+};
+
+function pass(condition: unknown, label: string): asserts condition {
+  if (!condition) throw new Error(`FAIL: ${label}`);
+  console.log(`[pass] ${label}`);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function toolPayload(response: RpcResponse): { data: unknown; isError: boolean } {
+  if (response.error) throw new Error(`JSON-RPC ${response.error.code}: ${response.error.message}`);
+  const text = response.result?.content?.find((item) => item.type === 'text')?.text;
+  if (!text) throw new Error('MCP tool returned no text content.');
+  return { data: JSON.parse(text), isError: response.result?.isError === true };
+}
+
+async function remoteCall(id: number, method: string, params?: unknown): Promise<RpcResponse> {
+  const response = await fetch(`${BACKEND}/api/mcp/${ACTION_ID}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
+  });
+  if (!response.ok) throw new Error(`rill-actions ${method} HTTP ${response.status}`);
+  return response.json() as Promise<RpcResponse>;
+}
+
 class McpClient {
-  private proc = Bun.spawn(['bun', 'run', `${import.meta.dir}/../src/mcp.ts`], {
-    env: { ...process.env, RILL_SUI_PRIVATE_KEY: KEY, SUI_NETWORK: NETWORK },
+  private readonly process = Bun.spawn(['bun', 'run', `${import.meta.dir}/../src/mcp.ts`], {
+    env: { ...process.env, SUI_NETWORK: NETWORK },
     stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'inherit',
   });
-  private buf = '';
-  private pending = new Map<number, (msg: any) => void>();
-  private reader = this.proc.stdout.getReader();
+  private buffer = '';
+  private readonly pending = new Map<number, (message: RpcResponse) => void>();
+  private readonly reader = this.process.stdout.getReader();
 
-  constructor() { this.pump(); }
+  constructor() {
+    void this.pump();
+  }
+
   private async pump() {
-    const dec = new TextDecoder();
+    const decoder = new TextDecoder();
     for (;;) {
       const { value, done } = await this.reader.read();
-      if (done) break;
-      this.buf += dec.decode(value, { stream: true });
-      let i;
-      while ((i = this.buf.indexOf('\n')) >= 0) {
-        const line = this.buf.slice(0, i).trim();
-        this.buf = this.buf.slice(i + 1);
+      if (done) return;
+      this.buffer += decoder.decode(value, { stream: true });
+      let newline: number;
+      while ((newline = this.buffer.indexOf('\n')) >= 0) {
+        const line = this.buffer.slice(0, newline).trim();
+        this.buffer = this.buffer.slice(newline + 1);
         if (!line) continue;
-        const msg = JSON.parse(line);
-        const cb = this.pending.get(msg.id);
-        if (cb) { this.pending.delete(msg.id); cb(msg); }
+        const message = JSON.parse(line) as RpcResponse;
+        if (typeof message.id !== 'number') continue;
+        this.pending.get(message.id)?.(message);
+        this.pending.delete(message.id);
       }
     }
   }
-  call(id: number, method: string, params?: unknown): Promise<any> {
+
+  call(id: number, method: string, params?: unknown): Promise<RpcResponse> {
     return new Promise((resolve) => {
       this.pending.set(id, resolve);
-      this.proc.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
-      this.proc.stdin.flush();
+      this.process.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
+      this.process.stdin.flush();
     });
   }
-  notify(method: string) { this.proc.stdin.write(JSON.stringify({ jsonrpc: '2.0', method }) + '\n'); this.proc.stdin.flush(); }
-  kill() { this.proc.kill(); }
+
+  notify(method: string) {
+    this.process.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method })}\n`);
+    this.process.stdin.flush();
+  }
+
+  kill() {
+    this.process.kill();
+  }
+}
+
+async function buildEnvelope(status: WalletStatus, capabilities: Capabilities): Promise<ExecutionEnvelope> {
+  pass(status.address, 'wallet_status returns the local signer address');
+  const response = await remoteCall(5, 'tools/call', {
+    name: 'build_action',
+    arguments: {
+      actionId: ACTION_ID,
+      sender: status.address,
+      agentWallet: {
+        packageId: capabilities.walletPackageId,
+        walletId: capabilities.walletId,
+        capId: capabilities.agentCapId,
+      },
+      params: {
+        ...capabilities.demoParams,
+        balanceManagerId: capabilities.balanceManagerId,
+        tradeCapId: capabilities.tradeCapId,
+      },
+    },
+  });
+  const payload = toolPayload(response);
+  if (payload.isError) throw new Error(`build_action rejected: ${JSON.stringify(payload.data)}`);
+  return assertExecutionEnvelope(payload.data);
 }
 
 async function main() {
-  console.log(`@rill/signer MCP live test — ${NETWORK}`);
-  console.log(`  sender: ${ME}\n`);
-  const mcp = new McpClient();
+  console.log(`@rill/signer bounded MCP live test - ${NETWORK}`);
+  const wallet = new McpClient();
+  try {
+    const initialized = await wallet.call(1, 'initialize', {});
+    pass(initialized.result?.serverInfo?.name === 'rill-wallet', 'initialize rill-wallet');
+    wallet.notify('notifications/initialized');
 
-  const init = await mcp.call(1, 'initialize', {});
-  check(init.result?.serverInfo?.name === 'rill-signer', 'initialize handshake');
-  mcp.notify('notifications/initialized');
+    const statusResult = toolPayload(await wallet.call(2, 'tools/call', {
+      name: 'wallet_status',
+      arguments: {},
+    }));
+    pass(!statusResult.isError, 'wallet_status succeeds');
+    const status = statusResult.data as WalletStatus;
+    pass(status.strategyEligible, 'wallet strategy is eligible');
 
-  // 1) success path: real swap PTB, min_out 0 → should sign + submit on-chain
-  console.log('1) sui_execute_ptb — valid swap (expect on-chain success)');
-  const goodPtb = await compile('0');
-  const r1 = await mcp.call(2, 'tools/call', { name: 'sui_execute_ptb', arguments: { unsignedPtb: goodPtb } });
-  const t1 = r1.result?.content?.[0]?.text ?? '';
-  let digest = '';
-  try { digest = JSON.parse(t1).digest ?? ''; } catch { /* */ }
-  check(r1.result?.isError === false && !!digest, 'valid PTB signed + submitted', digest ? `digest ${digest}` : `(${t1.slice(0, 120)})`);
+    const capabilitiesResult = toolPayload(await wallet.call(3, 'tools/call', {
+      name: 'list_capabilities',
+      arguments: {},
+    }));
+    pass(!capabilitiesResult.isError, 'list_capabilities succeeds');
+    const capabilities = capabilitiesResult.data as Capabilities;
+    pass(capabilities.actionId === ACTION_ID, 'local policy action matches RILL_ACTION_ID');
 
-  // 2) slippage path: unsatisfiable min_out → rill_guard aborts on-chain → re-sim fails →
-  //    signer must reject WITHOUT submitting. Proves the guard + the signer's sim-guard together.
-  console.log('2) sui_execute_ptb — unsatisfiable min_out (expect slippage reject, NO submit)');
-  const badPtb = await compile('999999999999999');
-  const r2 = await mcp.call(3, 'tools/call', { name: 'sui_execute_ptb', arguments: { unsignedPtb: badPtb } });
-  const t2 = r2.result?.content?.[0]?.text ?? '';
-  const rejected = r2.result?.isError === true && !t2.includes('"digest"');
-  check(rejected, 'slippage floor rejected before signing (no submit)', `(${t2.slice(0, 90)})`);
+    const remoteInitialized = await remoteCall(1, 'initialize', {
+      protocolVersion: '2025-03-26',
+      capabilities: {},
+      clientInfo: { name: 'rill-live-test', version: '1.0.0' },
+    });
+    pass(remoteInitialized.result?.serverInfo?.name === 'rill-actions', 'initialize rill-actions');
 
-  mcp.kill();
-  console.log(`\n──────── RESULT: ${passed} passed, ${failed} failed ────────`);
-  process.exit(failed > 0 ? 1 : 0);
+    const listedTools = await remoteCall(2, 'tools/list');
+    pass(
+      JSON.stringify(listedTools.result?.tools?.map((tool) => tool.name)) ===
+        JSON.stringify(['list_actions', 'describe_action', 'build_action']),
+      'rill-actions exposes exactly the bounded tools',
+    );
+
+    const actions = toolPayload(await remoteCall(3, 'tools/call', {
+      name: 'list_actions',
+      arguments: {},
+    }));
+    pass(!actions.isError, 'list_actions succeeds');
+    const listedAction = actions.data && Array.isArray(actions.data) && actions.data.length === 1
+      ? (actions.data[0] as {
+          actionId?: unknown;
+          walletBound?: unknown;
+          network?: unknown;
+        })
+      : undefined;
+    pass(listedAction?.actionId === ACTION_ID, 'list_actions returns RILL_ACTION_ID');
+    pass(listedAction?.walletBound === true, 'list_actions reports walletBound');
+    pass(listedAction?.network === NETWORK, 'list_actions reports network');
+
+    const description = toolPayload(await remoteCall(4, 'tools/call', {
+      name: 'describe_action',
+      arguments: { actionId: ACTION_ID },
+    }));
+    pass(!description.isError, 'describe_action succeeds');
+    const described = description.data as {
+      actionId?: unknown;
+      runtimeParameters?: Record<string, unknown> & { properties?: Record<string, unknown>; required?: unknown[] };
+      agentWallet?: Record<string, unknown> & { properties?: Record<string, unknown>; required?: unknown[] };
+      requiredTargets?: unknown[];
+      requiredPublicObjects?: unknown[];
+      requiredGuards?: unknown[];
+      simulationRule?: unknown;
+      signingRule?: unknown;
+    };
+    pass(
+      described.actionId === ACTION_ID &&
+        !!described.runtimeParameters &&
+        !!described.agentWallet &&
+        Array.isArray(described.requiredTargets) &&
+        Array.isArray(described.requiredPublicObjects),
+      'describe_action returns the bounded runtime contract',
+    );
+    pass(
+      Array.isArray(described.runtimeParameters?.required) &&
+        described.runtimeParameters.required.length > 0 &&
+        described.runtimeParameters.properties?.poolKey?.type === 'string' &&
+        described.runtimeParameters.properties?.price?.type === 'number' &&
+        described.runtimeParameters.properties?.isBid?.type === 'boolean',
+      'describe_action runtime parameters have expected names/types/required list',
+    );
+    pass(
+      Array.isArray(described.agentWallet?.required) &&
+        described.agentWallet.required.includes('packageId') &&
+        described.agentWallet.required.includes('walletId') &&
+        described.agentWallet.required.includes('capId'),
+      'describe_action wallet schema requires packageId, walletId, capId',
+    );
+    pass(
+      described.requiredTargets.some((t) => typeof t === 'string' && t.endsWith('::agent_wallet::spend')) &&
+        described.requiredTargets.some((t) => typeof t === 'string' && t.endsWith('::pool::place_limit_order')),
+      'describe_action lists required agent_wallet::spend and place_limit_order targets',
+    );
+    pass(
+      described.requiredPublicObjects.some(
+        (o) => isRecord(o) && o.role === 'AgentWallet' && o.source === 'agentWallet.walletId',
+      ) &&
+        described.requiredPublicObjects.some(
+          (o) => isRecord(o) && o.role === 'BalanceManager' && o.source === 'params.balanceManagerId',
+        ) &&
+        described.requiredPublicObjects.some((o) => isRecord(o) && o.role === 'Clock' && o.objectId === '0x6'),
+      'describe_action lists required public object roles',
+    );
+    pass(
+      Array.isArray(described.requiredGuards) && described.requiredGuards.length === 0,
+      'describe_action exposes requiredGuards (empty for DeepBook hero)',
+    );
+    pass(
+      typeof described.simulationRule === 'string' && typeof described.signingRule === 'string',
+      'describe_action states simulation and signing rules before build',
+    );
+
+    const envelope = await buildEnvelope(status, capabilities);
+    pass(envelope.actionId === ACTION_ID, 'remote build_action returns a fresh ExecutionEnvelope');
+
+    const execution = toolPayload(await wallet.call(4, 'tools/call', {
+      name: 'execute_rill_action',
+      arguments: { envelope },
+    }));
+    const digest = (execution.data as { digest?: unknown }).digest;
+    pass(!execution.isError && typeof digest === 'string' && digest.length > 0, 'execute_rill_action submits successfully');
+    console.log(`  digest: ${digest}`);
+
+    const badDigest = `${envelope.actionDigest[0] === '0' ? '1' : '0'}${envelope.actionDigest.slice(1)}`;
+    const rejection = toolPayload(await wallet.call(5, 'tools/call', {
+      name: 'execute_rill_action',
+      arguments: { envelope: { ...envelope, actionDigest: badDigest } },
+    }));
+    pass(rejection.isError, 'mutated envelope digest is rejected locally');
+
+    const explanation = toolPayload(await wallet.call(6, 'tools/call', {
+      name: 'explain_rejection',
+      arguments: {},
+    }));
+    pass(!explanation.isError, 'explain_rejection succeeds');
+    pass(
+      JSON.stringify(explanation.data) === JSON.stringify(rejection.data),
+      'explain_rejection returns the recorded policy rejection',
+    );
+  } finally {
+    wallet.kill();
+  }
 }
 
-main().catch((e) => { console.error('FATAL:', e); process.exit(1); });
+main().catch((error) => {
+  console.error('FATAL:', error);
+  process.exit(1);
+});

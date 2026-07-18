@@ -7,9 +7,12 @@ import type { Port } from "@/lib/rill-types";
 import { FlowInLabels, FlowOutLabels, NodePort } from "@/components/flow/aligned-handle";
 import { ProtocolLogo } from "@/components/flow/protocol-logo";
 import { WIRE_IN, WIRE_OUT } from "@/lib/wire-inference";
+import { isGuardrailMinValueValid } from "@/lib/publish-gate";
 import {
+  actionAmountError,
   defaultActionConfig,
   otherSwapToken,
+  TOKEN_COIN_TYPE,
   type ActionConfig,
   type SwapTokenSymbol,
 } from "@/lib/action-config";
@@ -77,6 +80,16 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
     ),
     ...data.config,
   };
+
+  // R5: the amount field's decimals depend on the coin it's denominated in — Cetus swap's
+  // `amount` is in tokenIn units, Haedal stake is always SUI. Same predicate that gates
+  // simulate/publish (publish-gate.ts) drives this inline error, mirroring the guardrail pattern.
+  const amountCoinType = isCetusSwap
+    ? (TOKEN_COIN_TYPE[(cfg.tokenIn as SwapTokenSymbol) || "SUI"] ?? TOKEN_COIN_TYPE.SUI)
+    : TOKEN_COIN_TYPE.SUI;
+  const amountError =
+    isCetusSwap || isHaedalStake ? actionAmountError(cfg.amount, amountCoinType) : null;
+  const amountValid = amountError === null;
 
   const fieldCls =
     "nodrag nowheel w-full rounded-md border border-border bg-background px-2 py-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-primary/40";
@@ -151,12 +164,19 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
                   type="number"
                   min="0.000000001"
                   step="any"
-                  className={fieldCls}
+                  className={`${fieldCls} ${!amountValid ? "border-destructive focus:ring-destructive/40" : ""}`}
                   value={cfg.amount ?? "0.1"}
                   onChange={(e) => patchConfig({ amount: e.target.value })}
+                  aria-invalid={!amountValid}
+                  aria-describedby={!amountValid ? `amount-error-${id}` : undefined}
                 />
                 <TokenBadge symbol={(cfg.tokenIn ?? "SUI") as SwapTokenSymbol} />
               </div>
+              {!amountValid && (
+                <p id={`amount-error-${id}`} className="mt-1 text-[10px] text-destructive">
+                  {amountError}
+                </p>
+              )}
             </label>
           </div>
         )}
@@ -170,12 +190,19 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
                   type="number"
                   min="1"
                   step="any"
-                  className={fieldCls}
+                  className={`${fieldCls} ${!amountValid ? "border-destructive focus:ring-destructive/40" : ""}`}
                   value={cfg.amount ?? "1"}
                   onChange={(e) => patchConfig({ amount: e.target.value })}
+                  aria-invalid={!amountValid}
+                  aria-describedby={!amountValid ? `amount-error-${id}` : undefined}
                 />
                 <TokenBadge symbol="SUI" />
               </div>
+              {!amountValid && (
+                <p id={`amount-error-${id}`} className="mt-1 text-[10px] text-destructive">
+                  {amountError}
+                </p>
+              )}
               <p className="mt-1 text-[10px] text-muted-foreground">Minimum 1 SUI on testnet</p>
             </label>
           </div>
@@ -368,13 +395,33 @@ function PtbNodeImpl({ data }: NodeProps<PtbNodeData>) {
 }
 export const PtbNode = memo(PtbNodeImpl);
 
-export type GuardrailNodeData = { rules: { id: string; label: string }[] };
-function GuardrailNodeImpl({ data }: NodeProps<GuardrailNodeData>) {
+export type GuardrailNodeData = {
+  rules: { id: string; label: string }[];
+  minValue?: string;
+  coinType?: string;
+};
+function GuardrailNodeImpl({ id, data, selected }: NodeProps<GuardrailNodeData>) {
+  const { setNodes } = useReactFlow();
+  const patch = useCallback(
+    (patch: Partial<GuardrailNodeData>) => {
+      setNodes((nodes) =>
+        nodes.map((n) =>
+          n.id === id ? { ...n, data: { ...(n.data as GuardrailNodeData), ...patch } } : n,
+        ),
+      );
+    },
+    [id, setNodes],
+  );
+  const fieldCls =
+    "nodrag nowheel w-full rounded-md border border-border bg-background px-2 py-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-primary/40";
+  const minValueValid = isGuardrailMinValueValid(data.minValue);
   return (
     <motion.div
       initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
-      className="relative rounded-2xl bg-card border border-border/70 px-3.5 py-3 min-w-[220px] shadow-[var(--shadow-soft)]"
+      className={`relative rounded-2xl bg-card border border-border/70 px-3.5 py-3 min-w-[220px] shadow-[var(--shadow-soft)] ${
+        selected ? "ring-2 ring-primary/60" : ""
+      }`}
     >
       <div className="flex items-center gap-2">
         <span className="inline-flex h-6 w-6 items-center justify-center rounded-md bg-peach text-peach-foreground">
@@ -392,6 +439,35 @@ function GuardrailNodeImpl({ data }: NodeProps<GuardrailNodeData>) {
           </li>
         ))}
       </ul>
+      <div className="mt-3 space-y-2">
+        <label className="block">
+          <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Min value (SUI)</span>
+          <input
+            type="number"
+            min="0"
+            step="any"
+            placeholder="Required — e.g. 0.05"
+            className={`${fieldCls} ${!minValueValid ? "border-destructive focus:ring-destructive/40" : ""}`}
+            value={data.minValue ?? ""}
+            onChange={(e) => patch({ minValue: e.target.value })}
+            aria-invalid={!minValueValid}
+            aria-describedby={!minValueValid ? `guardrail-min-error-${id}` : undefined}
+          />
+          {!minValueValid && (
+            <p id={`guardrail-min-error-${id}`} className="mt-1 text-[10px] text-destructive">
+              Required — must be greater than 0, or this guardrail enforces nothing.
+            </p>
+          )}
+        </label>
+        <label className="block">
+          <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Coin type</span>
+          <input
+            className={fieldCls}
+            value={data.coinType ?? "0x2::sui::SUI"}
+            onChange={(e) => patch({ coinType: e.target.value })}
+          />
+        </label>
+      </div>
       <Handle id={WIRE_IN} type="target" position={Position.Left} className="flow-handle" />
       <Handle id={WIRE_OUT} type="source" position={Position.Right} className="flow-handle" />
     </motion.div>

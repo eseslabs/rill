@@ -1,16 +1,16 @@
 import { cetusAdapter } from './cetus.adapter';
-import { haedalAdapter } from './haedal.adapter';
 import { deepbookAdapter } from './deepbook.adapter';
+import { guardrailAdapter } from './guardrail.adapter';
+import { haedalAdapter } from './haedal.adapter';
+import { ptbAdapter } from './ptb.adapter';
 import type { ProtocolAdapter } from './types';
 
-/**
- * Protocol adapter registry — keyed by flow node type.
- * **Add a new protocol = add its adapter here.** Nothing else in the compiler changes.
- */
 export const adapters: Record<string, ProtocolAdapter> = {
   [cetusAdapter.nodeType]: cetusAdapter,
   [haedalAdapter.nodeType]: haedalAdapter,
   [deepbookAdapter.nodeType]: deepbookAdapter,
+  [ptbAdapter.nodeType]: ptbAdapter,
+  [guardrailAdapter.nodeType]: guardrailAdapter,
 };
 
 export function getAdapter(nodeType: string): ProtocolAdapter | undefined {

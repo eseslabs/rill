@@ -1,5 +1,9 @@
 import type { FlowGraph, FlowNode } from './compiler.service';
 
+function isTrueLike(value: unknown): boolean {
+  return value === true || value === 'true';
+}
+
 export class PreviewService {
   buildPreview(flow: FlowGraph, warnings: string[]): string {
     const lines: string[] = ['Transaction preview:', ''];
@@ -31,18 +35,32 @@ export class PreviewService {
   }
 
   private describeNode(node: FlowNode): string {
+    const config = node.config ?? {};
     switch (node.type) {
-      case 'cetus_swap': {
-        const amount = node.inputs?.amount_in ?? node.config?.amount_in ?? '?';
-        const minOut = node.inputs?.min_amount_out ?? node.config?.min_amount_out ?? '?';
-        return `• Cetus swap — amount_in: ${amount} mist, min_out: ${minOut} mist`;
-      }
-      case 'haedal_stake': {
-        const amount = node.inputs?.amount ?? node.config?.amount ?? '?';
-        return `• Haedal stake — amount: ${amount} mist SUI`;
+      case 'cetus_swap':
+        return `- Cetus swap - amount_in: ${config.amount_in ?? '?'} mist, min_out: ${config.min_amount_out ?? '?'} mist`;
+      case 'haedal_stake':
+        return `- Haedal stake - amount: ${config.amount ?? '?'} mist SUI`;
+      case 'deepbook_limit_order':
+        return [
+          '- DeepBook limit order',
+          `pool: ${config.poolKey ?? '?'}`,
+          `price: ${config.price ?? '?'}`,
+          `quantity: ${config.quantity ?? '?'}`,
+          `side: ${isTrueLike(config.isBid) ? 'bid' : 'ask'}`,
+          `pay_with_deep: ${isTrueLike(config.payWithDeep)}`,
+          `client_order_id: ${config.clientOrderId ?? '?'}`,
+          `deposit_sui: ${config.depositSui ?? 0}`,
+        ].join(' - ');
+      case 'ptb':
+        return `- PTB boundary — all wired actions compile into one transaction`;
+      case 'guardrail': {
+        const min = config.minValue ?? '?';
+        const asset = config.coinType ?? 'SUI';
+        return `- Guardrail — assert output coin value >= ${min} mist (${asset})`;
       }
       default:
-        return `• ${node.type} (unsupported — skipped at compile time)`;
+        return `- ${node.type} (unsupported - skipped at compile time)`;
     }
   }
 }

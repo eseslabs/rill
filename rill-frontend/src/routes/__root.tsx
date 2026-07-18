@@ -12,6 +12,7 @@ import { useEffect, type ReactNode } from "react";
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 import { SuiClientProvider, WalletProvider } from "@mysten/dapp-kit";
+import { Toaster } from "@/components/ui/sonner";
 import "@mysten/dapp-kit/dist/index.css";
 
 const SUI_NETWORKS = { testnet: { url: "https://fullnode.testnet.sui.io:443" } };
@@ -89,8 +90,9 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { name: "twitter:card", content: "summary" },
       { name: "twitter:title", content: "Rill — Make any Sui dApp agent-ready" },
       { name: "twitter:description", content: "Compose flows visually and export MCPs, skills, or CLI tools that let AI agents act on any Sui protocol." },
-      { property: "og:image", content: "https://pub-bb2e103a32db4e198524a2e9ed8f35b4.r2.dev/dbee01ba-af36-4fcf-848e-4efc811864f4/id-preview-2ce83af9--8d00951f-3898-470c-bf13-246a47acb231.lovable.app-1781977484006.png" },
-      { name: "twitter:image", content: "https://pub-bb2e103a32db4e198524a2e9ed8f35b4.r2.dev/dbee01ba-af36-4fcf-848e-4efc811864f4/id-preview-2ce83af9--8d00951f-3898-470c-bf13-246a47acb231.lovable.app-1781977484006.png" },
+      // No hosted social-preview image exists for this deploy (the previous value was a
+      // stale Lovable sandbox preview URL) — omitted rather than pointing at another
+      // placeholder; add og:image/twitter:image back once a real asset is hosted.
     ],
     links: [
       { rel: "stylesheet", href: appCss },
@@ -131,6 +133,7 @@ function RootComponent() {
         <WalletProvider autoConnect>
           {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
           <Outlet />
+          <Toaster />
         </WalletProvider>
       </SuiClientProvider>
     </QueryClientProvider>

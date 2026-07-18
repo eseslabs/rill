@@ -46,7 +46,10 @@ const TESTNET = {
   },
 } as const;
 
-const network = (process.env.SUI_NETWORK || 'mainnet') as 'mainnet' | 'testnet';
+// Same default + env var as `core/config.ts`'s `network` (KTD-7/R7) — kept in sync so the two
+// independent `SUI_NETWORK` reads in this codebase can never resolve to different networks when
+// the env var is unset.
+const network = (process.env.SUI_NETWORK || 'testnet') as 'mainnet' | 'testnet';
 const active = network === 'testnet' ? TESTNET : MAINNET;
 
 export const CETUS = active.cetus;

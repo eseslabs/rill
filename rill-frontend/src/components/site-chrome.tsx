@@ -55,7 +55,7 @@ export function SiteFooter() {
         <div className="flex gap-4">
           <a href="https://sui.io" target="_blank" rel="noreferrer" className="cursor-pointer hover:text-foreground">Sui</a>
           <a href="https://modelcontextprotocol.io" target="_blank" rel="noreferrer" className="cursor-pointer hover:text-foreground">MCP</a>
-          <a href="https://github.com" target="_blank" rel="noreferrer" className="cursor-pointer hover:text-foreground">GitHub</a>
+          <a href="https://github.com/eseslabs/rill" target="_blank" rel="noreferrer" className="cursor-pointer hover:text-foreground">GitHub</a>
         </div>
       </div>
     </footer>

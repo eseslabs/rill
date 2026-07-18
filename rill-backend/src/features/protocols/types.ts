@@ -29,9 +29,22 @@ export interface CompileOptions {
 
 export interface CompileResult {
   transaction: Transaction;
+  resolvedFlow: FlowGraph;
   warnings: string[];
   agentWalletBound: boolean;
   budgetSpendMist: bigint;
+}
+
+/**
+ * A node's chainable coin output: the raw PTB argument plus the Move coin type it carries, so
+ * consumers (a downstream adapter, or the compiler's own settle sweep) know both what to pass into
+ * a MoveCall/mergeCoins and how to classify it (SUI -> merge into gas; else -> transfer to sender).
+ */
+export interface NodeOutput {
+  /** The coin argument (a `TransactionResult`/`NestedResult` reference) other nodes or the sweep consume. */
+  value: unknown;
+  /** Full Move coin type of `value`, e.g. `0x2::sui::SUI`. */
+  coinType: string;
 }
 
 /**
@@ -43,7 +56,20 @@ export interface AdapterCtx {
   tx: Transaction;
   flow: FlowGraph;
   node: FlowNode;
-  nodeOutputs: Record<string, unknown>;
+  /**
+   * Node id -> its chainable output coin. An adapter that consumes an upstream coin (by reading
+   * `nodeOutputs[edge.source]`) MUST `delete` the entry once it has captured `.value` — that is how
+   * the compiler's final settle sweep knows a coin was consumed vs. left dangling. Whatever remains
+   * in this map after every node has built is produced-but-unconsumed and gets swept (KTD-3).
+   */
+  nodeOutputs: Record<string, NodeOutput>;
+  /**
+   * Coins a node produces that are never chainable to another node (e.g. Cetus's zero-value
+   * opposite-side leftover from the A/B swap pattern). Adapters push here instead of settling
+   * inline — the compiler's sweep is the single owner of all coin cleanup (KTD-3); no adapter calls
+   * `mergeCoins`/`transferObjects` on a produced coin itself.
+   */
+  extraCoins: NodeOutput[];
   budgetCoin: unknown | undefined;
   options: CompileOptions;
   warnings: string[];

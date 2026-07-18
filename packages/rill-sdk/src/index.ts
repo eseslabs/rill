@@ -1,20 +1,36 @@
-export { RillClient, type RillClientOptions } from './client';
+export {
+  RillClient,
+  type BuildActionInput,
+  type CallSkillInput,
+  type RillClientOptions,
+} from './client';
 export { RillApiError } from './errors';
+export { assertExecutionEnvelope, digestUnsignedPtb } from './execution-envelope';
+export { decimalToBaseUnits, parseU64String, U64_MAX } from './amounts';
+export { findToken, TOKENS, type TokenInfo } from './tokens';
 export type {
+  ActionToolDefinition,
+  ActionToolName,
+  AgentWalletBinding,
   ApiError,
   ApiResponse,
   ApiSuccess,
+  DeepBookResolvedParams,
+  ExecutionEnvelope,
   FlowEdge,
   FlowGraph,
   FlowNode,
   HealthInfo,
   IntrospectFunction,
+  JsonSchema,
   McpToolCallResult,
   PublishResult,
   PublishedSkill,
   ResolvedManifest,
+  RillNetwork,
   SimulationResult,
   SkillRunResult,
+  StrictSimulationResult,
   ToolDef,
 } from './types';
 

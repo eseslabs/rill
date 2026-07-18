@@ -14,11 +14,11 @@ export function loadAgentWalletFromEnv(): AgentWalletBinding | undefined {
   const capId = process.env.AGENT_CAP_OBJECT_ID;
   const coinType = process.env.AGENT_WALLET_COIN_TYPE || '0x2::sui::SUI';
 
-  if (!packageId || !walletId || !capId) {
+  if (!packageId) {
     return undefined;
   }
 
-  return { packageId, walletId, capId, coinType };
+  return { packageId, walletId: walletId || '', capId: capId || '', coinType };
 }
 
 export const SUI_COIN_TYPE = '0x2::sui::SUI';
