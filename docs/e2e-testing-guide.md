@@ -96,8 +96,11 @@ cd packages/rill-signer
 RILL_SUI_PRIVATE_KEY=<suiprivkey1...> \
 RILL_MCP_SERVER_URL=<copied-mcp-url> \
 RILL_ALLOW_TESTNET=true \
+RILL_ALLOW_AUTO_ONBOARDING=true \
 bun src/mcp.ts
 ```
+
+`RILL_ALLOW_AUTO_ONBOARDING=true` is required for step 7 below — it is the only way to let `create_run_set` sign and submit the setup/trade-cap PTBs. It is read once from the launch environment (fail-closed: any value other than the exact string `true` is treated as disabled) and cannot be turned on later via an MCP tool call, so it must be set here, before starting the signer.
 
 The signer exposes tools such as `list_actions`, `describe_action`, `create_run_set`, `build_action`, and `execute_rill_action`.
 
@@ -105,11 +108,14 @@ The signer exposes tools such as `list_actions`, `describe_action`, `create_run_
 
 A run-set is the set of on-chain objects the signer needs to execute the skill (AgentWallet, BalanceManager, TradeCap).
 
+**Precondition:** the signer must have been launched with `RILL_ALLOW_AUTO_ONBOARDING=true` (step 6). Without it, `create_run_set` still structurally validates the setup/trade-cap PTBs but returns the prepared plan unsigned instead of executing it — expect that response, not a run-set, if you skipped the env var above.
+
 1. Call `list_actions` to see the published action.
 2. Call `describe_action` to get the setup plan.
 3. Call `create_run_set` with the plan and `confirmed: true`.
 
 The signer will:
+- Structurally inspect the setup and trade-cap PTBs against a fixed onboarding allowlist (rejects unexpected MoveCall targets, transfers to any address other than the signer, or a budget above the configured ceiling)
 - Create an `AgentWallet`
 - Create a DeepBook `BalanceManager`
 - Mint a `TradeCap`

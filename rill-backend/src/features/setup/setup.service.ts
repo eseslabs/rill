@@ -11,6 +11,7 @@ import {
 } from '@mysten/deepbook-v3';
 import { Transaction } from '@mysten/sui/transactions';
 import { config, suiClient } from '../../core/config';
+import { suiToMist } from '../../core/node-config';
 import { serializeUnsignedPtb } from '../compiler/ptb.util';
 import type { PublishedSkill } from '../mcp/skills.store';
 
@@ -113,7 +114,15 @@ export async function prepareSetupPlan(
 
   const computedPriceMist = BigInt(Math.round((price * FLOAT_SCALAR * quoteCoin.scalar) / baseCoin.scalar));
   const computedQuantityMist = BigInt(Math.round(quantity * baseCoin.scalar));
-  const spendAmountMist = BigInt(Math.ceil(depositSui * 1_000_000_000));
+  // Single float→mist path (KTD-2): `depositSui` here is the exact same kind of quantity that
+  // `deepbook.adapter.ts` and `skill-runner.service.ts` also convert to mist — this used to be the
+  // one of the three call sites using `Math.ceil` while the other two used `Math.round`, so the
+  // identical `depositSui` value could yield a different mist amount depending on which file
+  // computed it. `computedPriceMist`/`computedQuantityMist` above are left as pool-scalar-ratio
+  // arithmetic (not a single token-decimals shift like `depositSui`, so `decimalToBaseUnits`'s
+  // `(value, decimals)` shape doesn't apply directly) — they are server-computed from trusted
+  // DeepBook pool/book data, not request-supplied config, so R6 doesn't apply to them either.
+  const spendAmountMist = suiToMist(depositSui, 'depositSui');
   if (spendAmountMist > perTxMist) {
     throw new Error(`Computed order spend ${spendAmountMist} exceeds per-tx cap ${perTxMist}.`);
   }

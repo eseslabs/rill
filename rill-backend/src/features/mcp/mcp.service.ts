@@ -155,13 +155,34 @@ export async function handleMcpJsonRpc(
   body: Record<string, unknown>,
   dependencies: McpDependencies = defaultDependencies,
 ): Promise<Record<string, unknown> | null> {
-  const id = body.id ?? null;
-  const method = String(body.method ?? '');
+  // Defense in depth for batch entries (R14): a JSON-RPC batch may contain a non-object element
+  // (e.g. a bare string/number) even though the type signature promises `Record<string, unknown>`
+  // — the caller (`api.routes.ts`'s `/mcp/:skillId`) maps raw parsed-JSON array elements straight
+  // into this function.
+  if (!isRecord(body)) {
+    return { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Invalid Request: expected a JSON-RPC request object.' } };
+  }
 
-  // Notifications (no `id`, e.g. notifications/initialized) get no JSON-RPC response.
-  if (method.startsWith('notifications/') || id === null) {
+  const method = String(body.method ?? '');
+  // A Notification is identified by its *method* namespace (e.g. `notifications/initialized`), not
+  // by a missing `id` — those are two different spec concepts (R14). Notifications get no response.
+  const isNotification = method.startsWith('notifications/');
+  if (isNotification) {
     return null;
   }
+
+  // A non-notification request MUST carry an `id` so the caller can correlate the response. The
+  // previous `body.id ?? null` conflated "no id" with "notification", silently swallowing id-less
+  // requests as 202-with-no-body instead of reporting the spec violation (R14).
+  const hasId = Object.prototype.hasOwnProperty.call(body, 'id');
+  if (!hasId) {
+    return {
+      jsonrpc: '2.0',
+      id: null,
+      error: { code: -32600, message: 'Invalid Request: "id" is required for a non-notification request.' },
+    };
+  }
+  const id = body.id ?? null;
 
   const skill = dependencies.getSkill(skillId);
   if (!skill) {
@@ -303,7 +324,11 @@ export async function handleMcpJsonRpc(
             sender: build.sender,
             agentWallet: build.agentWallet,
           });
-          return toolResult(id, data);
+          // `runFlow` returns a structured refusal (not an ExecutionEnvelope) instead of throwing
+          // when strict simulation failed (R3/KTD-4) — surface it as an MCP tool error so an agent
+          // client can't mistake `structuredContent` for something signable.
+          const isRefusal = 'refused' in data && data.refused === true;
+          return toolResult(id, data, isRefusal);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           return toolError(id, 'build_rejected', message);

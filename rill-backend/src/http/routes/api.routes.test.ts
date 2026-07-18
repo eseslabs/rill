@@ -1,7 +1,16 @@
-import { expect, mock, test } from 'bun:test';
+import { afterAll, expect, mock, test } from 'bun:test';
 import { apiRouter } from './api.routes';
 import { skillsStore, type PublishedSkill } from '../../features/mcp/skills.store';
 import { buildToolDefs } from '../../features/mcp/tool-schema';
+import * as realSetupService from '../../features/setup/setup.service';
+
+// Snapshot the real module before installing the mock. Bun's `mock.module` is
+// process-global and, depending on the filesystem-driven order in which bun
+// discovers test files (it leaks on the Linux CI runner but not on macOS), it
+// bleeds these stubs into setup.service.test.ts — which then saw
+// `buildSetupTransaction` return an empty PTB and `createdId` return '0x0'.
+// The afterAll below restores the real module so no other file inherits the mock.
+const realSetupModule = { ...realSetupService };
 
 mock.module('../../features/setup/setup.service', () => ({
   prepareSetupPlan: async () => ({
@@ -80,4 +89,8 @@ test('POST /setup/prepare returns 404 for unknown skill', async () => {
   });
 
   expect(response.status).toBe(404);
+});
+
+afterAll(() => {
+  mock.module('../../features/setup/setup.service', () => realSetupModule);
 });

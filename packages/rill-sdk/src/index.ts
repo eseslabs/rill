@@ -6,6 +6,8 @@ export {
 } from './client';
 export { RillApiError } from './errors';
 export { assertExecutionEnvelope, digestUnsignedPtb } from './execution-envelope';
+export { decimalToBaseUnits, parseU64String, U64_MAX } from './amounts';
+export { findToken, TOKENS, type TokenInfo } from './tokens';
 export type {
   ActionToolDefinition,
   ActionToolName,
