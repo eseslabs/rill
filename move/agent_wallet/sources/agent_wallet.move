@@ -24,6 +24,16 @@
 /// currently composed — it can never see or touch `add_rule`/`remove_rule` (R4: the agent can never
 /// change its own restrictions).
 ///
+/// **Version gate scope — an upgrade can pause the agent, but must never trap the owner.**
+/// `agent_wallet::version::check_is_valid` gates `create_wallet` and the agent-facing spend path
+/// (`request_spend`/`confirm_spend`, and every rule's `prove`) — so an in-place upgrade can pause new
+/// spending until `migrate` runs. It deliberately does NOT gate any owner-only op (`revoke`, `top_up`,
+/// `rotate_agent`, `extend_expiry`, `add_rule`, `remove_rule`): if the owner's emergency controls —
+/// above all `revoke`, the kill-switch that reclaims funds — required a fresh `Version` too, a stale
+/// shared `Version` object between an upgrade and its `migrate` call would fund-trap the owner out of
+/// their own wallet. Owner ops stay live across any package version; only the agent's ability to move
+/// money is what an upgrade can pause.
+///
 /// This is a fresh package (struct layout changed from v2; Sui upgrade compatibility forbids changing
 /// existing struct fields in-place), so v3 ships as a new deploy rather than an upgrade of v2.
 module agent_wallet::agent_wallet {
@@ -302,14 +312,20 @@ module agent_wallet::agent_wallet {
     /// module), and `_: Rule` can only be constructed by the rule's own module — so a rule can only be
     /// attached by cooperation of both the owner (transaction sender) and that rule's code. Aborts if
     /// the rule is already attached.
+    ///
+    /// Deliberately NOT version-gated (see the module doc comment): owner-only ops must never be
+    /// trapped by a pending upgrade. `_version` is kept in the signature — unused — purely so every
+    /// rule module's `add<T>(wallet, version, cfg, ctx)` wrapper keeps its existing shape; dropping the
+    /// parameter here would cascade into all 8 rule modules' `add`/`remove` for no safety benefit,
+    /// since none of them do anything with it beyond forwarding it to this call.
+    #[allow(lint(unused_object_with_fields))]
     public fun add_rule<T, Rule: drop, Config: store + drop>(
         _: Rule,
         wallet: &mut AgentWallet<T>,
-        version: &Version,
+        _version: &Version,
         cfg: Config,
         ctx: &TxContext,
     ) {
-        version.check_is_valid();
         assert!(ctx.sender() == wallet.owner, E_NOT_OWNER);
         let rule_type = type_name::with_defining_ids<Rule>();
         assert!(!wallet.policy.rules.contains(&rule_type), E_RULE_ALREADY_SET);
@@ -320,12 +336,16 @@ module agent_wallet::agent_wallet {
 
     /// Detach a rule and drop its config. Owner-only. Aborts (via the underlying `dynamic_field`
     /// remove) if the rule isn't currently attached.
+    ///
+    /// Deliberately NOT version-gated — see `add_rule`'s doc comment: an owner must always be able to
+    /// detach a rule, even mid-upgrade, and `_version` stays only so rule modules' `remove` wrappers
+    /// keep their existing shape.
+    #[allow(lint(unused_object_with_fields))]
     public fun remove_rule<T, Rule: drop, Config: store + drop>(
         wallet: &mut AgentWallet<T>,
-        version: &Version,
+        _version: &Version,
         ctx: &TxContext,
     ) {
-        version.check_is_valid();
         assert!(ctx.sender() == wallet.owner, E_NOT_OWNER);
         let rule_type = type_name::with_defining_ids<Rule>();
         let _cfg: Config = df::remove(&mut wallet.policy.id, RuleKey<Rule> {});
@@ -366,9 +386,8 @@ module agent_wallet::agent_wallet {
     // Wallet lifecycle — owner-only
     // ══════════════════════════════════════════════════════════════════════
 
-    /// Owner adds more funds to the budget.
-    public fun top_up<T>(wallet: &mut AgentWallet<T>, version: &Version, funds: Coin<T>, ctx: &TxContext) {
-        version.check_is_valid();
+    /// Owner adds more funds to the budget. Not version-gated — see the module doc comment.
+    public fun top_up<T>(wallet: &mut AgentWallet<T>, funds: Coin<T>, ctx: &TxContext) {
         assert!(ctx.sender() == wallet.owner, E_NOT_OWNER);
         let amount = funds.value();
         wallet.budget.join(funds.into_balance());
@@ -377,8 +396,12 @@ module agent_wallet::agent_wallet {
 
     /// Owner kills the wallet and reclaims all remaining funds. Future `request_spend`/`confirm_spend`
     /// abort (`E_REVOKED`).
-    public fun revoke<T>(wallet: &mut AgentWallet<T>, version: &Version, ctx: &mut TxContext): Coin<T> {
-        version.check_is_valid();
+    ///
+    /// The critical case for NOT version-gating owner ops (see the module doc comment): `revoke` is
+    /// the fund-reclaim kill-switch, and it must keep working even against a `Version` object stuck
+    /// stale between a package upgrade and its `migrate` call — an owner can never be trapped out of
+    /// pulling their own funds back.
+    public fun revoke<T>(wallet: &mut AgentWallet<T>, ctx: &mut TxContext): Coin<T> {
         assert!(ctx.sender() == wallet.owner, E_NOT_OWNER);
         wallet.revoked = true;
         let amount = wallet.budget.value();
@@ -389,14 +412,13 @@ module agent_wallet::agent_wallet {
 
     /// Owner-only: retire the current agent/cap pair and mint a fresh `AgentCap` for `new_agent`. The
     /// old cap object still exists wherever it was last held, but instantly fails `request_spend`'s
-    /// `cap_id` check since it no longer matches `wallet.cap_id`.
+    /// `cap_id` check since it no longer matches `wallet.cap_id`. Not version-gated — see the module
+    /// doc comment; an owner must be able to cut off a compromised agent regardless of upgrade state.
     public fun rotate_agent<T>(
         wallet: &mut AgentWallet<T>,
-        version: &Version,
         new_agent: address,
         ctx: &mut TxContext,
     ) {
-        version.check_is_valid();
         assert!(ctx.sender() == wallet.owner, E_NOT_OWNER);
         let old_agent = wallet.agent;
         let old_cap = wallet.cap_id;
@@ -412,14 +434,12 @@ module agent_wallet::agent_wallet {
 
     /// Owner-only: push expiry forward. Only forward — `new_expires_at_ms` must be strictly greater
     /// than the current `expires_at_ms`, so this can re-enable an expired wallet but can never be used
-    /// to shorten a live wallet's remaining lifetime.
+    /// to shorten a live wallet's remaining lifetime. Not version-gated — see the module doc comment.
     public fun extend_expiry<T>(
         wallet: &mut AgentWallet<T>,
-        version: &Version,
         new_expires_at_ms: u64,
         ctx: &TxContext,
     ) {
-        version.check_is_valid();
         assert!(ctx.sender() == wallet.owner, E_NOT_OWNER);
         assert!(new_expires_at_ms > wallet.expires_at_ms, E_EXPIRY_NOT_FORWARD);
         let old_value = wallet.expires_at_ms;

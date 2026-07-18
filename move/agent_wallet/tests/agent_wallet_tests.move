@@ -785,7 +785,7 @@ module agent_wallet::agent_wallet_tests {
 
         ts::next_tx(&mut sc, OWNER);
         let (v, mut wallet) = take_owner_side(&sc);
-        let reclaimed = aw::revoke<SUI>(&mut wallet, &v, ts::ctx(&mut sc));
+        let reclaimed = aw::revoke<SUI>(&mut wallet, ts::ctx(&mut sc));
         assert!(coin::value(&reclaimed) == 1000, 0);
         coin::burn_for_testing(reclaimed);
         return_owner_side(v, wallet);
@@ -808,7 +808,7 @@ module agent_wallet::agent_wallet_tests {
         create(&mut sc, 1000, 10_000);
         ts::next_tx(&mut sc, AGENT); // agent is not the owner
         let (v, mut wallet) = take_owner_side(&sc);
-        let reclaimed = aw::revoke<SUI>(&mut wallet, &v, ts::ctx(&mut sc));
+        let reclaimed = aw::revoke<SUI>(&mut wallet, ts::ctx(&mut sc));
         coin::burn_for_testing(reclaimed);
         return_owner_side(v, wallet);
         ts::end(sc);
@@ -821,7 +821,7 @@ module agent_wallet::agent_wallet_tests {
         ts::next_tx(&mut sc, OWNER);
         let (v, mut wallet) = take_owner_side(&sc);
         let more = coin::mint_for_testing<SUI>(500, ts::ctx(&mut sc));
-        aw::top_up<SUI>(&mut wallet, &v, more, ts::ctx(&mut sc));
+        aw::top_up<SUI>(&mut wallet, more, ts::ctx(&mut sc));
         assert!(aw::remaining(&wallet) == 1500, 0);
         return_owner_side(v, wallet);
         ts::end(sc);
@@ -834,7 +834,7 @@ module agent_wallet::agent_wallet_tests {
         ts::next_tx(&mut sc, AGENT);
         let (v, mut wallet) = take_owner_side(&sc);
         let more = coin::mint_for_testing<SUI>(500, ts::ctx(&mut sc));
-        aw::top_up<SUI>(&mut wallet, &v, more, ts::ctx(&mut sc));
+        aw::top_up<SUI>(&mut wallet, more, ts::ctx(&mut sc));
         return_owner_side(v, wallet);
         ts::end(sc);
     }
@@ -850,7 +850,7 @@ module agent_wallet::agent_wallet_tests {
 
         ts::next_tx(&mut sc, OWNER);
         let (v, mut wallet) = take_owner_side(&sc);
-        aw::rotate_agent<SUI>(&mut wallet, &v, NEW_AGENT, ts::ctx(&mut sc));
+        aw::rotate_agent<SUI>(&mut wallet, NEW_AGENT, ts::ctx(&mut sc));
         return_owner_side(v, wallet);
 
         ts::next_tx(&mut sc, AGENT); // old agent, still physically holding the old cap
@@ -872,7 +872,7 @@ module agent_wallet::agent_wallet_tests {
 
         ts::next_tx(&mut sc, OWNER);
         let (v, mut wallet) = take_owner_side(&sc);
-        aw::rotate_agent<SUI>(&mut wallet, &v, NEW_AGENT, ts::ctx(&mut sc));
+        aw::rotate_agent<SUI>(&mut wallet, NEW_AGENT, ts::ctx(&mut sc));
         assert!(aw::agent(&wallet) == NEW_AGENT, 0);
         return_owner_side(v, wallet);
 
@@ -900,7 +900,7 @@ module agent_wallet::agent_wallet_tests {
         create(&mut sc, 1000, 10_000);
         ts::next_tx(&mut sc, AGENT); // agent is not the owner
         let (v, mut wallet) = take_owner_side(&sc);
-        aw::rotate_agent<SUI>(&mut wallet, &v, NEW_AGENT, ts::ctx(&mut sc));
+        aw::rotate_agent<SUI>(&mut wallet, NEW_AGENT, ts::ctx(&mut sc));
         return_owner_side(v, wallet);
         ts::end(sc);
     }
@@ -915,7 +915,7 @@ module agent_wallet::agent_wallet_tests {
         create(&mut sc, 1000, 10_000);
         ts::next_tx(&mut sc, OWNER);
         let (v, mut wallet) = take_owner_side(&sc);
-        aw::extend_expiry<SUI>(&mut wallet, &v, 20_000, ts::ctx(&mut sc));
+        aw::extend_expiry<SUI>(&mut wallet, 20_000, ts::ctx(&mut sc));
         assert!(aw::expires_at_ms(&wallet) == 20_000, 0);
         return_owner_side(v, wallet);
         ts::end(sc);
@@ -927,7 +927,7 @@ module agent_wallet::agent_wallet_tests {
         create(&mut sc, 1000, 10_000);
         ts::next_tx(&mut sc, AGENT);
         let (v, mut wallet) = take_owner_side(&sc);
-        aw::extend_expiry<SUI>(&mut wallet, &v, 20_000, ts::ctx(&mut sc));
+        aw::extend_expiry<SUI>(&mut wallet, 20_000, ts::ctx(&mut sc));
         return_owner_side(v, wallet);
         ts::end(sc);
     }
@@ -938,7 +938,7 @@ module agent_wallet::agent_wallet_tests {
         create(&mut sc, 1000, 10_000);
         ts::next_tx(&mut sc, OWNER);
         let (v, mut wallet) = take_owner_side(&sc);
-        aw::extend_expiry<SUI>(&mut wallet, &v, 5_000, ts::ctx(&mut sc)); // 5000 < current 10_000
+        aw::extend_expiry<SUI>(&mut wallet, 5_000, ts::ctx(&mut sc)); // 5000 < current 10_000
         return_owner_side(v, wallet);
         ts::end(sc);
     }
@@ -957,7 +957,7 @@ module agent_wallet::agent_wallet_tests {
 
         ts::next_tx(&mut sc, OWNER);
         let (v, mut wallet) = take_owner_side(&sc);
-        aw::extend_expiry<SUI>(&mut wallet, &v, 50_000, ts::ctx(&mut sc));
+        aw::extend_expiry<SUI>(&mut wallet, 50_000, ts::ctx(&mut sc));
         assert!(aw::is_active(&wallet, &clk), 1);
         return_owner_side(v, wallet);
 
@@ -997,6 +997,42 @@ module agent_wallet::agent_wallet_tests {
         ts::next_tx(&mut sc, AGENT);
         let (mut v, mut wallet, cap) = take_agent_side(&sc);
         av::set_for_testing(&mut v, av::current_for_testing() + 1);
+        let mut clk = clock::create_for_testing(ts::ctx(&mut sc));
+        clk.set_for_testing(1000);
+        let req = new_request(&mut sc, &wallet, &cap, &v, 100, PKG_A, RECIPIENT_A, &clk);
+
+        drain(&mut sc, &mut wallet, req, &v, &clk);
+        clock::destroy_for_testing(clk);
+        return_agent_side(&sc, v, wallet, cap);
+        ts::end(sc);
+    }
+
+    // ── the fund-trap regression: an upgrade can pause the agent, but must never trap the owner ──
+    // With a stale/mismatched Version (simulating a package upgrade whose `migrate` hasn't run yet):
+    // the owner's kill-switch (`revoke`) still succeeds and returns funds — proving owner ops are NOT
+    // version-gated — while `request_spend` against that SAME stale Version still aborts
+    // `E_INVALID_PACKAGE_VERSION` — proving the agent path IS. An owner must never be locked out of
+    // reclaiming funds just because a package upgrade is sitting un-migrated.
+    #[test, expected_failure(abort_code = VERSION_E_INVALID_PACKAGE_VERSION, location = av)]
+    fun revoke_survives_stale_version_but_request_spend_does_not() {
+        let mut sc = ts::begin(OWNER);
+        create(&mut sc, 1000, 10_000);
+
+        // Simulate a pending, un-migrated upgrade: the shared Version is stale relative to VERSION.
+        ts::next_tx(&mut sc, OWNER);
+        let (mut v, mut wallet) = take_owner_side(&sc);
+        av::set_for_testing(&mut v, av::current_for_testing() + 1);
+
+        // Owner's kill-switch is unaffected: revoke still succeeds and returns every last mist.
+        let reclaimed = aw::revoke<SUI>(&mut wallet, ts::ctx(&mut sc));
+        assert!(coin::value(&reclaimed) == 1000, 0);
+        assert!(aw::remaining(&wallet) == 0, 1);
+        coin::burn_for_testing(reclaimed);
+        return_owner_side(v, wallet);
+
+        // The agent path, against the SAME stale Version, is paused: request_spend aborts here.
+        ts::next_tx(&mut sc, AGENT);
+        let (v, mut wallet, cap) = take_agent_side(&sc);
         let mut clk = clock::create_for_testing(ts::ctx(&mut sc));
         clk.set_for_testing(1000);
         let req = new_request(&mut sc, &wallet, &cap, &v, 100, PKG_A, RECIPIENT_A, &clk);
