@@ -268,5 +268,12 @@ export function boundedByCaps(
     .map(({ cap }) => cap);
 }
 
+/** All declared caps (label + value + enforcement) for a manifest, in rule order — template cards
+ *  render these so a preset advertises its FULL suggested capability set with values (e.g. "Budget
+ *  5 SUI"), not just the rule names. Same SDK projection the composer preview uses. */
+export function manifestCaps(manifest: CapabilityManifest): CapabilityDeclarationCap[] {
+  return toDeclaration(manifest).caps;
+}
+
 export type { CapabilityDeclarationCap, CapabilityManifest, CapabilityRule, RuleKind };
 export { RULE_KINDS };

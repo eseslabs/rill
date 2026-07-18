@@ -1,7 +1,7 @@
 import { memo, useCallback, useContext } from "react";
 import { Handle, Position, type NodeProps, useReactFlow } from "reactflow";
 import { motion } from "framer-motion";
-import { Shield, Layers, FileCode2, MessageSquareText, Plug, List, Zap } from "lucide-react";
+import { Shield, Layers, FileCode2, MessageSquareText, Plug } from "lucide-react";
 import { RillMark } from "@/components/rill-mark";
 import type { Port } from "@/lib/rill-types";
 import { FlowInLabels, FlowOutLabels, NodePort } from "@/components/flow/aligned-handle";
@@ -357,14 +357,11 @@ function TriggerNodeImpl({ data }: NodeProps<{ label: string; sub: string }>) {
       transition={{ duration: 0.15 }}
       className="relative min-w-[228px] overflow-visible rounded-2xl border border-border/70 bg-card shadow-[var(--shadow-soft)]"
     >
-      <div className="flex items-center gap-2 rounded-t-2xl bg-gradient-to-r from-foreground to-foreground/85 px-3 py-2.5 text-background">
+      <div className="overflow-hidden rounded-t-2xl flex items-center gap-2 bg-foreground px-3 py-2 text-background">
         <span className="inline-flex h-6 w-6 items-center justify-center rounded-md bg-background/15">
           <MessageSquareText className="h-3.5 w-3.5" strokeWidth={2.25} />
         </span>
         <span className="text-[11px] font-semibold uppercase tracking-wider">Trigger</span>
-        <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-background/15 px-1.5 py-0.5 text-[9px] font-medium">
-          <span className="h-1.5 w-1.5 rounded-full bg-mint" /> ready
-        </span>
       </div>
       <div className="px-3 py-3">
         <div className="text-sm font-semibold text-foreground">{data.label}</div>
@@ -379,23 +376,15 @@ function TriggerNodeImpl({ data }: NodeProps<{ label: string; sub: string }>) {
 }
 export const TriggerNode = memo(TriggerNodeImpl);
 
-/**
- * Part D: the deliberate endpoint of every flow — every canvas ends here, wired or not, so this
- * gets the most finished treatment of any node (soft primary ring on the card, header gradient
- * instead of a flat fill, a pulsing "connected" affordance) while leaving its handles/behavior
- * untouched. `tools/list`/`tools/call` render as crisp mono pills rather than plain filled blocks,
- * each carrying a small glyph that hints at its role (list = read, call = act) without claiming an
- * HTTP verb that doesn't apply to MCP's JSON-RPC methods.
- */
 function OutputNodeImpl({ data }: NodeProps<{ label: string; sub: string }>) {
   return (
     <motion.div
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       transition={{ duration: 0.15 }}
-      className="relative min-w-[228px] overflow-visible rounded-2xl border border-primary/25 bg-card shadow-[var(--shadow-soft)] ring-1 ring-primary/10"
+      className="relative min-w-[228px] overflow-visible rounded-2xl border border-border/70 bg-card shadow-[var(--shadow-soft)]"
     >
-      <div className="flex items-center gap-2 rounded-t-2xl bg-gradient-to-r from-primary to-primary/85 px-3 py-2.5 text-primary-foreground">
+      <div className="overflow-hidden rounded-t-2xl flex items-center gap-2 bg-primary px-3 py-2 text-primary-foreground">
         <span className="inline-flex h-6 w-6 items-center justify-center rounded-md bg-primary-foreground/15">
           <Plug className="h-3.5 w-3.5" strokeWidth={2.25} />
         </span>
@@ -403,24 +392,15 @@ function OutputNodeImpl({ data }: NodeProps<{ label: string; sub: string }>) {
         <RillMark className="ml-auto h-3.5 w-3.5 opacity-80" />
       </div>
       <div className="px-3 py-3">
-        <div className="flex items-center justify-between gap-2">
-          <div className="text-sm font-semibold text-foreground">{data.label}</div>
-          <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-mint/50 px-1.5 py-0.5 text-[9px] font-medium text-mint-foreground">
-            <span className="relative flex h-1.5 w-1.5">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-mint-foreground/60" />
-              <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-mint-foreground" />
-            </span>
-            connected
-          </span>
-        </div>
+        <div className="text-sm font-semibold text-foreground">{data.label}</div>
         <p className="mt-0.5 text-xs leading-snug text-muted-foreground">{data.sub}</p>
-        <div className="mt-3 flex flex-col items-start gap-1.5">
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-border/70 bg-muted/60 px-2.5 py-1 text-[10px] font-mono font-medium text-foreground/75">
-            <List className="h-3 w-3 text-muted-foreground" /> tools/list
-          </span>
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-primary/20 bg-primary/[0.06] px-2.5 py-1 text-[10px] font-mono font-medium text-foreground/75">
-            <Zap className="h-3 w-3 text-primary" /> tools/call
-          </span>
+        <div className="mt-3 space-y-1">
+          <div className="rounded-lg bg-muted/60 px-2.5 py-1.5 text-[10px] font-mono text-muted-foreground">
+            tools/list
+          </div>
+          <div className="rounded-lg bg-muted/60 px-2.5 py-1.5 text-[10px] font-mono text-muted-foreground">
+            tools/call
+          </div>
         </div>
       </div>
       <NodePort

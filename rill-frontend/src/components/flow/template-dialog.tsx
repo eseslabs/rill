@@ -2,7 +2,7 @@ import { motion } from "framer-motion";
 import { ArrowRight, Eye, LayoutTemplate, Lock } from "lucide-react";
 import { DialogShell } from "@/components/flow/dialog-shell";
 import { ProtocolLogo } from "@/components/flow/protocol-logo";
-import { RULE_KIND_META } from "@/lib/capabilities";
+import { manifestCaps } from "@/lib/capabilities";
 import { FLOW_TEMPLATES, type FlowTemplate } from "@/lib/flow-templates";
 import { PROTOCOLS } from "@/lib/protocols";
 
@@ -35,28 +35,32 @@ function StepPreview({ steps }: { steps: string[] }) {
   );
 }
 
-/** One capability chip per rule kind in the template's suggested manifest, tinted by the same
- *  on-chain/pre-flight enforcement split the Capabilities composer uses (capabilities-dialog.tsx's
- *  `EnforcementBadge`) — a template card promises exactly what onboarding with it would declare. */
+/** One capability chip per rule in the template's suggested manifest, showing the label AND its
+ *  configured value (e.g. "Budget · 5 SUI") via the SDK's own `toDeclaration` projection, tinted by
+ *  the same on-chain/pre-flight split the composer uses — a template card advertises exactly what
+ *  onboarding with it would declare, values and all. Long list values (allowed coins/recipients) are
+ *  truncated in the chip but shown in full on hover. */
 function CapChips({ manifest }: { manifest: FlowTemplate["manifest"] }) {
   if (!manifest || manifest.rules.length === 0) return null;
+  const caps = manifestCaps(manifest);
   return (
     <div className="flex flex-wrap gap-1">
-      {manifest.rules.map((rule, i) => {
-        const meta = RULE_KIND_META[rule.kind];
-        const isOnChain = meta.enforcement === "on-chain";
+      {caps.map((cap, i) => {
+        const isOnChain = cap.enforcement === "on-chain";
+        const value = cap.value.length > 22 ? `${cap.value.slice(0, 21)}…` : cap.value;
         return (
           <span
-            key={`${rule.kind}-${i}`}
-            title={meta.blurb}
-            className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+            key={`${cap.label}-${i}`}
+            title={`${cap.label}: ${cap.value}`}
+            className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] ${
               isOnChain
                 ? "bg-mint/50 text-mint-foreground"
                 : "bg-amber-400/15 text-amber-800 dark:text-amber-300"
             }`}
           >
             {isOnChain ? <Lock className="h-2.5 w-2.5" /> : <Eye className="h-2.5 w-2.5" />}
-            {meta.label}
+            <span className="font-medium">{cap.label}</span>
+            <span className="opacity-70">{value}</span>
           </span>
         );
       })}
