@@ -123,6 +123,60 @@ const DeepBookResolvedParamsSchema = z.object({
   spendAmountMist: nonEmptyString,
 }).strict();
 
+// ---- Step manifest (WS2 generic signer policy) -----------------------------------------------
+// Each entry describes ONE node in a composed on-chain flow, in the shape the signer's per-adapter
+// structural validator (packages/rill-signer/src/steps/*) independently re-derives from the actual
+// PTB bytes — the backend's declared step never substitutes for that re-derivation, it is only what
+// the owner pre-approved the plan to contain (see policy.ts's inspectGeneric, a later unit).
+//
+// `steps` on the envelope below is deliberately OPTIONAL (not `.min(1)` as an earlier draft of this
+// schema had it): this file is shared SDK code imported by rill-backend (skill-runner, openapi,
+// keyless-execution tests), which does not populate `steps` yet (that's WS1, a separate follow-up).
+// Making it required here would cascade-break the backend suite for a schema addition that is purely
+// additive to this plan's scope. The signer enforces `steps` presence in its OWN dispatch logic once
+// it starts consuming them (a later task in this plan) — this schema unit only defines the shape.
+
+export const STEP_NODE_TYPES = ['cetus_swap', 'haedal_stake', 'deepbook_limit_order'] as const;
+
+const CetusSwapStepSchema = z.object({
+  nodeType: z.literal('cetus_swap'),
+  poolId: nonEmptyString,
+  /** The on-chain slippage floor asserted by rill_guard on the swap output. */
+  minOutMist: nonEmptyString,
+  spendAmountMist: nonEmptyString,
+}).strict();
+
+const HaedalStakeStepSchema = z.object({
+  nodeType: z.literal('haedal_stake'),
+  validator: nonEmptyString,
+  spendAmountMist: nonEmptyString,
+}).strict();
+
+const DeepBookOrderStepSchema = z.object({
+  nodeType: z.literal('deepbook_limit_order'),
+  poolId: nonEmptyString,
+  balanceManagerId: nonEmptyString,
+  tradeCapId: nonEmptyString,
+  spendAmountMist: nonEmptyString,
+  order: z.object({
+    clientOrderId: nonEmptyString,
+    orderType: nonEmptyString,
+    selfMatchingOption: nonEmptyString,
+    price: nonEmptyString,
+    quantity: nonEmptyString,
+    isBid: z.boolean(),
+    payWithDeep: z.boolean(),
+    expiration: nonEmptyString,
+  }).strict(),
+}).strict();
+
+export const StepSchema = z.discriminatedUnion('nodeType', [
+  CetusSwapStepSchema,
+  HaedalStakeStepSchema,
+  DeepBookOrderStepSchema,
+]);
+export type EnvelopeStep = z.infer<typeof StepSchema>;
+
 export const ExecutionEnvelopeSchema = z.object({
   version: z.literal(EXECUTION_ENVELOPE_VERSION),
   actionId: nonEmptyString,
@@ -142,6 +196,9 @@ export const ExecutionEnvelopeSchema = z.object({
   preview: nonEmptyString,
   simulation: StrictSimulationResultSchema,
   expiresAt: nonEmptyString,
+  /** Optional owner-approved step manifest — see the block above. Absent for every envelope the
+   * backend emits today (DeepBook-only); populated once WS1 lands generic multi-step flows. */
+  steps: z.array(StepSchema).min(1).optional(),
 }).strict();
 
 export type ExecutionEnvelope = z.infer<typeof ExecutionEnvelopeSchema>;

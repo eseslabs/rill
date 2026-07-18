@@ -1,5 +1,6 @@
 import type {
   DeepBookResolvedParams,
+  EnvelopeStep,
   ExecutionEnvelope,
   StrictSimulationResult,
 } from './envelope.schema';
@@ -7,7 +8,7 @@ import type {
 // Re-exported so `ExecutionEnvelope` and friends keep resolving from `./types` for existing
 // importers. The schema in `./envelope.schema` is the single canonical definition (KTD-4); these
 // are `z.infer` types, not hand-written interfaces.
-export type { DeepBookResolvedParams, ExecutionEnvelope, StrictSimulationResult };
+export type { DeepBookResolvedParams, EnvelopeStep, ExecutionEnvelope, StrictSimulationResult };
 
 export interface FlowEdge {
   source: string;
