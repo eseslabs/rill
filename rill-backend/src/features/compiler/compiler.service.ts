@@ -24,6 +24,11 @@ export type { FlowEdge, FlowGraph, FlowNode, CompileOptions, CompileResult };
  * Orchestration only — each node's Move calls live in its `ProtocolAdapter` (`features/protocols/*`).
  * Funding flows through one chokepoint: `agent_wallet::spend()` (when an agent wallet is bound) or
  * `tx.gas`, then `fundSuiCoin` hands SUI to whichever node needs it.
+ *
+ * PTB-default (R7): there is no node-type branch for `ptb` here, or anywhere in this file — PTB is
+ * implicit, not a node the flow opts into. Every flow compiles to exactly one `Transaction`
+ * whether or not it contains a (now-legacy) `ptb` node; a leftover `ptb` node from an
+ * as-yet-unupdated frontend is accepted and contributes nothing (see `protocols/ptb.adapter.ts`).
  */
 export class CompilerService {
   async compileFlow(

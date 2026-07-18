@@ -359,6 +359,51 @@ test('unknown targetHandle "coin" -> ValidationError (422) and never risks a dou
   expect(result.budgetSpendMist).toBe(1_000_000_000n);
 });
 
+// --- PTB-default (R7): the `ptb` node is retired but tolerated ---------------
+
+function ptbNode(id: string) {
+  return { id, type: 'ptb' };
+}
+
+test('a flow with no ptb node compiles to one PTB (PTB-default, unchanged)', async () => {
+  const flow = { nodes: [cetusSwapNode('s1')], edges: [] };
+
+  const result = await compilerService.compileFlow(flow, { sender });
+
+  expect(result.warnings.some((w) => w.toLowerCase().includes('ptb'))).toBe(false);
+  assertEveryProducedCoinConsumedExactlyOnce(result.transaction);
+});
+
+test('a legacy ptb node is accepted and silently ignored — identical compiled output to no ptb node', async () => {
+  const withoutPtb = { nodes: [cetusSwapNode('s1')], edges: [] };
+  const withPtb = { nodes: [cetusSwapNode('s1'), ptbNode('legacy-ptb')], edges: [] };
+
+  const resultWithout = await compilerService.compileFlow(withoutPtb, { sender });
+  const resultWith = await compilerService.compileFlow(withPtb, { sender });
+
+  // Not an error (compile succeeded for both) and not a warning either — the ptb node is invisible.
+  expect(resultWith.warnings.some((w) => w.toLowerCase().includes('ptb'))).toBe(false);
+  expect(resultWith.warnings).toEqual(resultWithout.warnings);
+
+  // Behavioral proof: the ptb node's presence/absence produces the byte-for-byte identical PTB —
+  // same commands, same inputs, same move-call targets, in the same order. No leftover special
+  // casing anywhere in the compiler for node.type === 'ptb'.
+  expect(resultWith.transaction.getData().commands).toEqual(resultWithout.transaction.getData().commands);
+  expect(resultWith.transaction.getData().inputs).toEqual(resultWithout.transaction.getData().inputs);
+  expect(moveCallTargets(resultWith.transaction)).toEqual(moveCallTargets(resultWithout.transaction));
+
+  assertEveryProducedCoinConsumedExactlyOnce(resultWith.transaction);
+});
+
+test('multiple legacy ptb nodes in one flow never warn — the retired "multiple PTB nodes" check stays gone', async () => {
+  const flow = { nodes: [cetusSwapNode('s1'), ptbNode('legacy-ptb-1'), ptbNode('legacy-ptb-2')], edges: [] };
+
+  const result = await compilerService.compileFlow(flow, { sender });
+
+  expect(result.warnings.some((w) => w.toLowerCase().includes('ptb'))).toBe(false);
+  assertEveryProducedCoinConsumedExactlyOnce(result.transaction);
+});
+
 test('a cycle in the flow -> ValidationError (422) via the topological sort', async () => {
   const flow = {
     nodes: [guardrailNode('g1'), guardrailNode('g2')],
