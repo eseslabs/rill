@@ -308,6 +308,71 @@ object id the same way it already needs the Clock's `0x6`.
 
 ---
 
+## 7. Post-review architecture change + signer overhaul (deploy-gated) — 2026-07-19
+
+A 3-lane adversarial review (verified) found the on-chain rules' "unbypassable by construction" claim
+was false in two ways, both now fixed on `feat/modular-agent-wallet-capabilities`:
+
+- **C1 cross-wallet substitution** (fixed, `7ab1a23`): no rule's `prove` bound the wallet it read
+  config from to `req.wallet`, so an agent could `prove` against a permissive self-owned shadow wallet
+  and `confirm_spend` against the real one. `add_receipt` (the single funnel) now asserts
+  `object::id(wallet) == req.wallet`. PoC `cross_wallet_rule_substitution_aborts`.
+- **C4 budget TOCTOU** (fixed, `7ab1a23`): `budget` is now stateful+eager (mirrors `rate_limit`).
+  PoC `budget_batched_requests_aborts`.
+- **C2 decorative metadata rules** (fixed, `d412367`): Move cannot introspect a PTB, so an on-chain
+  check of a single self-declared `target_package`/`coin_in`/`coin_out`/`recipient` was decorative.
+  **`protocol_scope` / `asset_scope` / `recipient_allowlist` / `slippage_floor` are now PRE-FLIGHT
+  capabilities, off-chain.** `request_spend` lost those four params. On-chain rules are now exactly
+  `{ budget, per_tx, rate_limit, time_window }` — each a function of the SpendRequest's `amount`/time,
+  genuinely bound to the released coin. The four pre-flight rules are enforced by the **trusted
+  compiler** (`rill-backend` `enforceManifestPreflight`, fail-closed 422, live now) and are to be
+  re-verified by the **signer** (below).
+
+**§6's mismatches are RESOLVED by this branch:** `slippage_floor` is now absolute `minOutMist` (not
+bps); `ruleWitness` was deleted from `OnChainRuleParams`; `time_window` requires both bounds and has no
+`allowedHoursUtc`. Do not re-flag them.
+
+### Signer overhaul — execute WHEN the redesigned `agent_wallet` package is deployed
+
+**Gate (do not start earlier):** the signer today correctly validates the LIVE v2 contract —
+`inspect`/`inspectGeneric` target `agent_wallet::spend` and `assertCapabilitiesActive` reads
+`per_tx_max`, both CORRECT for what is deployed. Changing them now would break the live signer, and the
+redesigned flow cannot be tested end-to-end (redesigned package undeployed; manifest path not yet
+HTTP-wired — see F7). Wave 2's compiler enforcement is the current-state guarantee; the signer is
+deploy-time defense-in-depth against an agent that bypasses the compiler. Execute this only after the
+redesigned package is deployed AND a manifest-gated envelope is reachable.
+
+Precise steps (all in `packages/rill-signer/`), adding the redesigned-flow handling as a path
+DISTINCT from the untouched legacy/generic v2 paths:
+
+1. **Funding chokepoint recognition** (`policy.ts`): the new flow's chokepoint is
+   `request_spend<T>(wallet, cap, version, amount, clock)` → `<module>::prove`×N → `confirm_spend`,
+   not a single `agent_wallet::spend`. Add an inspector (`inspectManifestGated`) that pins the
+   `request_spend` args (walletId/agentCapId/amount/clock), walks the `prove` calls, and pins
+   `confirm_spend`; reuse `stepValidators` for the protocol fragments after `confirm_spend` releases
+   the coin. Keep `inspect`/`inspectGeneric` byte-unchanged (they validate the still-live v2 contract).
+2. **`assertCapabilitiesActive`** (`policy.ts:706`): the redesigned wallet has NO `per_tx_max` field —
+   per_tx is a rule, enforced on-chain by `per_tx::prove` inside `confirm_spend`. For a manifest-gated
+   wallet, DROP the `per_tx_max` read (`policy.ts:734`); keep `expires_at_ms`/`revoked`/`budget`
+   (those fields remain). Gate this so the legacy path keeps reading `per_tx_max` for live v2 wallets.
+3. **`LocalSignerPolicy`** (`policy.ts:19`): add the owner-set manifest projection —
+   `{ allowedPackages?, allowedCoinTypes?, allowedRecipients?, minSlippageOutMist?, maxAmountMist?,
+   perTxMaxMist?, window? }` (the SDK's `toSignerPolicy(manifest)` shape). Loaded from the policy file.
+4. **Signer-side re-derivation** — the mirror of the compiler's `enforceManifestPreflight`, computed
+   independently from the PTB bytes (defense against a compiler-bypassing agent): called packages ⊆
+   `allowedPackages` (from `inspectManifestGated`'s targets); coin types ⊆ `allowedCoinTypes` (from
+   MoveCall type args / step results); transfer recipients ⊆ `allowedRecipients`; each swap's min-out
+   guard ≥ `minSlippageOutMist`. Fail-closed, mirroring the legacy path's off-scope-target error style.
+5. **Dispatch** (`validateExecutionEnvelope`): route to the new path when the policy carries the
+   manifest projection (and the envelope uses the redesigned flow); otherwise the existing legacy/
+   generic dispatch is unchanged.
+6. **Verification:** unit tests against synthetic `request_spend`/`prove`/`confirm_spend` PTBs (each
+   pre-flight violation category → throw); then a live testnet rehearsal once deployed. The SDK's
+   `toSignerPolicy` already emits the exact shape step 3 consumes, and `enforceManifestPreflight` in
+   `rill-backend/src/features/compiler/compiler.service.ts` is the reference for the four checks.
+
+---
+
 ## Deferred (restated per the plan's scope boundaries)
 
 None of this is implemented by U6. Deferred, per the plan: the signer-side mirror implementation
