@@ -5,6 +5,7 @@ import type { ActionNodeData, GuardrailNodeData } from "@/components/flow/nodes"
 import { actionAmountError, TOKEN_COIN_TYPE, type SwapTokenSymbol } from "@/lib/action-config";
 import { isGuardrailMinValueValid } from "@/lib/publish-gate";
 import { wireKindFromEdge } from "@/lib/wire-inference";
+import { validateManifest } from "@/lib/capabilities";
 
 /** Same `n_${n}` id scheme Builder's `idRef` counter produces — a fresh,
  *  monotonic counter per call mirrors calling `template.build(makeId)` once
@@ -140,5 +141,33 @@ describe("FLOW_TEMPLATES", () => {
     expect(built.edges).toHaveLength(1);
     expect(built.edges[0].source).toBe(swap.id);
     expect(built.edges[0].target).toBe(guardrail.id);
+  });
+
+  // Part C: template gallery cards (icon, ordered protocol steps, suggested capability manifest).
+  describe("Part C card metadata", () => {
+    it("every template has an icon component and a non-empty ordered steps list", () => {
+      for (const template of FLOW_TEMPLATES) {
+        expect(template.icon).toBeTruthy();
+        expect(Array.isArray(template.steps)).toBe(true);
+        expect(template.steps.length).toBeGreaterThan(0);
+      }
+    });
+
+    it("every template ships a manifest, and every shipped manifest is schema-valid", () => {
+      for (const template of FLOW_TEMPLATES) {
+        expect(template.manifest).toBeTruthy();
+        if (!template.manifest) continue;
+        const result = validateManifest(template.manifest);
+        expect(result.ok, `${template.id}: ${!result.ok ? result.error : ""}`).toBe(true);
+      }
+    });
+
+    it("no template manifest declares a duplicate rule kind", () => {
+      for (const template of FLOW_TEMPLATES) {
+        if (!template.manifest) continue;
+        const kinds = template.manifest.rules.map((r) => r.kind);
+        expect(new Set(kinds).size).toBe(kinds.length);
+      }
+    });
   });
 });

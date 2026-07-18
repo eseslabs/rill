@@ -15,7 +15,8 @@ export const TESTNET_MANIFEST = {
     maxSqrtPrice: "79226673515401279992447579055",
   },
   haedal_stake: {
-    stakeTarget: "0x0a6ff2b974e08b65649d334c38db5ca046b78b4a5d892087740b9cdb3eb08e47::interface::request_stake",
+    stakeTarget:
+      "0x0a6ff2b974e08b65649d334c38db5ca046b78b4a5d892087740b9cdb3eb08e47::interface::request_stake",
     suiSystemStateId: "0x5",
     stakingObjectId: "0xb399662ac5d3973256a1e8629a913336449a2baa16847502ce6bdbf4a0003f07",
     minStakeMist: "1000000000",
@@ -26,8 +27,7 @@ export const SWAP_TOKENS = [
   { symbol: "SUI", coinType: "0x2::sui::SUI" },
   {
     symbol: "USDC",
-    coinType:
-      "0x14a71d857b34677a7d57e0feb303df1adb515a37780645ab763d42ce8d1a5e48::usdc::USDC",
+    coinType: "0x14a71d857b34677a7d57e0feb303df1adb515a37780645ab763d42ce8d1a5e48::usdc::USDC",
   },
 ] as const;
 
@@ -113,9 +113,11 @@ export function actionAmountError(amount: string | undefined, coinType: string):
 
 /** Base-units string for a backend config payload. Returns `"0"` on invalid input instead of
  *  throwing — this runs on every render (via `buildFlowGraph`, including dialogs that are mounted
- *  but not open), so it must never crash the canvas. The actual safety backstop is the gate: an
- *  invalid amount blocks simulate/publish (see `publish-gate.ts`) before this payload is ever sent
- *  to the backend, so "0" here is inert, not a silently-accepted amount. */
+ *  but not open), so it must never crash the canvas. Part B: `buildCetusSwapFlowConfig` /
+ *  `buildHaedalStakeFlowConfig` below only ever pass this a fixed, known-valid preview literal
+ *  ("0.1" / "1") — the agent supplies the real amount at runtime via MCP, bounded by the wallet's
+ *  `CapabilityManifest` (see `lib/capabilities.ts`), not a value read from node config — so the
+ *  "0" fallback here is purely defensive, not a live gate. */
 function toBaseUnitsString(amount: string | undefined, coinType: string): string {
   const result = parseActionAmount(amount, coinType);
   return result.ok ? result.baseUnits.toString() : "0";
@@ -142,7 +144,13 @@ export function otherSwapToken(symbol: SwapTokenSymbol): SwapTokenSymbol {
   return symbol === "SUI" ? "USDC" : "SUI";
 }
 
-/** Build backend flow node config — FE owns protocol addresses, BE compiles from this payload. */
+/** Build backend flow node config — FE owns protocol addresses, BE compiles from this payload.
+ *
+ *  Part B: `amount_in` is a fixed studio-preview default, not `cfg.amount` — this is an
+ *  agent-driven action node now (no Amount input on the canvas, see nodes.tsx's "Bounded by"
+ *  panel). Studio simulate always previews against this fixed amount; the real amount is supplied
+ *  by the agent at runtime via MCP, bounded by the wallet's CapabilityManifest, never typed into
+ *  this node. Coin-type/decimals logic (`toBaseUnitsString`, `TOKEN_COIN_TYPE`) is unchanged. */
 export function buildCetusSwapFlowConfig(cfg: ActionConfig) {
   const tokenIn = (cfg.tokenIn as SwapTokenSymbol) || "SUI";
   const m = TESTNET_MANIFEST.cetus_swap;
@@ -153,21 +161,24 @@ export function buildCetusSwapFlowConfig(cfg: ActionConfig) {
     pool: m.defaultPoolId,
     inputCoinType,
     outputCoinType: TOKEN_COIN_TYPE[otherSwapToken(tokenIn)],
-    amount_in: toBaseUnitsString(cfg.amount ?? "0.1", inputCoinType),
+    amount_in: toBaseUnitsString("0.1", inputCoinType),
     min_amount_out: "1",
     minSqrtPrice: m.minSqrtPrice,
     maxSqrtPrice: m.maxSqrtPrice,
   };
 }
 
-export function buildHaedalStakeFlowConfig(cfg: ActionConfig) {
+/** Part B: `amount` is a fixed studio-preview default (1 SUI), not `cfg.amount` — see
+ *  `buildCetusSwapFlowConfig`'s doc comment above for why. `cfg` is kept in the signature for
+ *  parity with the other `build*FlowConfig` functions even though this one no longer reads it. */
+export function buildHaedalStakeFlowConfig(_cfg: ActionConfig) {
   const m = TESTNET_MANIFEST.haedal_stake;
   return {
     stakeTarget: m.stakeTarget,
     suiSystemStateId: m.suiSystemStateId,
     stakingObjectId: m.stakingObjectId,
     minStakeMist: m.minStakeMist,
-    amount: toBaseUnitsString(cfg.amount ?? "1", TOKEN_COIN_TYPE.SUI),
+    amount: toBaseUnitsString("1", TOKEN_COIN_TYPE.SUI),
   };
 }
 

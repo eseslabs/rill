@@ -5,6 +5,7 @@ import {
   RULE_KIND_META,
   assetScopeRule,
   baseUnitsToDecimal,
+  boundedByCaps,
   budgetRule,
   emptyManifest,
   listToText,
@@ -208,5 +209,52 @@ describe("RULE_KIND_META enforcement matches the SDK's own toDeclaration split",
     expect(preFlight).toEqual(
       ["protocol_scope", "slippage_floor", "asset_scope", "recipient_allowlist"].sort(),
     );
+  });
+});
+
+describe("boundedByCaps (Part B: action node 'Bounded by' panel filter)", () => {
+  const manifest: CapabilityManifest = {
+    walletCoinType: "0x2::sui::SUI",
+    rules: [
+      budgetRule("5"),
+      protocolScopeRule(`0x${"a".repeat(64)}`),
+      perTxRule("1"),
+      slippageFloorRule("0.99"),
+      rateLimitRule("2", "3600000"),
+    ],
+  };
+
+  it("keeps only the on-chain spend caps (budget/per_tx/rate_limit) by default, in manifest order", () => {
+    const caps = boundedByCaps(manifest);
+    expect(caps.map((c) => c.label)).toEqual(["Budget", "Per-tx max", "Rate limit"]);
+    expect(caps.every((c) => c.enforcement === "on-chain")).toBe(true);
+  });
+
+  it("also includes the pre-flight slippage floor when includeSlippageFloor is set, in manifest order", () => {
+    const caps = boundedByCaps(manifest, { includeSlippageFloor: true });
+    expect(caps.map((c) => c.label)).toEqual([
+      "Budget",
+      "Per-tx max",
+      "Min swap output",
+      "Rate limit",
+    ]);
+  });
+
+  it("never includes a pre-flight cap other than slippage_floor, even with includeSlippageFloor set", () => {
+    const withScope: CapabilityManifest = {
+      walletCoinType: "0x2::sui::SUI",
+      rules: [budgetRule("5"), protocolScopeRule(`0x${"a".repeat(64)}`)],
+    };
+    const caps = boundedByCaps(withScope, { includeSlippageFloor: true });
+    expect(caps.map((c) => c.label)).toEqual(["Budget"]);
+  });
+
+  it("returns an empty array for a manifest with no spend caps (the node's empty-state hint)", () => {
+    const noSpendCaps: CapabilityManifest = {
+      walletCoinType: "0x2::sui::SUI",
+      rules: [protocolScopeRule(`0x${"a".repeat(64)}`)],
+    };
+    expect(boundedByCaps(noSpendCaps)).toEqual([]);
+    expect(boundedByCaps(emptyManifest())).toEqual([]);
   });
 });

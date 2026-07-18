@@ -60,6 +60,7 @@ import { FLOW_TEMPLATES } from "@/lib/flow-templates";
 import { rillApi } from "@/lib/rill-api";
 import { loadDraftFromStorage, saveDraftToStorage, maxNodeId } from "@/lib/draft-storage";
 import { emptyManifest, type CapabilityManifest } from "@/lib/capabilities";
+import { ManifestContext } from "@/lib/manifest-context";
 import type { DiscoveredFunction, IntrospectionResult } from "@/lib/rill-types";
 
 export const Route = createFileRoute("/builder")({
@@ -94,8 +95,18 @@ const edgeTypes = {
 };
 
 const initialNodes: Node[] = [
-  { id: "trigger", type: "trigger", position: { x: 40, y: 200 }, data: { label: "Agent prompt", sub: "Describe the goal" } },
-  { id: "output", type: "output", position: { x: 920, y: 200 }, data: { label: "MCP Server", sub: "Auto-generated" } },
+  {
+    id: "trigger",
+    type: "trigger",
+    position: { x: 40, y: 200 },
+    data: { label: "Agent prompt", sub: "Describe the goal" },
+  },
+  {
+    id: "output",
+    type: "output",
+    position: { x: 920, y: 200 },
+    data: { label: "MCP Server", sub: "Auto-generated" },
+  },
 ];
 const initialEdges: Edge[] = [];
 
@@ -139,9 +150,12 @@ function Builder() {
   edgesRef.current = edges;
 
   useEffect(() => {
-    rillApi.protocols().then(applyProtocolRegistry).catch(() => {
-      /* bundled TESTNET_MANIFEST is fallback */
-    });
+    rillApi
+      .protocols()
+      .then(applyProtocolRegistry)
+      .catch(() => {
+        /* bundled TESTNET_MANIFEST is fallback */
+      });
     rillApi
       .health()
       .then((h) => {
@@ -259,8 +273,18 @@ function Builder() {
 
       const connection: Connection =
         start.handleType === "source"
-          ? { source: start.nodeId, sourceHandle: start.handleId, target: otherNodeId, targetHandle: otherHandleId }
-          : { source: otherNodeId, sourceHandle: otherHandleId, target: start.nodeId, targetHandle: start.handleId };
+          ? {
+              source: start.nodeId,
+              sourceHandle: start.handleId,
+              target: otherNodeId,
+              targetHandle: otherHandleId,
+            }
+          : {
+              source: otherNodeId,
+              sourceHandle: otherHandleId,
+              target: start.nodeId,
+              targetHandle: start.handleId,
+            };
 
       const validation = isValidWireConnection(connection, nodes, edges);
       if (!validation.valid && validation.reason) {
@@ -316,10 +340,11 @@ function Builder() {
       .sort((a, b) => (a.id === "cetus" ? -1 : b.id === "cetus" ? 1 : 0))
       .map((p) => ({
         ...p,
-        actions: p.actions.filter((a) =>
-          (p.id === "cetus" && a.id === "swap") ||
-          (p.id === "haedal" && a.id === "stake") ||
-          (p.id === "deepbook" && a.id === "limit_order"),
+        actions: p.actions.filter(
+          (a) =>
+            (p.id === "cetus" && a.id === "swap") ||
+            (p.id === "haedal" && a.id === "stake") ||
+            (p.id === "deepbook" && a.id === "limit_order"),
         ),
       }));
 
@@ -356,7 +381,10 @@ function Builder() {
       if (!action) return;
       const id = `n_${idRef.current++}`;
       const data = buildActionData(p, action);
-      const pos = screenToFlowPosition({ x: 280 + Math.random() * 60, y: 120 + Math.random() * 120 });
+      const pos = screenToFlowPosition({
+        x: 280 + Math.random() * 60,
+        y: 120 + Math.random() * 120,
+      });
       setNodes((nds) => nds.concat({ id, type: "action", position: pos, data } as Node));
     },
     [screenToFlowPosition, setNodes],
@@ -370,7 +398,8 @@ function Builder() {
         const id = `n_${idRef.current++}`;
         const data: ActionNodeData = {
           protocol: meta.protocol,
-          protocolId: meta.source.kind === "protocol" ? meta.source.value : meta.protocol.toLowerCase(),
+          protocolId:
+            meta.source.kind === "protocol" ? meta.source.value : meta.protocol.toLowerCase(),
           action: f.name,
           description: f.description,
           color: f.color,
@@ -399,7 +428,10 @@ function Builder() {
   // fully REPLACES the canvas with the chosen preset, mirroring the draft-restore
   // block above — same setNodes/setEdges/idRef-reseed sequence. Confirms first if
   // the canvas already has content so a template never silently wipes in-progress
-  // work (mirrors the beforeunload "hasContent" check).
+  // work (mirrors the beforeunload "hasContent" check). Part C: also replaces the
+  // wallet-level manifest with the template's suggested preset (or an empty one if the
+  // template doesn't ship one), so picking a template seeds both canvas AND capabilities
+  // in one step.
   const applyTemplate = useCallback(
     (templateId: string) => {
       const template = FLOW_TEMPLATES.find((t) => t.id === templateId);
@@ -411,9 +443,10 @@ function Builder() {
       const built = template.build(makeId);
       setNodes(built.nodes);
       setEdges(built.edges);
+      setManifest(template.manifest ?? emptyManifest());
       idRef.current = maxNodeId(built.nodes) + 1;
     },
-    [makeId, setNodes, setEdges],
+    [makeId, setNodes, setEdges, setManifest],
   );
 
   const onDragStart = (e: React.DragEvent, p: Protocol, actionId: string) => {
@@ -451,18 +484,12 @@ function Builder() {
     e.dataTransfer.dropEffect = "move";
   }, []);
 
-  const addPtb = () => {
-    const actionCount = nodes.filter((n) => n.type === "action").length || 2;
-    const id = `ptb_${idRef.current++}`;
-    setNodes((nds) =>
-      nds.concat({
-        id,
-        type: "ptb",
-        position: { x: 640, y: 460 },
-        data: { label: "Programmable Tx Block", steps: actionCount },
-      } as Node),
-    );
-  };
+  // Part A: every flow already compiles to exactly one PTB — a manual "Add PTB" button implied
+  // that batching was an opt-in step instead of an automatic fact, so it's gone. This derived
+  // count feeds the read-only status pill next to the toolbar instead (below), and the `PtbNode`
+  // component (nodes.tsx) is kept only so a legacy draft that still has a `ptb` node on canvas
+  // keeps rendering.
+  const actionNodeCount = useMemo(() => nodes.filter((n) => n.type === "action").length, [nodes]);
 
   const addGuardrail = () => {
     const id = `gr_${idRef.current++}`;
@@ -576,10 +603,16 @@ function Builder() {
             transition={{ delay: 0.2, duration: 0.4, ease: easeOut }}
             className="absolute top-3 right-3 z-10 flex flex-col items-end gap-2"
           >
-            <div className="flex flex-wrap gap-2 justify-end">
+            <div className="flex flex-wrap items-center gap-2 justify-end">
+              <div
+                title="Every flow compiles into exactly one Programmable Transaction Block — batching is automatic, not a step you add."
+                className="inline-flex items-center gap-1.5 rounded-full bg-card/60 backdrop-blur border border-border/70 px-3 py-2 text-[11px] font-medium text-muted-foreground"
+              >
+                <Layers className="h-3.5 w-3.5" /> 1 PTB ·{" "}
+                <span className="font-mono text-foreground/80">{actionNodeCount}</span> moves
+              </div>
               {(
                 [
-                  { label: "Add PTB", icon: Layers, onClick: addPtb, badge: undefined },
                   { label: "Guardrails", icon: Shield, onClick: addGuardrail, badge: undefined },
                   {
                     label: "Capabilities",
@@ -648,45 +681,58 @@ function Builder() {
           </motion.div>
 
           <div className="absolute inset-0 touch-none" onDrop={onDrop} onDragOver={onDragOver}>
-            <ReactFlow
-              nodes={nodes}
-              edges={edges}
-              onNodesChange={onNodesChange}
-              onEdgesChange={onEdgesChange}
-              onConnect={onConnect}
-              onConnectStart={onConnectStart}
-              onConnectEnd={onConnectEnd}
-              isValidConnection={isValidConnection}
-              nodeTypes={nodeTypes as any}
-              edgeTypes={edgeTypes as any}
-              fitView
-              className="h-full w-full"
-              proOptions={{ hideAttribution: true }}
-              defaultEdgeOptions={{ type: "deletable", animated: true }}
-              edgesDeletable
-              deleteKeyCode={["Backspace", "Delete"]}
-              connectionRadius={28}
-              connectionLineStyle={{ stroke: "var(--color-primary)", strokeWidth: 2 }}
-              preventScrolling
-              panOnScroll
-              zoomOnScroll
-            >
-              <Background variant={BackgroundVariant.Dots} gap={22} size={1.2} color="oklch(0.85 0.02 90)" />
-              <Controls showInteractive={false} />
-              <MiniMap
-                pannable
-                zoomable
-                style={{ background: "var(--color-card)", borderRadius: 12, border: "1px solid var(--color-border)" }}
-                nodeColor={(n) => {
-                  const c = (n.data as ActionNodeData)?.color;
-                  if (c === "mint") return "oklch(0.9 0.06 165)";
-                  if (c === "peach") return "oklch(0.9 0.06 50)";
-                  if (c === "sky") return "oklch(0.9 0.06 230)";
-                  if (c === "lilac") return "oklch(0.9 0.06 305)";
-                  return "oklch(0.7 0.02 250)";
-                }}
-              />
-            </ReactFlow>
+            {/* Part B: the only prop path from Builder's `manifest` state into the free-standing
+             *  ActionNode components ReactFlow renders internally — see lib/manifest-context.ts. */}
+            <ManifestContext.Provider value={manifest}>
+              <ReactFlow
+                nodes={nodes}
+                edges={edges}
+                onNodesChange={onNodesChange}
+                onEdgesChange={onEdgesChange}
+                onConnect={onConnect}
+                onConnectStart={onConnectStart}
+                onConnectEnd={onConnectEnd}
+                isValidConnection={isValidConnection}
+                nodeTypes={nodeTypes as any}
+                edgeTypes={edgeTypes as any}
+                fitView
+                className="h-full w-full"
+                proOptions={{ hideAttribution: true }}
+                defaultEdgeOptions={{ type: "deletable", animated: true }}
+                edgesDeletable
+                deleteKeyCode={["Backspace", "Delete"]}
+                connectionRadius={28}
+                connectionLineStyle={{ stroke: "var(--color-primary)", strokeWidth: 2 }}
+                preventScrolling
+                panOnScroll
+                zoomOnScroll
+              >
+                <Background
+                  variant={BackgroundVariant.Dots}
+                  gap={22}
+                  size={1.2}
+                  color="oklch(0.85 0.02 90)"
+                />
+                <Controls showInteractive={false} />
+                <MiniMap
+                  pannable
+                  zoomable
+                  style={{
+                    background: "var(--color-card)",
+                    borderRadius: 12,
+                    border: "1px solid var(--color-border)",
+                  }}
+                  nodeColor={(n) => {
+                    const c = (n.data as ActionNodeData)?.color;
+                    if (c === "mint") return "oklch(0.9 0.06 165)";
+                    if (c === "peach") return "oklch(0.9 0.06 50)";
+                    if (c === "sky") return "oklch(0.9 0.06 230)";
+                    if (c === "lilac") return "oklch(0.9 0.06 305)";
+                    return "oklch(0.7 0.02 250)";
+                  }}
+                />
+              </ReactFlow>
+            </ManifestContext.Provider>
           </div>
         </main>
       </div>
@@ -761,7 +807,9 @@ function ProtocolGroup({
             <div className="text-[11px] text-muted-foreground">{p.category}</div>
           </div>
         </div>
-        <ChevronRight className={`h-4 w-4 text-muted-foreground transition-transform ${open ? "rotate-90" : ""}`} />
+        <ChevronRight
+          className={`h-4 w-4 text-muted-foreground transition-transform ${open ? "rotate-90" : ""}`}
+        />
       </button>
       <AnimatePresence initial={false}>
         {open && (
@@ -787,7 +835,9 @@ function ProtocolGroup({
                 >
                   <div>
                     <div className="text-sm font-medium leading-tight">{a.name}</div>
-                    <div className="text-[11px] text-muted-foreground line-clamp-1">{a.description}</div>
+                    <div className="text-[11px] text-muted-foreground line-clamp-1">
+                      {a.description}
+                    </div>
                   </div>
                   <motion.button
                     whileHover={{ scale: 1.05 }}

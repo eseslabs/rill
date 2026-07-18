@@ -1,9 +1,22 @@
 import type { Edge, Node } from "reactflow";
+import type { LucideIcon } from "lucide-react";
+import { ArrowLeftRight, ListOrdered, PiggyBank, ShieldCheck, Workflow } from "lucide-react";
 import type { ActionNodeData, GuardrailNodeData } from "@/components/flow/nodes";
 import { PROTOCOLS } from "@/lib/protocols";
 import { defaultActionConfig, type ActionConfig } from "@/lib/action-config";
 import { getActionPorts } from "@/lib/action-ports";
 import { inferWireKind, WIRE_IN, WIRE_OUT, type WireKind } from "@/lib/wire-inference";
+import {
+  assetScopeRule,
+  budgetRule,
+  perTxRule,
+  rateLimitRule,
+  recipientAllowlistRule,
+  slippageFloorRule,
+  timeWindowRule,
+  type CapabilityManifest,
+  type CapabilityRule,
+} from "@/lib/capabilities";
 
 /**
  * FLOW-ONLY preset canvases for the "Start from a template" gallery
@@ -12,9 +25,32 @@ import { inferWireKind, WIRE_IN, WIRE_OUT, type WireKind } from "@/lib/wire-infe
  * addGuardrail, and the onConnect edge shape) so a template-built canvas is
  * indistinguishable from one a user assembled by hand — it renders, wires,
  * simulates, and (where the underlying actions are backend-supported)
- * publishes exactly the same way. No capabilities/manifest here — that's a
- * later phase.
+ * publishes exactly the same way.
+ *
+ * Part C: each template also ships an optional, schema-valid `manifest` — a suggested
+ * wallet-level CapabilityManifest bundled via `lib/capabilities.ts`'s rule builders.
+ * `applyTemplate` (routes/builder.tsx) sets it as the canvas's manifest when the template is
+ * picked, so the owner starts from a sensible cap set instead of an empty (schema-invalid, KTD-6)
+ * one — they can still open Capabilities and tune or replace it before onboarding.
  */
+
+/** Every template manifest targets native SUI — the only coin the composer offers a switcher for
+ *  today (mirrors `lib/capabilities.ts`'s `emptyManifest` default). */
+const WALLET_COIN_TYPE = "0x2::sui::SUI";
+
+function manifestOf(...rules: CapabilityRule[]): CapabilityManifest {
+  return { walletCoinType: WALLET_COIN_TYPE, rules };
+}
+
+/** Obviously-a-placeholder recipient (64 hex chars, ends in `1`) for the DeepBook template's
+ *  `recipient_allowlist` — the owner MUST replace this with a real address before onboarding; it
+ *  is schema-valid (so the manifest previews cleanly) but not a usable destination. */
+const PLACEHOLDER_RECIPIENT = `0x${"0".repeat(63)}1`;
+
+/** Baked in at module-eval time (effectively page-load time for this SPA) — a reasonable window
+ *  for a template preset the owner reviews/tunes before onboarding, not a live countdown. */
+const now = Date.now();
+const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 
 function findAction(protocolId: string, actionId: string) {
   const protocol = PROTOCOLS.find((p) => p.id === protocolId);
@@ -106,7 +142,17 @@ export type FlowTemplate = {
   id: string;
   name: string;
   description: string;
-  tags?: string[];
+  /** Card icon (template-dialog.tsx) — one glance identifies the template's shape before reading
+   *  the description. */
+  icon: LucideIcon;
+  /** Ordered protocol ids this template's action nodes touch, e.g. `["cetus","haedal"]` — drives
+   *  the step-preview row of protocol icons/labels on the gallery card. Not necessarily 1:1 with
+   *  `build()`'s node list (a guardrail node isn't a protocol step). */
+  steps: string[];
+  /** Suggested wallet-level CapabilityManifest — schema-valid, built from `lib/capabilities.ts`'s
+   *  rule builders. `applyTemplate` (routes/builder.tsx) sets this as the canvas's manifest when
+   *  the template is picked; `undefined` falls back to `emptyManifest()`. */
+  manifest?: CapabilityManifest;
   /** `makeId` mints a fresh, canvas-unique node id (Builder passes its
    *  `n_${idRef.current++}` counter) — every node this returns MUST come from
    *  it, so a template drop never collides with ids already on the canvas. */
@@ -129,7 +175,9 @@ export const FLOW_TEMPLATES: FlowTemplate[] = [
     id: "swap",
     name: "Swap",
     description: "A single Cetus swap — trade SUI for USDC.",
-    tags: ["Cetus", "DEX"],
+    icon: ArrowLeftRight,
+    steps: ["cetus"],
+    manifest: manifestOf(budgetRule("5"), slippageFloorRule("0.05")),
     build: (makeId) => ({
       nodes: [actionNode(makeId(), "cetus", "swap", slot(0))],
       edges: [],
@@ -139,7 +187,13 @@ export const FLOW_TEMPLATES: FlowTemplate[] = [
     id: "stake",
     name: "Stake",
     description: "A single Haedal stake — stake SUI and mint haSUI.",
-    tags: ["Haedal", "Staking"],
+    icon: PiggyBank,
+    steps: ["haedal"],
+    manifest: manifestOf(
+      budgetRule("20"),
+      perTxRule("5"),
+      timeWindowRule(new Date(now).toISOString(), new Date(now + THIRTY_DAYS_MS).toISOString()),
+    ),
     build: (makeId) => ({
       nodes: [actionNode(makeId(), "haedal", "stake", slot(0))],
       edges: [],
@@ -149,7 +203,9 @@ export const FLOW_TEMPLATES: FlowTemplate[] = [
     id: "swap-stake",
     name: "Swap → Stake",
     description: "Swap USDC for SUI, then stake the output with Haedal in one coin chain.",
-    tags: ["Cetus", "Haedal"],
+    icon: Workflow,
+    steps: ["cetus", "haedal"],
+    manifest: manifestOf(budgetRule("10"), rateLimitRule("2", "3600000")),
     build: (makeId) => {
       const swap = actionNode(makeId(), "cetus", "swap", slot(0), {
         tokenIn: "USDC",
@@ -167,7 +223,9 @@ export const FLOW_TEMPLATES: FlowTemplate[] = [
     id: "deepbook-limit-order",
     name: "DeepBook limit order",
     description: "A single DeepBook limit order against a pre-funded BalanceManager.",
-    tags: ["DeepBook", "DEX"],
+    icon: ListOrdered,
+    steps: ["deepbook"],
+    manifest: manifestOf(budgetRule("15"), recipientAllowlistRule(PLACEHOLDER_RECIPIENT)),
     build: (makeId) => ({
       nodes: [actionNode(makeId(), "deepbook", "limit_order", slot(0))],
       edges: [],
@@ -177,7 +235,13 @@ export const FLOW_TEMPLATES: FlowTemplate[] = [
     id: "guarded-swap",
     name: "Guarded swap",
     description: "A Cetus swap with a guardrail enforcing a minimum output value.",
-    tags: ["Cetus", "Guardrail"],
+    icon: ShieldCheck,
+    steps: ["cetus"],
+    manifest: manifestOf(
+      budgetRule("5"),
+      slippageFloorRule("0.05"),
+      assetScopeRule(WALLET_COIN_TYPE),
+    ),
     build: (makeId) => {
       const swap = actionNode(makeId(), "cetus", "swap", slot(0));
       const guardrail = guardrailNode(makeId(), slot(1), "0.05");

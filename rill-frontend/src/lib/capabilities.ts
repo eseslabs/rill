@@ -5,8 +5,10 @@
 import {
   CapabilityManifestSchema,
   RULE_KINDS,
+  toDeclaration,
   type AssetScopeRule,
   type BudgetRule,
+  type CapabilityDeclarationCap,
   type CapabilityManifest,
   type CapabilityRule,
   type PerTxRule,
@@ -235,5 +237,36 @@ export function validateManifest(manifest: CapabilityManifest): ManifestValidati
   return { ok: false, error: result.error.issues.map((issue) => issue.message).join("; ") };
 }
 
-export type { CapabilityManifest, CapabilityRule, RuleKind };
+// ---- Node-level cap filtering (Part B: action node "Bounded by" panel) -------------------------
+
+/** Rule kinds that impose an on-chain spend limit — the caps an action node always shows in its
+ *  read-only "Bounded by" panel, since these are the ones that actually shape the amount the agent
+ *  may draw against (as opposed to e.g. `protocol_scope`, which restricts *where* funds can go, not
+ *  *how much*). */
+const SPEND_CAP_KINDS: readonly RuleKind[] = ["budget", "per_tx", "rate_limit"];
+
+/**
+ * Projects a manifest to the small subset of caps an action node's "Bounded by" panel (nodes.tsx)
+ * renders: the on-chain spend caps (Budget / Per-tx max / Rate limit) always, plus the pre-flight
+ * slippage floor when `includeSlippageFloor` is set (Cetus swap only) and the manifest declares
+ * one. Zips `manifest.rules` against `toDeclaration(manifest).caps` by index — the two arrays are
+ * always the same length and order (see `toDeclaration`'s doc comment) — rather than re-deriving
+ * cap text itself, so this can never drift from the SDK's own rendering.
+ */
+export function boundedByCaps(
+  manifest: CapabilityManifest,
+  options: { includeSlippageFloor?: boolean } = {},
+): CapabilityDeclarationCap[] {
+  const { includeSlippageFloor = false } = options;
+  const caps = toDeclaration(manifest).caps;
+  return manifest.rules
+    .map((rule, i) => ({ kind: rule.kind, cap: caps[i] }))
+    .filter(
+      ({ kind }) =>
+        SPEND_CAP_KINDS.includes(kind) || (includeSlippageFloor && kind === "slippage_floor"),
+    )
+    .map(({ cap }) => cap);
+}
+
+export type { CapabilityDeclarationCap, CapabilityManifest, CapabilityRule, RuleKind };
 export { RULE_KINDS };
