@@ -69,10 +69,14 @@ describe("computePublishGate", () => {
     expect(result.reason).toMatch(/guardrail minimum value/i);
   });
 
-  it("blocks on an invalid amount with a reason naming the offending node", () => {
+  it("Part B: an action node is never blocked for a missing/invalid amount — amount is agent-supplied at runtime, not canvas-editable", () => {
+    // "abc" would have failed the old amount gate; the action-node amount input no longer exists,
+    // so this config key is now inert and computePublishGate must not look at it.
     const nodes = [cetusSwapNode("n1", "abc")];
     const result = computePublishGate(nodes, []);
     expect(result.publishable).toBe(false);
-    expect(result.reason).toMatch(/^Cetus · Swap:/);
+    // Still blocked, but for the pre-existing capability-scope reason (a lone Cetus swap can't
+    // publish yet — only DeepBook can), never an amount-shaped reason.
+    expect(result.reason).toBe(CAPABILITY_COPY.publishScope);
   });
 });

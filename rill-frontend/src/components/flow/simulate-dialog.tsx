@@ -80,7 +80,9 @@ export function SimulateDialog({
 
     if (graph.nodes.length === 0) {
       setGateError(
-        graph.skipped.length > 0 ? CAPABILITY_COPY.simulateSkipped(graph.skipped) : CAPABILITY_COPY.simulateEmpty,
+        graph.skipped.length > 0
+          ? CAPABILITY_COPY.simulateSkipped(graph.skipped)
+          : CAPABILITY_COPY.simulateEmpty,
       );
       return;
     }
@@ -100,7 +102,9 @@ export function SimulateDialog({
           : "idle";
 
   const error =
-    gateError ?? requestError ?? (result && !result.simulation.ok ? (result.simulation.error ?? "Simulation failed") : null);
+    gateError ??
+    requestError ??
+    (result && !result.simulation.ok ? (result.simulation.error ?? "Simulation failed") : null);
 
   const previewText =
     result?.preview ??
@@ -165,7 +169,8 @@ export function SimulateDialog({
               <>
                 <AlertTriangle className="h-4 w-4 text-peach-foreground" />
                 <span className="text-peach-foreground">
-                  Simulation unverified: {result?.simulation.error ?? "No reason returned by backend"}. Signing is blocked.
+                  Simulation unverified:{" "}
+                  {result?.simulation.error ?? "No reason returned by backend"}. Signing is blocked.
                 </span>
               </>
             )}
@@ -186,14 +191,19 @@ export function SimulateDialog({
         </div>
 
         <div className="p-5">
-          <div className="text-xs uppercase tracking-widest text-muted-foreground">Enforced at execution</div>
+          <div className="text-xs uppercase tracking-widest text-muted-foreground">
+            Enforced at execution
+          </div>
           <p className="mt-1 text-xs text-muted-foreground">
-            Read-only — what actually runs, not a toggle. Add or edit a guardrail node on the canvas to change it.
+            Read-only — what actually runs, not a toggle. A swap's own{" "}
+            <strong>Min swap output</strong> field (on the node) is its real floor now; a guardrail
+            below is a legacy node from an older draft — there's no way to add a new one.
           </p>
           <div className="mt-3 space-y-1.5">
             {guardrailNodes.length === 0 && (
               <p className="rounded-lg border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
-                No guardrails on this flow — actions execute without a minimum-output floor.
+                No legacy guardrail nodes on this flow — each swap's own Min swap output field is
+                its floor.
               </p>
             )}
             {guardrailNodes.map((n) => {
@@ -203,7 +213,9 @@ export function SimulateDialog({
                 <div
                   key={n.id}
                   className={`rounded-lg border px-3 py-2 text-xs ${
-                    valid ? "border-border bg-background/60" : "border-destructive/40 bg-destructive/5"
+                    valid
+                      ? "border-border bg-background/60"
+                      : "border-destructive/40 bg-destructive/5"
                   }`}
                 >
                   <div className="flex items-center justify-between gap-2">
@@ -215,20 +227,21 @@ export function SimulateDialog({
                     )}
                   </div>
                   <div className="mt-1 font-mono text-[11px] text-muted-foreground">
-                    min {gData.minValue?.trim() ? gData.minValue : "(unset)"} · {coinSymbol(gData.coinType)}
+                    min {gData.minValue?.trim() ? gData.minValue : "(unset)"} ·{" "}
+                    {coinSymbol(gData.coinType)}
                   </div>
                 </div>
               );
             })}
           </div>
           <div className="mt-4 rounded-xl bg-sky/30 text-sky-foreground p-3 text-[11px]">
-            Rill returns an <strong>unsigned PTB</strong> — keyless backend. Thiny signs and submits;
-            agent_wallet enforces budget on-chain.
+            Rill returns an <strong>unsigned PTB</strong> — keyless backend. Thiny signs and
+            submits; agent_wallet enforces budget on-chain.
           </div>
           <div className="mt-2 rounded-xl bg-amber-400/10 border border-amber-400/30 text-amber-800 dark:text-amber-300 p-3 text-[11px]">
             This flow runs without an agent-wallet budget binding — the builder can't attach an{" "}
-            <code>agentWallet</code> id yet, so execution isn't capped by an on-chain spend policy beyond
-            what's wired above.
+            <code>agentWallet</code> id yet, so execution isn't capped by an on-chain spend policy
+            beyond what's wired above.
           </div>
         </div>
       </div>

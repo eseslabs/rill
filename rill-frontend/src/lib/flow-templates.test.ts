@@ -2,9 +2,15 @@ import { describe, expect, it } from "vitest";
 import type { Node } from "reactflow";
 import { FLOW_TEMPLATES } from "@/lib/flow-templates";
 import type { ActionNodeData, GuardrailNodeData } from "@/components/flow/nodes";
-import { actionAmountError, TOKEN_COIN_TYPE, type SwapTokenSymbol } from "@/lib/action-config";
+import {
+  actionAmountError,
+  otherSwapToken,
+  TOKEN_COIN_TYPE,
+  type SwapTokenSymbol,
+} from "@/lib/action-config";
 import { isGuardrailMinValueValid } from "@/lib/publish-gate";
 import { wireKindFromEdge } from "@/lib/wire-inference";
+import { validateManifest } from "@/lib/capabilities";
 
 /** Same `n_${n}` id scheme Builder's `idRef` counter produces — a fresh,
  *  monotonic counter per call mirrors calling `template.build(makeId)` once
@@ -26,6 +32,15 @@ function amountCoinTypeFor(data: ActionNodeData): string | null {
     return TOKEN_COIN_TYPE.SUI;
   }
   return null;
+}
+
+/** Part A: the OUTPUT token's coin type for a Cetus swap node — `min_amount_out` (the per-swap
+ *  slippage floor) is denominated in the output token's own units, mirroring nodes.tsx's "Min
+ *  swap output" field. `null` for anything that isn't a Cetus swap (no per-swap floor to check). */
+function outputCoinTypeFor(data: ActionNodeData): string | null {
+  if (data.protocolId !== "cetus" || !data.action.toLowerCase().includes("swap")) return null;
+  const tokenIn = (data.config?.tokenIn as SwapTokenSymbol) || "SUI";
+  return TOKEN_COIN_TYPE[otherSwapToken(tokenIn)];
 }
 
 describe("FLOW_TEMPLATES", () => {
@@ -89,6 +104,30 @@ describe("FLOW_TEMPLATES", () => {
           expect(isGuardrailMinValueValid(data.minValue)).toBe(true);
         }
       });
+
+      // Part A: every Cetus swap node ships its own per-swap slippage floor now — the backend
+      // requires a terminal swap (no downstream guardrail) to set config.min_amount_out, so a
+      // template that omitted it would fail to publish/simulate honestly.
+      it("every Cetus swap node's min_amount_out is a valid, positive amount in the output token's units", () => {
+        const built = template.build(makeCounterId({ n: 0 }));
+        for (const node of built.nodes) {
+          if (node.type !== "action") continue;
+          const data = node.data as ActionNodeData;
+          const coinType = outputCoinTypeFor(data);
+          if (!coinType) continue; // not a Cetus swap — no per-swap floor to check
+          expect(actionAmountError(data.config?.min_amount_out, coinType)).toBeNull();
+        }
+      });
+
+      // Part D: BASE_X (flow-templates.ts) sits well right of the Trigger scaffold node
+      // (routes/builder.tsx's initialNodes, x:40) so a freshly-applied template never stacks its
+      // first action node on top of it.
+      it("every node's x position sits clear of the Trigger scaffold node (x:40)", () => {
+        const built = template.build(makeCounterId({ n: 0 }));
+        for (const node of built.nodes) {
+          expect(node.position.x).toBeGreaterThan(200);
+        }
+      });
     });
   }
 
@@ -127,18 +166,46 @@ describe("FLOW_TEMPLATES", () => {
     expect(wireKindFromEdge(edge, built.nodes)).toBe("coin");
   });
 
-  it("guarded-swap wires the swap into the guardrail (Action -> Guardrail, the only supported direction)", () => {
+  it("guarded-swap ships a single Cetus swap node with an owner-set min_amount_out — no separate guardrail node (Part B)", () => {
     const template = FLOW_TEMPLATES.find((t) => t.id === "guarded-swap");
     expect(template).toBeTruthy();
     const built = template!.build(makeCounterId({ n: 0 }));
 
-    const swap = built.nodes.find((n) => n.type === "action") as Node;
-    const guardrail = built.nodes.find((n) => n.type === "guardrail") as Node;
-    expect(swap).toBeTruthy();
-    expect(guardrail).toBeTruthy();
+    expect(built.nodes).toHaveLength(1);
+    const swap = built.nodes[0];
+    expect(swap.type).toBe("action");
+    const swapData = swap.data as ActionNodeData;
+    expect(swapData.protocolId).toBe("cetus");
+    expect(Number(swapData.config?.min_amount_out)).toBeGreaterThan(0);
 
-    expect(built.edges).toHaveLength(1);
-    expect(built.edges[0].source).toBe(swap.id);
-    expect(built.edges[0].target).toBe(guardrail.id);
+    expect(built.edges).toHaveLength(0);
+  });
+
+  // Part C: template gallery cards (icon, ordered protocol steps, suggested capability manifest).
+  describe("Part C card metadata", () => {
+    it("every template has an icon component and a non-empty ordered steps list", () => {
+      for (const template of FLOW_TEMPLATES) {
+        expect(template.icon).toBeTruthy();
+        expect(Array.isArray(template.steps)).toBe(true);
+        expect(template.steps.length).toBeGreaterThan(0);
+      }
+    });
+
+    it("every template ships a manifest, and every shipped manifest is schema-valid", () => {
+      for (const template of FLOW_TEMPLATES) {
+        expect(template.manifest).toBeTruthy();
+        if (!template.manifest) continue;
+        const result = validateManifest(template.manifest);
+        expect(result.ok, `${template.id}: ${!result.ok ? result.error : ""}`).toBe(true);
+      }
+    });
+
+    it("no template manifest declares a duplicate rule kind", () => {
+      for (const template of FLOW_TEMPLATES) {
+        if (!template.manifest) continue;
+        const kinds = template.manifest.rules.map((r) => r.kind);
+        expect(new Set(kinds).size).toBe(kinds.length);
+      }
+    });
   });
 });
