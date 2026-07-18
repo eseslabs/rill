@@ -62,7 +62,8 @@ async function sourceCoinFromSender(
 
 /**
  * Cetus CLMM swap. Builds `router::swap` directly (zero-coin pattern), so it composes into the same
- * PTB and is funded from agent_wallet::spend() / tx.gas. Pool + coin types come from node config
+ * PTB and is funded from the manifest-gated agent_wallet request_spend/confirm_spend sequence /
+ * tx.gas. Pool + coin types come from node config
  * (FE/agent supplies them); server defaults are fallback only.
  */
 export const cetusAdapter: ProtocolAdapter = {

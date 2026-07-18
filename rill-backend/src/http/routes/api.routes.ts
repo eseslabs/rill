@@ -104,10 +104,14 @@ function isAllowedMcpOrigin(origin: string): boolean {
  * get a PTB that spends from it without ever asking; the honest behavior (KTD-1) is the no-wallet
  * warning branch unless the caller asks for the server wallet by name.
  *
- * F7: `normalizeAgentWallet` (`core/agent-wallet.ts`) is the single place that resolves which of the
- * two coexisting agent_wallet packages a binding actually uses — v2 `spend()` when the request's
- * `agentWallet` carries no `capabilityManifest`, the redesigned request_spend/confirm_spend package
- * when it does. This route no longer duplicates that resolution.
+ * `normalizeAgentWallet` (`core/agent-wallet.ts`) is the single place that resolves an `agentWallet`
+ * against the (one) agent_wallet package and enforces its `capabilityManifest`/`versionId` are
+ * present — this route no longer duplicates that resolution. Note the server-wallet branch below
+ * returns `config.agentWallet` (loaded from env by `loadAgentWalletFromEnv`) WITHOUT routing it
+ * through `normalizeAgentWallet`: the operator's env-configured wallet carries no manifest today, so
+ * `useServerWallet: true` against a flow that needs funding still fails closed with a
+ * `ValidationError` — just raised one layer deeper, by the compiler's `buildManifestGatedSpend`,
+ * rather than here.
  */
 function resolveAgentWallet(body: {
   agentWallet?: Omit<AgentWalletBinding, 'coinType'> & { coinType?: string };

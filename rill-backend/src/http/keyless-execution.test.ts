@@ -83,6 +83,13 @@ const testEnvelope = {
   expiresAt: new Date(Date.now() + 60_000).toISOString(),
 } satisfies ExecutionEnvelope;
 
+// There is ONE agent_wallet package now — every bound wallet requires a capabilityManifest +
+// versionId (no legacy manifest-less spend() fallback).
+const DEFAULT_MANIFEST = {
+  walletCoinType: '0x2::sui::SUI',
+  rules: [{ kind: 'budget', totalMist: '5000000000' }],
+};
+
 const request = (extra: Record<string, unknown>) => apiRouter.request('/execute', {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
@@ -93,6 +100,8 @@ const request = (extra: Record<string, unknown>) => apiRouter.request('/execute'
       packageId: `0x${'2'.repeat(64)}`,
       walletId: `0x${'3'.repeat(64)}`,
       capId: `0x${'4'.repeat(64)}`,
+      versionId: `0x${'9'.repeat(64)}`,
+      capabilityManifest: DEFAULT_MANIFEST,
     },
     params: {},
     ...extra,
@@ -243,6 +252,8 @@ test('REST and MCP build-action surfaces return the canonical envelope', async (
             packageId: testEnvelope.walletPackageId,
             walletId: testEnvelope.walletId,
             capId: testEnvelope.agentCapId,
+            versionId: `0x${'9'.repeat(64)}`,
+            capabilityManifest: DEFAULT_MANIFEST,
           },
           params: {},
         },
@@ -273,6 +284,8 @@ test('compile API and OpenAPI expose the actual keyless fields', async () => {
         packageId: `0x${'2'.repeat(64)}`,
         walletId: `0x${'3'.repeat(64)}`,
         capId: `0x${'4'.repeat(64)}`,
+        versionId: `0x${'9'.repeat(64)}`,
+        capabilityManifest: DEFAULT_MANIFEST,
       },
     }),
   });
@@ -505,14 +518,22 @@ test('compile without agentWallet and without useServerWallet never binds the co
     expect(withoutFlag.status).toBe(200);
     expect(withoutFlagBody.data.agentWalletBound).toBe(false);
 
-    const withFlag = await apiRouter.request('/compile', {
+    // The operator's env-configured wallet (`loadAgentWalletFromEnv`) carries no capabilityManifest
+    // — there is no more legacy manifest-less spend() fallback, so `useServerWallet: true` against a
+    // flow that needs funding now fails closed with the SAME ValidationError any other manifest-less
+    // binding gets, just raised one layer deeper (by the compiler, since `resolveAgentWallet`'s
+    // server-wallet branch does not itself call `normalizeAgentWallet` — see its doc comment in
+    // api.routes.ts). Uses the full app (not the bare apiRouter): a thrown ValidationError only
+    // becomes a structured 422 through index.ts's onError handler.
+    const withFlag = await server.fetch(new Request('http://localhost/api/compile', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ flow, useServerWallet: true }),
-    });
-    const withFlagBody = await withFlag.json() as { data: { agentWalletBound: boolean } };
-    expect(withFlag.status).toBe(200);
-    expect(withFlagBody.data.agentWalletBound).toBe(true);
+    }));
+    const withFlagBody = await withFlag.json() as { success: boolean; type: string };
+    expect(withFlag.status).toBe(422);
+    expect(withFlagBody.success).toBe(false);
+    expect(withFlagBody.type).toBe('ValidationError');
   } finally {
     config.agentWallet = original;
   }
@@ -532,6 +553,8 @@ test('an explicit agentWallet still binds without useServerWallet', async () => 
         packageId: `0x${'a'.repeat(64)}`,
         walletId: `0x${'b'.repeat(64)}`,
         capId: `0x${'c'.repeat(64)}`,
+        versionId: `0x${'9'.repeat(64)}`,
+        capabilityManifest: DEFAULT_MANIFEST,
       },
     }),
   });
@@ -540,7 +563,7 @@ test('an explicit agentWallet still binds without useServerWallet', async () => 
   expect(body.data.agentWalletBound).toBe(true);
 });
 
-// --- F7: manifest-gated agent-wallet flow wired to /compile (coexists with the v2 spend() path) --
+// --- Manifest-gated agent-wallet flow wired to /compile (the ONLY agent_wallet path) -----------
 
 test('compile with agentWallet.capabilityManifest + versionId binds via the redesigned agent_wallet package', async () => {
   const flow = {
@@ -576,14 +599,17 @@ test('compile with agentWallet.capabilityManifest + versionId binds via the rede
   expect(body.data.budgetSpendMist).toBe('1000000000');
 });
 
-// A manifest-less request against the SAME /compile route still binds the legacy v2 spend() path —
-// the two coexist per-request, not behind a global server toggle.
-test('compile without a capabilityManifest still binds the legacy v2 agent_wallet path', async () => {
+// A manifest-less request against the SAME /compile route is rejected — there is no legacy v2
+// agent_wallet path left to fall back to.
+test('compile without a capabilityManifest is rejected — no legacy v2 agent_wallet fallback', async () => {
   const flow = {
     nodes: [{ id: 'stake1', type: 'haedal_stake', config: { amount: '1000000000' } }],
     edges: [],
   };
-  const response = await apiRouter.request('/compile', {
+  // Uses the full app (not the bare apiRouter): `normalizeAgentWallet` THROWS `ValidationError`
+  // rather than returning a JSON error, which only becomes a structured 422 through index.ts's
+  // `onError` handler.
+  const response = await server.fetch(new Request('http://localhost/api/compile', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -595,12 +621,13 @@ test('compile without a capabilityManifest still binds the legacy v2 agent_walle
         capId: `0x${'c'.repeat(64)}`,
       },
     }),
-  });
-  const body = await response.json() as { success: boolean; data: { agentWalletBound: boolean } };
+  }));
+  const body = await response.json() as { success: boolean; type: string; error: string };
 
-  expect(response.status).toBe(200);
-  expect(body.success).toBe(true);
-  expect(body.data.agentWalletBound).toBe(true);
+  expect(response.status).toBe(422);
+  expect(body.success).toBe(false);
+  expect(body.type).toBe('ValidationError');
+  expect(body.error).toMatch(/bound without a capabilityManifest/);
 });
 
 // `normalizeAgentWallet` THROWS `ValidationError` rather than returning a JSON error — that only

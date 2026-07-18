@@ -86,14 +86,16 @@ const agentWalletSchema = {
     walletId: { type: 'string' },
     capId: { type: 'string' },
     coinType: { type: 'string', default: '0x2::sui::SUI' },
-    // F7: opts this binding into the redesigned Rule + Hot Potato agent_wallet package
-    // (request_spend/prove/confirm_spend) instead of the legacy spend() call — see
-    // `core/agent-wallet.ts`'s `normalizeAgentWallet`. Both optional and absent by default.
+    // Every bound agent wallet requires a capabilityManifest — there is no legacy manifest-less
+    // spend() fallback (see `core/agent-wallet.ts`'s `normalizeAgentWallet`). Both fields stay
+    // optional at the JSON-schema level only so a missing one gets normalizeAgentWallet's clear
+    // ValidationError instead of a generic schema-required error.
     capabilityManifest: {
       type: 'object',
       additionalProperties: true,
-      description: 'Wallet-level CapabilityManifest (rules[]) — when set, builds the redesigned '
-        + 'request_spend/prove/confirm_spend sequence instead of the legacy spend() call.',
+      description: 'Wallet-level CapabilityManifest (rules[]) — required to bind an agent wallet; '
+        + 'builds the request_spend/prove/confirm_spend sequence. A wallet bound without one is '
+        + 'rejected.',
     },
     versionId: {
       type: 'string',

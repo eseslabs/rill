@@ -46,15 +46,17 @@ export const FlowNodeSchema = z.object({
 });
 
 /**
- * F7: optional `capabilityManifest` + `versionId` opt a request into the redesigned Rule + Hot
- * Potato agent_wallet package instead of today's legacy `spend()` (see `core/agent-wallet.ts`'s
- * `normalizeAgentWallet`, the single place that resolves which package/version a binding actually
- * uses). `capabilityManifest` is validated via the SDK's `CapabilityManifestSchema` — the same
- * single source of truth `/capabilities/preview` and the compiler's own defense-in-depth
+ * `capabilityManifest` + `versionId` bind against the ONE (redesigned) Rule + Hot Potato
+ * agent_wallet package (see `core/agent-wallet.ts`'s `normalizeAgentWallet`, the single place that
+ * resolves a binding's package/version and enforces both fields are actually present). Both fields
+ * are typed optional here at the Zod layer so a malformed/missing manifest still gets a clean 422
+ * from `normalizeAgentWallet` (rather than this schema silently requiring one field but not the
+ * other); `capabilityManifest`, when present, is validated via the SDK's `CapabilityManifestSchema`
+ * — the same single source of truth `/capabilities/preview` and the compiler's own defense-in-depth
  * re-validation (`parseManifestOrThrow`) use — so a malformed manifest is rejected with a 422 here,
- * before it ever reaches `normalizeAgentWallet` or the compiler. Both fields are optional and
- * absent by default: a request that never mentions them keeps compiling through the live v2
- * `agent_wallet::spend()` path exactly as it did before F7.
+ * before it ever reaches `normalizeAgentWallet` or the compiler. There is no legacy manifest-less
+ * `spend()` fallback: a request that binds an agent wallet without a `capabilityManifest` is
+ * rejected by `normalizeAgentWallet`.
  */
 export const AgentWalletSchema = z.object({
   packageId: suiAddress('agentWallet.packageId'),
