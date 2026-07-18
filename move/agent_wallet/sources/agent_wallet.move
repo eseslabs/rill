@@ -1,84 +1,124 @@
-/// Rill agent wallet — an on-chain, capped, revocable budget for an AI agent.
+/// Rill agent wallet — an on-chain, capped, revocable budget for an AI agent, gated by a composable
+/// set of owner-attached restriction rules.
 ///
-/// Universal: generic over the coin type `T` (any token). Protocol-agnostic — `spend()` returns a free
-/// `Coin<T>` the agent uses in any PTB. Hard caps (budget, per-tx, expiry, revoke) are enforced here;
-/// "protocol scope" (`allowed_packages`) is recorded on-chain but enforced at the build/policy layer
-/// (Move can't intercept where a released coin is used).
+/// v3 redesign: replaces v2's hardcoded `spend()` asserts (flat budget/per-tx/window/allowed-packages
+/// fields baked into the wallet struct) with the Sui Kiosk `TransferPolicy` **Rule + Hot Potato**
+/// pattern. `request_spend` mints a `SpendRequest` — a hot potato with NO abilities (no `drop`,
+/// `store`, `key`, or `copy`) — carrying the spend's metadata. Every rule attached to the wallet's
+/// `SpendPolicy` must stamp a receipt onto the request (via its own `prove` entry, which checks its
+/// invariant then calls `add_receipt`) before `confirm_spend` will unpack the potato and release the
+/// coin. This is unbypassable by construction: a `SpendRequest` with abilities `{}` cannot be dropped,
+/// stored, or discarded — the transaction can only succeed by routing it through `confirm_spend`,
+/// which asserts every attached rule's receipt is present.
 ///
-/// v2 additions:
-/// - Rolling spend-window quota (`window_ms`/`window_max`) in addition to the flat budget and
-///   per-tx ceiling, lazily reset in `spend()` against the supplied `Clock`. A `window_ms` or
-///   `window_max` of `0` means "no window limit" — either sentinel alone fully disables the quota
-///   (no reset bookkeeping, no `E_OVER_WINDOW` assert), so a wallet created with `0, 0` behaves
-///   exactly like a v1 wallet that only had a flat budget/per-tx cap.
-/// - `spend()` requires `ctx.sender() == wallet.agent`, defense-in-depth alongside cap possession:
-///   a leaked or stolen `AgentCap` is still useless from any other address.
-/// - Cap rotation: the wallet tracks the currently active cap's id (`cap_id`); owner-only
-///   `rotate_agent` mints a fresh `AgentCap` for a new agent address and retires the old one
-///   instantly, even though the old cap object still physically exists in its former holder's account.
-/// - Owner config setters (`set_per_tx_max`, `extend_expiry`, `set_window`) let the owner tighten or
-///   loosen limits on a live wallet without revoking and recreating it. `extend_expiry` only accepts
-///   a strictly later timestamp — it cannot be used to shorten a wallet's remaining lifetime.
+/// Rules are independent modules (`agent_wallet::budget`, `::per_tx`, `::rate_limit`,
+/// `::protocol_scope`, `::slippage_floor`, `::asset_scope`, `::recipient_allowlist`, `::time_window`)
+/// that attach their config as a dynamic field on `SpendPolicy`, keyed by their own witness type —
+/// mirroring `sui::transfer_policy::add_rule`. Because rule configs live in dynamic fields rather than
+/// `AgentWallet`/`SpendPolicy` struct fields, new rule types ship via in-place package upgrade
+/// (guarded by `agent_wallet::version`) without ever touching the wallet's struct layout — no forced
+/// redeploy.
 ///
-/// This is a v2 package: the struct layout changed from v1 (new fields cannot be added in-place under
-/// Sui's upgrade compatibility rules), so v2 ships as a fresh package rather than an upgrade. Entry
-/// point names are kept stable across v1/v2 so callers only need to swap package ids.
+/// Owner-only surface: `add_rule`/`remove_rule` (and every setter) assert `ctx.sender() == owner`.
+/// The agent holds only an `AgentCap`, which authorizes `request_spend` within whatever rules are
+/// currently composed — it can never see or touch `add_rule`/`remove_rule` (R4: the agent can never
+/// change its own restrictions).
+///
+/// This is a fresh package (struct layout changed from v2; Sui upgrade compatibility forbids changing
+/// existing struct fields in-place), so v3 ships as a new deploy rather than an upgrade of v2.
 module agent_wallet::agent_wallet {
+    use std::type_name::{Self, TypeName};
     use sui::balance::{Self, Balance};
     use sui::coin::{Self, Coin};
     use sui::clock::Clock;
+    use sui::dynamic_field as df;
     use sui::event;
+    use sui::vec_set::{Self, VecSet};
+    use agent_wallet::version::Version;
 
     // ── abort codes ──
     const E_NOT_OWNER: u64 = 1;
     const E_REVOKED: u64 = 2;
     const E_EXPIRED: u64 = 3;
-    const E_OVER_PER_TX: u64 = 4;
-    const E_OVER_BUDGET: u64 = 5;
-    const E_BAD_CAP: u64 = 6;
-    const E_ZERO_AMOUNT: u64 = 7;
-    /// v2: the rolling spend-window quota (`window_max` within `window_ms`) is exhausted for the
-    /// current window. Never fires when `window_ms == 0 || window_max == 0` (no window configured).
-    const E_OVER_WINDOW: u64 = 8;
-    /// v2: `spend()`'s caller (`ctx.sender()`) is not the wallet's current `agent` — defense-in-depth
-    /// alongside the `AgentCap` possession check, so a leaked cap alone is not sufficient.
-    const E_NOT_AGENT: u64 = 9;
-    /// v2: `extend_expiry` was called with a timestamp that does not move expiry strictly forward.
-    const E_EXPIRY_NOT_FORWARD: u64 = 10;
+    /// The wallet's physical `Balance<T>` holds less than the requested amount. Distinct from any
+    /// `budget` *rule*'s configured ceiling — this is the hard, always-enforced custody limit.
+    const E_INSUFFICIENT_FUNDS: u64 = 4;
+    const E_BAD_CAP: u64 = 5;
+    const E_ZERO_AMOUNT: u64 = 6;
+    /// `request_spend`'s caller (`ctx.sender()`) is not the wallet's current `agent` — defense in
+    /// depth alongside the `AgentCap` possession check, so a leaked cap alone is not sufficient.
+    const E_NOT_AGENT: u64 = 7;
+    /// `extend_expiry` was called with a timestamp that does not move expiry strictly forward.
+    const E_EXPIRY_NOT_FORWARD: u64 = 8;
+    /// `confirm_spend` was called with a `SpendRequest` minted against a different wallet.
+    const E_WRONG_WALLET: u64 = 9;
+    /// `confirm_spend`'s `SpendRequest` does not carry a receipt for every rule currently attached to
+    /// the wallet's `SpendPolicy` (or carries a receipt for a rule that is no longer attached). This
+    /// is the hot-potato invariant: every attached rule must `prove` before the coin releases.
+    const E_RULE_NOT_SATISFIED: u64 = 10;
+    /// `add_rule` was called for a `Rule` type already attached to this wallet's policy.
+    const E_RULE_ALREADY_SET: u64 = 11;
 
     /// Shared object: the agent's capped, revocable wallet. `T` = the budget coin type (any token).
+    /// Deliberately minimal — custody + identity + hard kill-switch only. Every *composable*
+    /// restriction (budget ceiling, per-tx cap, rolling window, protocol/asset/recipient scope,
+    /// slippage floor, time window) lives in `policy` as a dynamic field, never as a struct field
+    /// here, so this struct's layout never needs to change to add a new rule type.
     public struct AgentWallet<phantom T> has key {
         id: UID,
         owner: address,
         agent: address,
-        /// The currently active `AgentCap`'s id. `spend()` requires the caller's cap to match this —
-        /// `rotate_agent` mints a fresh cap and updates this field, instantly invalidating the
+        /// The currently active `AgentCap`'s id. `request_spend` requires the caller's cap to match
+        /// this — `rotate_agent` mints a fresh cap and updates this field, instantly invalidating the
         /// previous cap even though its holder still physically owns that object.
         cap_id: ID,
         budget: Balance<T>,
+        /// Lifetime total spent from this wallet (observability + read by the `budget` rule).
         spent: u64,
-        per_tx_max: u64,
-        /// Rolling spend-window quota length in ms. `0` (paired with `window_max == 0`) disables the
-        /// window entirely — see the module doc comment for the full sentinel contract.
-        window_ms: u64,
-        /// Max spend allowed within any `window_ms`-long window. `0` (paired with `window_ms == 0`)
-        /// disables the window entirely.
-        window_max: u64,
-        /// Start (ms since epoch) of the current window. Lazily rolled forward in `spend()` once
-        /// `clock.timestamp_ms() >= window_start_ms + window_ms`.
-        window_start_ms: u64,
-        /// Amount spent since `window_start_ms`. Reset to `0` whenever the window rolls over.
-        spent_in_window: u64,
+        /// Hard kill-date, distinct from the optional `time_window` *rule*: once past this timestamp
+        /// the wallet can never spend again until the owner calls `extend_expiry`. Always enforced,
+        /// with or without any rules attached.
         expires_at_ms: u64,
-        allowed_packages: vector<address>,
         revoked: bool,
+        policy: SpendPolicy,
     }
 
-    /// Capability minted to the agent — possession authorizes `spend()`, but only alongside a
-    /// matching `ctx.sender() == wallet.agent` and `object::id(cap) == wallet.cap_id` (v2).
+    /// The set of restriction rules currently attached to a wallet. `rules` names which rule
+    /// Witnesses must stamp a receipt for `confirm_spend` to succeed; each rule's own configuration
+    /// (limits, allowlists, ...) is stored as a dynamic field on `id`, keyed by `RuleKey<Rule>` —
+    /// mirrors `sui::transfer_policy::TransferPolicy`. Not a standalone Sui object (no `key`): it
+    /// lives nested inside `AgentWallet`, the same shape as `sui::table::Table`.
+    #[allow(lint(missing_key))]
+    public struct SpendPolicy has store {
+        id: UID,
+        rules: VecSet<TypeName>,
+    }
+
+    /// Dynamic-field key for a rule's stored config on `SpendPolicy.id`. Phantom `Rule` scopes one
+    /// slot per rule witness type — only that rule's own module can construct a `Rule` value, so only
+    /// that module can name this key (via `add_rule`/`remove_rule`/`rule_config`/`rule_config_mut`,
+    /// all of which require a witness value).
+    public struct RuleKey<phantom Rule: drop> has copy, drop, store {}
+
+    /// Capability minted to the agent — possession authorizes `request_spend`, but only alongside a
+    /// matching `ctx.sender() == wallet.agent` and `object::id(cap) == wallet.cap_id`.
     public struct AgentCap has key, store {
         id: UID,
         wallet: ID,
+    }
+
+    /// A "Hot Potato" forcing every attached rule to `prove` before the coin it authorizes can be
+    /// released. No abilities (`drop`/`store`/`key`/`copy`) — the only way to consume a `SpendRequest`
+    /// is `confirm_spend`, which requires `receipts` to cover every rule in the wallet's `SpendPolicy`.
+    /// Not generic over the coin type: `confirm_spend<T>` supplies `T` explicitly at the call site.
+    public struct SpendRequest {
+        wallet: ID,
+        amount: u64,
+        target_package: address,
+        coin_in: TypeName,
+        coin_out: TypeName,
+        recipient: address,
+        receipts: VecSet<TypeName>,
     }
 
     // ── events ──
@@ -87,11 +127,7 @@ module agent_wallet::agent_wallet {
         owner: address,
         agent: address,
         budget: u64,
-        per_tx_max: u64,
-        window_ms: u64,
-        window_max: u64,
         expires_at_ms: u64,
-        allowed_packages: vector<address>,
     }
     public struct Spent has copy, drop { wallet: ID, amount: u64, spent_total: u64, remaining: u64 }
     public struct ToppedUp has copy, drop { wallet: ID, amount: u64, remaining: u64 }
@@ -104,28 +140,33 @@ module agent_wallet::agent_wallet {
         old_cap: ID,
         new_cap: ID,
     }
-    /// Emitted by every owner-only config setter (`set_per_tx_max`, `extend_expiry`, `set_window`).
-    /// `field` names the changed field so off-chain consumers can distinguish setters without a
-    /// dedicated event type per field.
+    /// Emitted by owner-only config setters that aren't rule attach/detach (currently: `extend_expiry`
+    /// only, since per-tx/window/scope/etc. moved to rules). `field` names the changed field.
     public struct ConfigChanged has copy, drop {
         wallet: ID,
         field: vector<u8>,
         old_value: u64,
         new_value: u64,
     }
+    /// Emitted when the owner attaches a restriction rule to the wallet's `SpendPolicy`.
+    public struct RuleAdded has copy, drop { wallet: ID, rule: TypeName }
+    /// Emitted when the owner detaches a restriction rule from the wallet's `SpendPolicy`.
+    public struct RuleRemoved has copy, drop { wallet: ID, rule: TypeName }
 
-    /// Owner creates + funds a wallet, mints the `AgentCap` to `agent`, and shares the wallet.
-    /// `window_ms`/`window_max` of `0` disables the rolling window quota (see module doc comment).
+    /// Owner creates + funds a wallet and mints the `AgentCap` to `agent`. The wallet is shared with
+    /// an EMPTY `SpendPolicy` (no rules attached, so `confirm_spend` requires zero receipts) — the
+    /// owner is expected to follow with `add_rule` calls (via each rule module's `add`) in the SAME
+    /// PTB before ever handing the cap to the agent. `request_spend`/`confirm_spend` do not refuse to
+    /// operate on an empty policy; composing at least one restriction is an owner/SDK responsibility
+    /// (see `@rill/sdk`'s `CapabilityManifest`, which rejects an empty rule set as unsafe).
     public fun create_wallet<T>(
+        version: &Version,
         funds: Coin<T>,
         agent: address,
-        per_tx_max: u64,
-        window_ms: u64,
-        window_max: u64,
         expires_at_ms: u64,
-        allowed_packages: vector<address>,
         ctx: &mut TxContext,
     ) {
+        version.check_is_valid();
         let owner = ctx.sender();
         let budget = funds.into_balance();
         let amount = budget.value();
@@ -142,60 +183,98 @@ module agent_wallet::agent_wallet {
             cap_id,
             budget,
             spent: 0,
-            per_tx_max,
-            window_ms,
-            window_max,
-            window_start_ms: 0,
-            spent_in_window: 0,
             expires_at_ms,
-            allowed_packages,
             revoked: false,
+            policy: SpendPolicy { id: object::new(ctx), rules: vec_set::empty() },
         };
-        event::emit(WalletCreated {
-            wallet: wallet_id,
-            owner,
-            agent,
-            budget: amount,
-            per_tx_max,
-            window_ms,
-            window_max,
-            expires_at_ms,
-            allowed_packages,
-        });
+        event::emit(WalletCreated { wallet: wallet_id, owner, agent, budget: amount, expires_at_ms });
         transfer::transfer(cap, agent);
         transfer::share_object(wallet);
     }
 
-    /// The chokepoint: release a `Coin<T>` within the caps. Aborts if the cap doesn't match the
-    /// active one, the caller isn't the current agent, over-cap, expired, revoked, or the rolling
-    /// window quota is exhausted.
-    public fun spend<T>(
-        wallet: &mut AgentWallet<T>,
+    // ══════════════════════════════════════════════════════════════════════
+    // Rule + Hot Potato spend flow
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// Mint a `SpendRequest` hot potato. Checks cap validity, agent-sender, revocation, expiry, and a
+    /// non-zero amount within physical funds — but does NOT release any coin and does NOT touch any
+    /// rule. The caller must then route the request through every attached rule's `prove` (in any
+    /// order) and finally `confirm_spend`, or the transaction aborts (the potato cannot be dropped).
+    public fun request_spend<T>(
+        wallet: &AgentWallet<T>,
         cap: &AgentCap,
+        version: &Version,
         amount: u64,
+        target_package: address,
+        coin_in: TypeName,
+        coin_out: TypeName,
+        recipient: address,
         clock: &Clock,
-        ctx: &mut TxContext,
-    ): Coin<T> {
+        ctx: &TxContext,
+    ): SpendRequest {
+        version.check_is_valid();
         assert!(cap.wallet == object::id(wallet), E_BAD_CAP);
         assert!(object::id(cap) == wallet.cap_id, E_BAD_CAP);
         assert!(ctx.sender() == wallet.agent, E_NOT_AGENT);
         assert!(!wallet.revoked, E_REVOKED);
         assert!(clock.timestamp_ms() < wallet.expires_at_ms, E_EXPIRED);
         assert!(amount > 0, E_ZERO_AMOUNT);
-        assert!(amount <= wallet.per_tx_max, E_OVER_PER_TX);
-        assert!(amount <= wallet.budget.value(), E_OVER_BUDGET);
+        assert!(amount <= wallet.budget.value(), E_INSUFFICIENT_FUNDS);
 
-        // v2: rolling spend-window quota. Disabled entirely when either sentinel is 0.
-        if (wallet.window_ms > 0 && wallet.window_max > 0) {
-            let now = clock.timestamp_ms();
-            if (now >= wallet.window_start_ms + wallet.window_ms) {
-                wallet.window_start_ms = now;
-                wallet.spent_in_window = 0;
-            };
-            assert!(wallet.spent_in_window + amount <= wallet.window_max, E_OVER_WINDOW);
-            wallet.spent_in_window = wallet.spent_in_window + amount;
+        SpendRequest {
+            wallet: object::id(wallet),
+            amount,
+            target_package,
+            coin_in,
+            coin_out,
+            recipient,
+            receipts: vec_set::empty(),
+        }
+    }
+
+    /// Adds a rule's receipt to the request, unblocking it — called by a rule module's own `prove`
+    /// after that rule's invariant check passes. `_: Rule` can only be constructed inside the rule's
+    /// own module, so no other code can forge a receipt for a rule it doesn't own.
+    public fun add_receipt<Rule: drop>(_: Rule, req: &mut SpendRequest) {
+        req.receipts.insert(type_name::with_defining_ids<Rule>());
+    }
+
+    /// Unpack the hot potato and release the coin — but only if `req` carries a receipt for every
+    /// rule attached to `wallet`'s `SpendPolicy` (set-equality, order-independent; mirrors
+    /// `sui::transfer_policy::confirm_request`). `clock` is re-checked against `expires_at_ms` as
+    /// defense-in-depth (a `SpendRequest` cannot outlive the PTB that minted it, so within one
+    /// transaction this always matches `request_spend`'s check, but the redundancy costs nothing and
+    /// guards any future flow where the two calls are no longer adjacent).
+    public fun confirm_spend<T>(
+        wallet: &mut AgentWallet<T>,
+        req: SpendRequest,
+        version: &Version,
+        clock: &Clock,
+        ctx: &mut TxContext,
+    ): Coin<T> {
+        version.check_is_valid();
+        let SpendRequest {
+            wallet: req_wallet,
+            amount,
+            target_package: _,
+            coin_in: _,
+            coin_out: _,
+            recipient: _,
+            receipts,
+        } = req;
+        assert!(req_wallet == object::id(wallet), E_WRONG_WALLET);
+        assert!(!wallet.revoked, E_REVOKED);
+        assert!(clock.timestamp_ms() < wallet.expires_at_ms, E_EXPIRED);
+
+        let required = &wallet.policy.rules;
+        let mut satisfied = receipts.into_keys();
+        assert!(satisfied.length() == required.length(), E_RULE_NOT_SATISFIED);
+        while (!satisfied.is_empty()) {
+            let rule_type = satisfied.pop_back();
+            assert!(required.contains(&rule_type), E_RULE_NOT_SATISFIED);
         };
 
+        assert!(amount <= wallet.budget.value(), E_INSUFFICIENT_FUNDS);
         let out = coin::take(&mut wallet.budget, amount, ctx);
         wallet.spent = wallet.spent + amount;
         event::emit(Spent {
@@ -207,16 +286,99 @@ module agent_wallet::agent_wallet {
         out
     }
 
+    // ── SpendRequest views (used by rule modules' `prove`) ──
+    public fun request_wallet(req: &SpendRequest): ID { req.wallet }
+    public fun request_amount(req: &SpendRequest): u64 { req.amount }
+    public fun request_target_package(req: &SpendRequest): address { req.target_package }
+    public fun request_coin_in(req: &SpendRequest): TypeName { req.coin_in }
+    public fun request_coin_out(req: &SpendRequest): TypeName { req.coin_out }
+    public fun request_recipient(req: &SpendRequest): address { req.recipient }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Rule attach/detach — owner-only (R4: the agent can never mutate rules)
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// Attach a rule: only the wallet owner may call this (checked here, not delegated to the rule
+    /// module), and `_: Rule` can only be constructed by the rule's own module — so a rule can only be
+    /// attached by cooperation of both the owner (transaction sender) and that rule's code. Aborts if
+    /// the rule is already attached.
+    public fun add_rule<T, Rule: drop, Config: store + drop>(
+        _: Rule,
+        wallet: &mut AgentWallet<T>,
+        version: &Version,
+        cfg: Config,
+        ctx: &TxContext,
+    ) {
+        version.check_is_valid();
+        assert!(ctx.sender() == wallet.owner, E_NOT_OWNER);
+        let rule_type = type_name::with_defining_ids<Rule>();
+        assert!(!wallet.policy.rules.contains(&rule_type), E_RULE_ALREADY_SET);
+        df::add(&mut wallet.policy.id, RuleKey<Rule> {}, cfg);
+        wallet.policy.rules.insert(rule_type);
+        event::emit(RuleAdded { wallet: object::id(wallet), rule: rule_type });
+    }
+
+    /// Detach a rule and drop its config. Owner-only. Aborts (via the underlying `dynamic_field`
+    /// remove) if the rule isn't currently attached.
+    public fun remove_rule<T, Rule: drop, Config: store + drop>(
+        wallet: &mut AgentWallet<T>,
+        version: &Version,
+        ctx: &TxContext,
+    ) {
+        version.check_is_valid();
+        assert!(ctx.sender() == wallet.owner, E_NOT_OWNER);
+        let rule_type = type_name::with_defining_ids<Rule>();
+        let _cfg: Config = df::remove(&mut wallet.policy.id, RuleKey<Rule> {});
+        wallet.policy.rules.remove(&rule_type);
+        event::emit(RuleRemoved { wallet: object::id(wallet), rule: rule_type });
+    }
+
+    /// Read-only borrow of a rule's stored config. Witness-gated (mirrors
+    /// `sui::transfer_policy::get_rule`) so only that rule's own module can read its config.
+    public fun rule_config<T, Rule: drop, Config: store + drop>(
+        _: Rule,
+        wallet: &AgentWallet<T>,
+    ): &Config {
+        df::borrow(&wallet.policy.id, RuleKey<Rule> {})
+    }
+
+    /// Mutable borrow of a rule's stored config — for rules with rolling/mutable state (e.g.
+    /// `rate_limit`'s window bookkeeping). Witness-gated: only that rule's own module can construct
+    /// `Rule`, so no other code (including the agent) can reach in and mutate a rule's state directly.
+    public fun rule_config_mut<T, Rule: drop, Config: store + drop>(
+        _: Rule,
+        wallet: &mut AgentWallet<T>,
+    ): &mut Config {
+        df::borrow_mut(&mut wallet.policy.id, RuleKey<Rule> {})
+    }
+
+    /// Whether `Rule` is currently attached to `wallet`'s policy.
+    public fun has_rule<T, Rule: drop>(wallet: &AgentWallet<T>): bool {
+        df::exists(&wallet.policy.id, RuleKey<Rule> {})
+    }
+
+    /// The set of rule witnesses currently attached (insertion order, not sorted).
+    public fun policy_rules<T>(wallet: &AgentWallet<T>): vector<TypeName> {
+        *wallet.policy.rules.keys()
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Wallet lifecycle — owner-only
+    // ══════════════════════════════════════════════════════════════════════
+
     /// Owner adds more funds to the budget.
-    public fun top_up<T>(wallet: &mut AgentWallet<T>, funds: Coin<T>, ctx: &mut TxContext) {
+    public fun top_up<T>(wallet: &mut AgentWallet<T>, version: &Version, funds: Coin<T>, ctx: &TxContext) {
+        version.check_is_valid();
         assert!(ctx.sender() == wallet.owner, E_NOT_OWNER);
         let amount = funds.value();
         wallet.budget.join(funds.into_balance());
         event::emit(ToppedUp { wallet: object::id(wallet), amount, remaining: wallet.budget.value() });
     }
 
-    /// Owner kills the wallet and reclaims all remaining funds. Future `spend()` aborts.
-    public fun revoke<T>(wallet: &mut AgentWallet<T>, ctx: &mut TxContext): Coin<T> {
+    /// Owner kills the wallet and reclaims all remaining funds. Future `request_spend`/`confirm_spend`
+    /// abort (`E_REVOKED`).
+    public fun revoke<T>(wallet: &mut AgentWallet<T>, version: &Version, ctx: &mut TxContext): Coin<T> {
+        version.check_is_valid();
         assert!(ctx.sender() == wallet.owner, E_NOT_OWNER);
         wallet.revoked = true;
         let amount = wallet.budget.value();
@@ -225,10 +387,16 @@ module agent_wallet::agent_wallet {
         out
     }
 
-    /// Owner-only: retire the current agent/cap pair and mint a fresh `AgentCap` for `new_agent`.
-    /// The old cap object still exists wherever it was last held, but instantly fails `spend()`'s
+    /// Owner-only: retire the current agent/cap pair and mint a fresh `AgentCap` for `new_agent`. The
+    /// old cap object still exists wherever it was last held, but instantly fails `request_spend`'s
     /// `cap_id` check since it no longer matches `wallet.cap_id`.
-    public fun rotate_agent<T>(wallet: &mut AgentWallet<T>, new_agent: address, ctx: &mut TxContext) {
+    public fun rotate_agent<T>(
+        wallet: &mut AgentWallet<T>,
+        version: &Version,
+        new_agent: address,
+        ctx: &mut TxContext,
+    ) {
+        version.check_is_valid();
         assert!(ctx.sender() == wallet.owner, E_NOT_OWNER);
         let old_agent = wallet.agent;
         let old_cap = wallet.cap_id;
@@ -238,33 +406,20 @@ module agent_wallet::agent_wallet {
         wallet.agent = new_agent;
         wallet.cap_id = new_cap;
 
-        event::emit(AgentRotated {
-            wallet: object::id(wallet),
-            old_agent,
-            new_agent,
-            old_cap,
-            new_cap,
-        });
+        event::emit(AgentRotated { wallet: object::id(wallet), old_agent, new_agent, old_cap, new_cap });
         transfer::transfer(cap, new_agent);
     }
 
-    /// Owner-only: adjust the per-transaction spend ceiling.
-    public fun set_per_tx_max<T>(wallet: &mut AgentWallet<T>, new_per_tx_max: u64, ctx: &mut TxContext) {
-        assert!(ctx.sender() == wallet.owner, E_NOT_OWNER);
-        let old_value = wallet.per_tx_max;
-        wallet.per_tx_max = new_per_tx_max;
-        event::emit(ConfigChanged {
-            wallet: object::id(wallet),
-            field: b"per_tx_max",
-            old_value,
-            new_value: new_per_tx_max,
-        });
-    }
-
     /// Owner-only: push expiry forward. Only forward — `new_expires_at_ms` must be strictly greater
-    /// than the current `expires_at_ms`, so this can re-enable an expired wallet but can never be
-    /// used to shorten a live wallet's remaining lifetime.
-    public fun extend_expiry<T>(wallet: &mut AgentWallet<T>, new_expires_at_ms: u64, ctx: &mut TxContext) {
+    /// than the current `expires_at_ms`, so this can re-enable an expired wallet but can never be used
+    /// to shorten a live wallet's remaining lifetime.
+    public fun extend_expiry<T>(
+        wallet: &mut AgentWallet<T>,
+        version: &Version,
+        new_expires_at_ms: u64,
+        ctx: &TxContext,
+    ) {
+        version.check_is_valid();
         assert!(ctx.sender() == wallet.owner, E_NOT_OWNER);
         assert!(new_expires_at_ms > wallet.expires_at_ms, E_EXPIRY_NOT_FORWARD);
         let old_value = wallet.expires_at_ms;
@@ -277,45 +432,14 @@ module agent_wallet::agent_wallet {
         });
     }
 
-    /// Owner-only: set the rolling spend-window quota. `window_ms == 0` or `window_max == 0`
-    /// disables the window entirely (see module doc comment for the sentinel contract). Takes
-    /// effect immediately; does not retroactively reset an in-progress window's `spent_in_window`.
-    public fun set_window<T>(wallet: &mut AgentWallet<T>, window_ms: u64, window_max: u64, ctx: &mut TxContext) {
-        assert!(ctx.sender() == wallet.owner, E_NOT_OWNER);
-        let old_window_ms = wallet.window_ms;
-        let old_window_max = wallet.window_max;
-        wallet.window_ms = window_ms;
-        wallet.window_max = window_max;
-        event::emit(ConfigChanged {
-            wallet: object::id(wallet),
-            field: b"window_ms",
-            old_value: old_window_ms,
-            new_value: window_ms,
-        });
-        event::emit(ConfigChanged {
-            wallet: object::id(wallet),
-            field: b"window_max",
-            old_value: old_window_max,
-            new_value: window_max,
-        });
-    }
-
     // ── views ──
     public fun remaining<T>(wallet: &AgentWallet<T>): u64 { wallet.budget.value() }
     public fun spent<T>(wallet: &AgentWallet<T>): u64 { wallet.spent }
     public fun is_active<T>(wallet: &AgentWallet<T>, clock: &Clock): bool {
         !wallet.revoked && clock.timestamp_ms() < wallet.expires_at_ms
     }
-    public fun allowed_packages<T>(wallet: &AgentWallet<T>): vector<address> { wallet.allowed_packages }
-    public fun is_allowed<T>(wallet: &AgentWallet<T>, pkg: address): bool {
-        wallet.allowed_packages.is_empty() || wallet.allowed_packages.contains(&pkg)
-    }
     public fun agent<T>(wallet: &AgentWallet<T>): address { wallet.agent }
+    public fun owner<T>(wallet: &AgentWallet<T>): address { wallet.owner }
     public fun cap_id<T>(wallet: &AgentWallet<T>): ID { wallet.cap_id }
-    public fun per_tx_max<T>(wallet: &AgentWallet<T>): u64 { wallet.per_tx_max }
     public fun expires_at_ms<T>(wallet: &AgentWallet<T>): u64 { wallet.expires_at_ms }
-    public fun window_ms<T>(wallet: &AgentWallet<T>): u64 { wallet.window_ms }
-    public fun window_max<T>(wallet: &AgentWallet<T>): u64 { wallet.window_max }
-    public fun window_start_ms<T>(wallet: &AgentWallet<T>): u64 { wallet.window_start_ms }
-    public fun spent_in_window<T>(wallet: &AgentWallet<T>): u64 { wallet.spent_in_window }
 }
