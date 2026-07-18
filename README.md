@@ -6,7 +6,7 @@
 
 Any agent can safely transact with any Sui protocol — without hallucinating parameters or risking the whole wallet.
 
-[Live API](https://api.rill.naisu.one) · [Studio](https://rill.naisu.one) · [API docs (Swagger)](https://api.rill.naisu.one) · [Submission](./SUBMISSION.md)
+[Live API](https://api.rill.naisu.one) · [Studio](https://rill.naisu.one) · [API docs (Swagger)](https://api.rill.naisu.one) · [Project context](docs/project-context.md)
 
 </div>
 

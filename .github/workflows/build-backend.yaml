@@ -15,7 +15,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: eses-labs/rill-backend
+  IMAGE_NAME: eseslabs/rill-backend
   PLATFORMS: linux/amd64
 
 permissions:
@@ -57,7 +57,7 @@ jobs:
       - name: Build and push backend image
         uses: docker/build-push-action@v6
         with:
-          context: ./rill-backend
+          context: .
           file: ./rill-backend/Dockerfile
           platforms: ${{ env.PLATFORMS }}
           push: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}

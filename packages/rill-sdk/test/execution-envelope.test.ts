@@ -1,9 +1,9 @@
 import { expect, test } from 'bun:test';
 import { assertExecutionEnvelope, digestUnsignedPtb } from '../src/execution-envelope';
 
-async function baseEnvelope() {
+test('accepts the minimal hero envelope', async () => {
   const unsignedPtb = Buffer.from('{"version":2}').toString('base64');
-  return {
+  const envelope = {
     version: '1',
     actionId: 'skill_deepbook',
     actionDigest: await digestUnsignedPtb(unsignedPtb),
@@ -39,28 +39,10 @@ async function baseEnvelope() {
     },
     expiresAt: new Date(Date.now() + 60_000).toISOString(),
   };
-}
 
-test('accepts the minimal hero envelope', async () => {
-  const envelope = await baseEnvelope();
   expect(assertExecutionEnvelope(envelope)).toEqual(envelope);
 });
 
 test('rejects an envelope without wallet identity', () => {
   expect(() => assertExecutionEnvelope({ version: '1' })).toThrow('walletPackageId');
-});
-
-test("'failed' is a structurally valid verification, so it reaches the signer's fail-closed check", async () => {
-  const base = await baseEnvelope();
-  const envelope = { ...base, simulation: { ...base.simulation, ok: false, verification: 'failed' } };
-  // Must not be rejected as *malformed* — a failed simulation is a well-formed fact about the
-  // world. It is the signer's policy check (verification !== 'verified') that must refuse it,
-  // so the refusal reason is accurate rather than "envelope is invalid".
-  expect(assertExecutionEnvelope(envelope).simulation.verification).toBe('failed');
-});
-
-test('rejects a verification value outside the union', async () => {
-  const base = await baseEnvelope();
-  const envelope = { ...base, simulation: { ...base.simulation, verification: 'probably-fine' } };
-  expect(() => assertExecutionEnvelope(envelope)).toThrow('verification is invalid');
 });

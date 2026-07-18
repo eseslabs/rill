@@ -33,12 +33,7 @@ const flowSchema = {
           config: {
             type: 'object',
             additionalProperties: true,
-            description:
-              'Node config. For cetus_swap, pass `slippageBps` and let the compiler derive the ' +
-              '`min_amount_out` floor from live pool state — an explicit `min_amount_out` is honoured ' +
-              'as-is and is only correct if you priced it yourself, just now. A cetus_swap with ' +
-              'neither is rejected: there is no permissive default floor.',
-            example: { amount_in: '100000000', slippageBps: '100' },
+            example: { amount_in: '100000000', min_amount_out: '1' },
           },
           inputs: { type: 'object', additionalProperties: true },
         },
@@ -194,9 +189,7 @@ const exampleSwapStakeFlow = {
     {
       id: 'swap1',
       type: 'cetus_swap',
-      // slippageBps, not min_amount_out: the floor is derived from pool state at compile time, so
-      // it is priced when the swap is built rather than frozen when the flow was authored.
-      config: { amount_in: '100000000', slippageBps: '100' },
+      config: { amount_in: '100000000', min_amount_out: '1' },
     },
     {
       id: 'stake1',
@@ -230,7 +223,12 @@ export function buildOpenApiDocument(publicBaseUrl: string) {
       '/introspect': {
         post: {
           tags: ['Introspect'],
-          summary: 'List public Move functions in a package',
+          summary: 'Not implemented — always returns 501 (R15)',
+          description:
+            'This build\'s gRPC client does not expose Move package bytecode/ABI, so dynamic '
+            + 'introspection is genuinely unsupported here — every call returns 501 with a stable '
+            + '`type: "NotImplemented"`, never a fabricated 200. Use `/resolve` with a curated '
+            + '`packageId`/`moduleName`/`functionName` (Cetus, Haedal) instead.',
           requestBody: {
             required: true,
             content: {
@@ -249,12 +247,10 @@ export function buildOpenApiDocument(publicBaseUrl: string) {
             },
           },
           responses: {
-            '200': {
-              description: 'Normalized function list',
+            '501': {
+              description: 'Always returned — package introspection is not implemented in this build.',
               content: {
-                'application/json': {
-                  schema: successEnvelope({ type: 'array', items: { type: 'object' } }),
-                },
+                'application/json': { schema: errorEnvelope },
               },
             },
           },
@@ -264,6 +260,11 @@ export function buildOpenApiDocument(publicBaseUrl: string) {
         post: {
           tags: ['Introspect'],
           summary: 'Resolve semantic manifest for a Move function',
+          description:
+            'Returns a curated manifest for known targets (currently Cetus `router::swap` and '
+            + 'Haedal `interface::request_stake`). Anything else falls through to dynamic '
+            + 'resolution, which depends on `/introspect` and is therefore always 501 in this '
+            + 'build (R15) — `/resolve` is only ever a 200 for the curated targets above.',
           requestBody: {
             required: true,
             content: {
@@ -273,8 +274,8 @@ export function buildOpenApiDocument(publicBaseUrl: string) {
                   required: ['packageId', 'moduleName', 'functionName'],
                   properties: {
                     packageId: { type: 'string' },
-                    moduleName: { type: 'string', example: 'interface' },
-                    functionName: { type: 'string', example: 'request_stake' },
+                    moduleName: { type: 'string', example: 'router' },
+                    functionName: { type: 'string', example: 'swap' },
                   },
                 },
               },
@@ -282,11 +283,17 @@ export function buildOpenApiDocument(publicBaseUrl: string) {
           },
           responses: {
             '200': {
-              description: 'Semantic manifest',
+              description: 'Semantic manifest (curated targets only)',
               content: {
                 'application/json': {
                   schema: successEnvelope({ type: 'object' }),
                 },
+              },
+            },
+            '501': {
+              description: 'Non-curated target — dynamic resolution needs /introspect, which is not implemented.',
+              content: {
+                'application/json': { schema: errorEnvelope },
               },
             },
           },
@@ -308,6 +315,13 @@ export function buildOpenApiDocument(publicBaseUrl: string) {
                     flow: flowSchema,
                     sender: { type: 'string' },
                     agentWallet: agentWalletSchema,
+                    useServerWallet: {
+                      type: 'boolean',
+                      description:
+                        'Opt in to binding the operator-configured server wallet when no '
+                        + '`agentWallet` is supplied (R13). Without this flag, a wallet-less '
+                        + 'request never binds any wallet — funding falls back to `tx.gas`.',
+                    },
                   },
                 },
                 example: { flow: exampleSwapStakeFlow },
@@ -336,82 +350,6 @@ export function buildOpenApiDocument(publicBaseUrl: string) {
           },
         },
       },
-      '/quote': {
-        post: {
-          tags: ['Compiler'],
-          summary: 'Spot-quote a Cetus swap from pool state (no devInspect)',
-          description:
-            'Reads the pool object\'s current_sqrt_price (Q64.64) and fee_rate and computes the expected ' +
-            'output with exact integer math, then applies slippageBps to derive the on-chain floor passed to ' +
-            'rill_guard::assert_min_value. Deliberately avoids devInspect/simulateTransaction: Cetus aborts in ' +
-            'checked_package_version on testnet.\n\n' +
-            '**Limit:** this is a spot quote — it ignores price impact and tick crossing. Against thin liquidity ' +
-            'the real fill is lower than expectedOut, so minAmountOut can be too high and the swap reverts. ' +
-            'That is fail-closed: a reverted swap is safe, an unprotected one is not.',
-          requestBody: {
-            required: true,
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  additionalProperties: false,
-                  required: ['poolId', 'amountIn', 'a2b', 'slippageBps'],
-                  properties: {
-                    poolId: { type: 'string', description: 'Cetus CLMM pool object id' },
-                    amountIn: { type: 'string', description: 'Raw base units of the input coin (u64 string)' },
-                    a2b: {
-                      type: 'boolean',
-                      description: 'true = coinTypeA → coinTypeB; false = B → A (e.g. SUI → USDC on a USDC/SUI pool)',
-                    },
-                    slippageBps: {
-                      type: 'integer',
-                      minimum: 0,
-                      maximum: 9999,
-                      description: 'Slippage tolerance in basis points. 10000 is rejected — it would leave no floor.',
-                    },
-                  },
-                },
-                example: {
-                  poolId: '0x2603c08065a848b719f5f465e40dbef485ec4fd9c967ebe83a7565269a74a2b2',
-                  amountIn: '100000000',
-                  a2b: false,
-                  slippageBps: 100,
-                },
-              },
-            },
-          },
-          responses: {
-            '200': {
-              description: 'Spot quote and the derived on-chain floor',
-              content: {
-                'application/json': {
-                  schema: successEnvelope({
-                    type: 'object',
-                    required: ['expectedOut', 'minAmountOut', 'sqrtPriceX64', 'feeRate', 'ignoresPriceImpact', 'note'],
-                    properties: {
-                      expectedOut: { type: 'string', description: 'Expected raw output at the current spot price' },
-                      minAmountOut: {
-                        type: 'string',
-                        description: 'expectedOut reduced by slippageBps — the floor asserted on chain',
-                      },
-                      sqrtPriceX64: { type: 'string', description: 'Pool current_sqrt_price (Q64.64) the quote used' },
-                      feeRate: { type: 'string', description: 'Pool fee_rate in millionths (2500 = 0.25%)' },
-                      ignoresPriceImpact: {
-                        type: 'boolean',
-                        description: 'Always true — spot quote, not a simulation. Do not hide this from users.',
-                      },
-                      note: { type: 'string', description: 'Human-readable statement of the above caveat' },
-                    },
-                  }),
-                },
-              },
-            },
-            '422': {
-              description: 'Pool unreadable, paused, not a CLMM pool, or slippageBps leaves no floor',
-            },
-          },
-        },
-      },
       '/simulate': {
         post: {
           tags: ['Compiler'],
@@ -428,6 +366,13 @@ export function buildOpenApiDocument(publicBaseUrl: string) {
                     flow: flowSchema,
                     sender: { type: 'string' },
                     agentWallet: agentWalletSchema,
+                    useServerWallet: {
+                      type: 'boolean',
+                      description:
+                        'Opt in to binding the operator-configured server wallet when no '
+                        + '`agentWallet` is supplied (R13). Without this flag, a wallet-less '
+                        + 'request never binds any wallet — funding falls back to `tx.gas`.',
+                    },
                   },
                 },
                 example: { flow: exampleSwapStakeFlow },
@@ -569,6 +514,15 @@ export function buildOpenApiDocument(publicBaseUrl: string) {
                 },
               },
             },
+            '422': {
+              description:
+                'Refused — strict simulation failed, so no signable ExecutionEnvelope is returned '
+                + '(R3/KTD-4, unconditional; no bypass field). `data` carries the refusal object '
+                + '(`refused`, `actionId`, `reason`, `simulation`), not an envelope.',
+              content: {
+                'application/json': { schema: errorEnvelope },
+              },
+            },
           },
         },
       },
@@ -591,6 +545,14 @@ export function buildOpenApiDocument(publicBaseUrl: string) {
                 'application/json': {
                   schema: successEnvelope({ type: 'object' }),
                 },
+              },
+            },
+            '404': {
+              description:
+                'Generic, sanitized error (R15) — covers "not found", oversized blob, malformed '
+                + 'JSON, and schema-invalid content alike; no raw error detail is ever forwarded.',
+              content: {
+                'application/json': { schema: errorEnvelope },
               },
             },
           },

@@ -4,28 +4,19 @@ import { ValidationError } from '../../core/errors';
 import { resolveEffectiveFlow } from '../../core/node-config';
 import { SUI_CLOCK_ID } from '../../core/protocols';
 import { getAdapter } from '../protocols/registry';
-import { injectMinOutAssert } from '../protocols/guard';
-import { deriveCallManifest, type ManifestCall } from './manifest';
-import { applyQuotedFloors } from './quote.service';
+import { findFlowStructureIssues } from '../protocols/handles';
+import { injectMinOutAssert, resolveGuardrailCoinType, resolveGuardrailMinValue } from '../protocols/guard';
 import type {
   CompileOptions,
   CompileResult,
   FlowEdge,
   FlowGraph,
   FlowNode,
+  NodeOutput,
 } from '../protocols/types';
 
 // Re-exported so existing importers (`from '../compiler/compiler.service'`) keep working.
 export type { FlowEdge, FlowGraph, FlowNode, CompileOptions, CompileResult };
-
-/**
- * A compile result that also carries the call manifest read back out of `transaction`.
- * Every consumer that renders or attests to what the PTB does must use `manifest` rather
- * than re-reading the flow, so preview, envelope, and bytes cannot drift apart.
- */
-export interface CompileResultWithManifest extends CompileResult {
-  manifest: ManifestCall[];
-}
 
 /**
  * Compiles a visual flow graph into one unsigned PTB.
@@ -39,17 +30,27 @@ export class CompilerService {
     flow: FlowGraph,
     options: CompileOptions = {},
     runtimeParams: Record<string, unknown> = {},
-  ): Promise<CompileResultWithManifest> {
+  ): Promise<CompileResult> {
+    // Structural validation (unique node ids, edges reference real nodes, edges use a handle name
+    // registered for their endpoint's node type) — the SAME check `api.schema.ts`'s `FlowSchema`
+    // Zod-refines on, run here too so a direct caller that bypasses the HTTP layer entirely (the
+    // MCP skill-runner calls `compileFlow` straight, never through `zValidator`) still gets a clean
+    // 422 `ValidationError` instead of a confusing downstream failure or a mis-routed coin (R13).
+    const structureIssues = findFlowStructureIssues(flow);
+    if (structureIssues.length > 0) {
+      throw new ValidationError(
+        `Invalid flow: ${structureIssues.map((issue) => issue.message).join('; ')}`,
+      );
+    }
+
     const resolvedFlow = resolveEffectiveFlow(flow, runtimeParams);
     const tx = new Transaction();
     const warnings: string[] = [];
-
-    // Turn declared slippage tolerance into a real on-chain floor against current pool state,
-    // before any adapter reads min_amount_out. Throws rather than compiling an unguarded swap.
-    await applyQuotedFloors(resolvedFlow, warnings);
-
     const orderedNodes = this.topologicalSort(resolvedFlow.nodes, resolvedFlow.edges);
-    const nodeOutputs: Record<string, unknown> = {};
+    const nodeOutputs: Record<string, NodeOutput> = {};
+    // Coins that are produced but never chainable to another node by id (e.g. the agent_wallet
+    // budget's own ≈0 remainder, a swap's opposite-side zero-coin leftover) — always swept below.
+    const extraCoins: NodeOutput[] = [];
 
     const rootTotal = this.computeRootSuiFunding(orderedNodes, resolvedFlow);
     let budgetCoin: unknown | undefined;
@@ -71,6 +72,10 @@ export class CompilerService {
           tx.object(SUI_CLOCK_ID),
         ],
       });
+      // The spend() output must be fully consumed (UnusedValueWithoutDrop) — after nodes split what
+      // they need from it via `fundSuiCoin`, the ≈0 remainder is settled by the same sweep as every
+      // other produced coin (KTD-3 single owner), not a bespoke merge here.
+      extraCoins.push({ value: budgetCoin, coinType: SUI_COIN_TYPE });
     } else if (options.agentWallet && rootTotal === 0n) {
       warnings.push('Agent wallet configured but no root SUI funding required — spend() not inserted.');
     }
@@ -84,16 +89,26 @@ export class CompilerService {
       return split;
     };
 
-    // Guardrails that are not wired to an upstream coin output guard the root budget coin.
+    // Guardrails with ZERO incoming edges guard the root wallet-spend coin directly — there is no
+    // upstream node output to iterate. Every OTHER guardrail (>=1 incoming edge, from an action, a
+    // chained guardrail, or anything else) is handled exactly once, in topological order, by
+    // `guardrailAdapter.build()` in the main loop below. This is the same edge-count check the
+    // adapter itself makes first, so the two paths partition every guardrail node with no overlap
+    // — a guardrail is never processed by both (KTD-3 dedupe).
     for (const node of resolvedFlow.nodes) {
       if (node.type !== 'guardrail') continue;
-      const hasUpstreamCoin = resolvedFlow.edges.some(
-        (e) => e.target === node.id && resolvedFlow.nodes.some((n) => n.id === e.source && n.type !== 'ptb' && n.type !== 'guardrail'),
-      );
-      if (hasUpstreamCoin) continue;
-      const minValue = BigInt(node.config?.minValue ?? 0);
-      if (minValue <= 0n || budgetCoin === undefined) continue;
-      const coinType = String(node.config?.coinType || SUI_COIN_TYPE);
+      const hasIncomingEdge = resolvedFlow.edges.some((e) => e.target === node.id);
+      if (hasIncomingEdge) continue;
+
+      const minValue = resolveGuardrailMinValue(node, warnings); // warns when <= 0 (R1)
+      if (budgetCoin === undefined) {
+        warnings.push(
+          `Guardrail ${node.id} has no agent wallet bound and no incoming coin edge — nothing to guard.`,
+        );
+        continue;
+      }
+      if (minValue <= 0n) continue;
+      const coinType = resolveGuardrailCoinType(node);
       injectMinOutAssert(tx, budgetCoin, coinType, minValue, warnings);
     }
 
@@ -110,6 +125,7 @@ export class CompilerService {
         flow: resolvedFlow,
         node,
         nodeOutputs,
+        extraCoins,
         budgetCoin,
         options,
         warnings,
@@ -117,14 +133,18 @@ export class CompilerService {
       });
     }
 
-    // The agent_wallet::spend() output is a Coin; after nodes split what they need, the remainder
-    // (≈0) must be consumed or the PTB aborts on execute (UnusedValueWithoutDrop). Merge it to gas.
-    if (budgetCoin !== undefined) {
-      tx.mergeCoins(tx.gas, [budgetCoin as never]);
-    }
-
     if (options.sender) {
       tx.setSender(options.sender);
+    }
+
+    // Settle sweep — the single owner of "produced but never consumed" coin cleanup (KTD-3). Every
+    // adapter above only ever RECORDS a coin it produces (in `nodeOutputs` or `extraCoins`); nothing
+    // upstream of this point calls mergeCoins/transferObjects on a produced coin. Whatever remains
+    // in `nodeOutputs` was never claimed by a downstream node's edge lookup (a consumer always
+    // `delete`s the entry it reads) — SUI merges back into gas, everything else transfers to sender.
+    const pending: NodeOutput[] = [...Object.values(nodeOutputs), ...extraCoins];
+    for (const output of pending) {
+      this.settleCoin(tx, output, options);
     }
 
     return {
@@ -133,9 +153,22 @@ export class CompilerService {
       warnings,
       agentWalletBound: Boolean(options.agentWallet && rootTotal > 0n),
       budgetSpendMist: rootTotal,
-      // Read back out of the finished bytes, so it describes what was actually compiled.
-      manifest: deriveCallManifest(tx),
     };
+  }
+
+  /** SUI settles by merging into `tx.gas`; any other coin type settles by transferring to `sender`
+   *  — the one place every produced-but-unconsumed coin (KTD-3) is cleaned up. */
+  private settleCoin(tx: Transaction, output: NodeOutput, options: CompileOptions): void {
+    if (output.coinType === SUI_COIN_TYPE) {
+      tx.mergeCoins(tx.gas, [output.value as never]);
+      return;
+    }
+    if (!options.sender) {
+      throw new ValidationError(
+        `Cannot settle a produced ${output.coinType} coin: no recipient — pass \`sender\` (the owner address) so it isn't lost.`,
+      );
+    }
+    tx.transferObjects([output.value as never], options.sender);
   }
 
   /** Sum SUI (mist) needed from root by nodes without an upstream coin edge (delegated per adapter). */

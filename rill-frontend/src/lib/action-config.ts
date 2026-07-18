@@ -1,3 +1,9 @@
+// Relative import into the workspace SDK source — matches the convention used by rill-backend and
+// rill-signer. The package has no committed build output, so importing by the "@rill/sdk" name would
+// only resolve where a local dist/ happens to exist (it fails in a clean CI install); importing the
+// source directly always resolves and lets the bundler compile it.
+import { decimalToBaseUnits, findToken } from "../../../packages/rill-sdk/src";
+
 /** Testnet protocol manifest — passed in full to backend on every compile/simulate. */
 
 export const TESTNET_MANIFEST = {
@@ -5,9 +11,6 @@ export const TESTNET_MANIFEST = {
     integratePackageId: "0xab2d58dd28ff0dc19b18ab2c634397b785a38c342a8f5065ade5f53f9dbffa1c",
     globalConfigId: "0xc6273f844b4bc258952c4e477697aa12c918c8e08106fac6b934811298c9820a",
     defaultPoolId: "0x2603c08065a848b719f5f465e40dbef485ec4fd9c967ebe83a7565269a74a2b2",
-    /** Coin A of the curated pool (Pool<USDC, SUI>) — decides swap direction. Mirrors the backend registry. */
-    coinTypeA:
-      "0x14a71d857b34677a7d57e0feb303df1adb515a37780645ab763d42ce8d1a5e48::usdc::USDC",
     minSqrtPrice: "4295048016",
     maxSqrtPrice: "79226673515401279992447579055",
   },
@@ -28,13 +31,6 @@ export const SWAP_TOKENS = [
   },
 ] as const;
 
-export const DEEPBOOK_PAIRS = [
-  { key: "SUI_DBUSDC", label: "SUI / DBUSDC" },
-  { key: "SUI_USDC", label: "SUI / USDC" },
-] as const;
-
-export type DeepbookPairKey = (typeof DEEPBOOK_PAIRS)[number]["key"];
-
 export type SwapTokenSymbol = (typeof SWAP_TOKENS)[number]["symbol"];
 
 export const TOKEN_LOGOS: Record<SwapTokenSymbol, string> = {
@@ -46,50 +42,11 @@ export const TOKEN_COIN_TYPE: Record<SwapTokenSymbol, string> = Object.fromEntri
   SWAP_TOKENS.map((t) => [t.symbol, t.coinType]),
 ) as Record<SwapTokenSymbol, string>;
 
-/** Raw base units per whole token. Cetus quotes in raw units, so display needs these to be honest. */
-export const TOKEN_DECIMALS: Record<SwapTokenSymbol, number> = { SUI: 9, USDC: 6 };
-
-/** Format a raw base-unit amount for display. Trims trailing zeros; never rounds up. */
-export function formatRawAmount(raw: string, symbol: SwapTokenSymbol): string {
-  const decimals = TOKEN_DECIMALS[symbol] ?? 9;
-  const padded = raw.padStart(decimals + 1, "0");
-  const whole = padded.slice(0, padded.length - decimals);
-  const frac = padded.slice(padded.length - decimals).replace(/0+$/, "");
-  return frac ? `${whole}.${frac}` : whole;
-}
-
-/**
- * True when `tokenIn` is the pool's coin A. The curated pool is Pool<USDC, SUI>, so SUI → USDC is
- * b2a. Getting this backwards inverts the quote, which would show a confidently wrong price.
- */
-export function isA2B(tokenIn: SwapTokenSymbol): boolean {
-  return TOKEN_COIN_TYPE[tokenIn] === TESTNET_MANIFEST.cetus_swap.coinTypeA;
-}
-
 export type ActionConfig = Record<string, string>;
-
-/** Slippage tolerance the swap node ships with, in percent. */
-export const DEFAULT_SLIPPAGE_PCT = "1.0";
-/** Beyond this a "floor" stops being one; the backend rejects anything at or above 100%. */
-export const MAX_SLIPPAGE_PCT = 50;
-
-/**
- * Percent → basis points for the on-chain floor.
- *
- * Unparseable input falls back to the default tolerance rather than to no tolerance. That is not a
- * permissive default: a *tight* floor can only cause a revert, while a missing one is the
- * `min_amount_out: "1"` bug — a swap that accepts any fill at all.
- */
-export function toSlippageBps(percent: string): number {
-  const n = parseFloat(percent);
-  const fallback = Math.round(parseFloat(DEFAULT_SLIPPAGE_PCT) * 100);
-  if (!Number.isFinite(n) || n < 0) return fallback;
-  return Math.min(Math.round(n * 100), MAX_SLIPPAGE_PCT * 100);
-}
 
 export function defaultActionConfig(protocolId: string, actionId: string): ActionConfig {
   if (protocolId === "cetus" && actionId === "swap") {
-    return { tokenIn: "SUI", tokenOut: "USDC", amount: "0.1", slippage: DEFAULT_SLIPPAGE_PCT };
+    return { tokenIn: "SUI", tokenOut: "USDC", amount: "0.1" };
   }
   if (protocolId === "haedal" && actionId === "stake") {
     return { amount: "1" };
@@ -97,75 +54,107 @@ export function defaultActionConfig(protocolId: string, actionId: string): Actio
   if (protocolId === "deepbook" && actionId === "limit_order") {
     return {
       poolKey: "SUI_DBUSDC",
+      balanceManagerId: "",
       depositSui: "1.1",
       price: "1",
       quantity: "1",
       isBid: "false",
       payWithDeep: "false",
-      // BalanceManager + TradeCap come from a wired Wallet node or from the agent at execution time.
-      balanceManagerId: "",
-      tradeCapId: "",
     };
   }
   return {};
 }
 
 /**
- * Human-readable token amount → raw base units.
- *
- * `decimals` is a property of the coin, not a constant: SUI has 9 and USDC has 6. Scaling every
- * amount by 1e9 turns "1 USDC" into 1_000_000_000 base units — a swap of 1000 USDC. Callers must
- * pass `TOKEN_DECIMALS[symbol]` for anything whose coin type isn't fixed at SUI.
- *
- * Scales by digit concatenation rather than `n * 10 ** decimals`, because that multiply is float
- * math on a money value (0.07 * 1e9 is 70000000.00000001 in IEEE754). `toFixed` with a few digits
- * of headroom normalizes exponent notation and absorbs float representation error (0.29 is really
- * 0.28999999999999998); the surplus digits are then cut, not rounded, so excess precision can only
- * move the amount down — never above what the user typed.
+ * KTD-2 (docs/plans/2026-07-17-001-fix-audit-hardening-plan.md): the one money path. Every
+ * token-amount field an action node renders (Cetus swap `amount`, Haedal stake `amount`) is
+ * validated and converted through `@rill/sdk`'s `decimalToBaseUnits` with the *actual* decimals
+ * of the selected coin — never a hardcoded 9. Fixes the bug where "1 USDC" (6 decimals) produced
+ * `1000000000` base units instead of `1000000`.
  */
-export function toBaseUnits(amount: string, fallbackRaw: string, decimals: number): string {
-  const n = parseFloat(amount);
-  if (!Number.isFinite(n) || n <= 0) return fallbackRaw;
+export type AmountParseResult = { ok: true; baseUnits: bigint } | { ok: false; error: string };
 
-  const [whole, frac = ""] = n.toFixed(Math.min(decimals + 6, 100)).split(".");
-  const raw = `${whole}${frac.slice(0, decimals)}`.replace(/^0+(?=\d)/, "");
-  // Below the coin's smallest unit: there is no amount to send, so fall back rather than invent one.
-  return raw === "0" ? fallbackRaw : raw;
+/** Pure validate+convert. Never throws — callers that only need a yes/no or an error string
+ *  should use {@link isValidActionAmount} / {@link actionAmountError} below. Unknown coin types
+ *  fall back to 9 decimals (SUI); the swap/stake tokens this builder offers are all registered in
+ *  `@rill/sdk`'s token registry, so that fallback path should be rare in practice. */
+export function parseActionAmount(amount: string | undefined, coinType: string): AmountParseResult {
+  const raw = (amount ?? "").trim();
+  const decimals = findToken(coinType)?.decimals ?? 9;
+  if (raw === "") {
+    return { ok: false, error: "Amount is required." };
+  }
+  let baseUnits: bigint;
+  try {
+    baseUnits = decimalToBaseUnits(raw, decimals);
+  } catch {
+    return {
+      ok: false,
+      error: `Enter a valid positive amount with up to ${decimals} decimal place${decimals === 1 ? "" : "s"}.`,
+    };
+  }
+  if (baseUnits <= 0n) {
+    return { ok: false, error: "Amount must be greater than 0." };
+  }
+  return { ok: true, baseUnits };
 }
 
-/** SUI amount → mist. Mist is SUI's base unit; use `toBaseUnits` for any other coin. */
+/** R5: no silent fallback — the node's inline error and the flow-level simulate/publish gate
+ *  (`publish-gate.ts`) both read this same predicate, mirroring `isGuardrailMinValueValid`. */
+export function isValidActionAmount(amount: string | undefined, coinType: string): boolean {
+  return parseActionAmount(amount, coinType).ok;
+}
+
+/** `null` when valid, else a user-facing message for the node's inline field error. */
+export function actionAmountError(amount: string | undefined, coinType: string): string | null {
+  const result = parseActionAmount(amount, coinType);
+  return result.ok ? null : result.error;
+}
+
+/** Base-units string for a backend config payload. Returns `"0"` on invalid input instead of
+ *  throwing — this runs on every render (via `buildFlowGraph`, including dialogs that are mounted
+ *  but not open), so it must never crash the canvas. The actual safety backstop is the gate: an
+ *  invalid amount blocks simulate/publish (see `publish-gate.ts`) before this payload is ever sent
+ *  to the backend, so "0" here is inert, not a silently-accepted amount. */
+function toBaseUnitsString(amount: string | undefined, coinType: string): string {
+  const result = parseActionAmount(amount, coinType);
+  return result.ok ? result.baseUnits.toString() : "0";
+}
+
+/** Convert human-readable token amount to mist (9-decimal SUI base units) string. Used for
+ *  UI-only, non-final-path conversions (wire-constraint capping between Cetus swap and Haedal
+ *  stake, guardrail `minValue`, both denominated in SUI on this canvas) where a malformed
+ *  in-progress keystroke should fall back rather than throw. The security-critical amount path
+ *  (`amount_in`/`amount` sent to the backend) goes through {@link parseActionAmount} above instead,
+ *  which is gated — never silently defaulted — at the flow level. */
 export function toMist(amount: string, fallbackMist: string): string {
-  return toBaseUnits(amount, fallbackMist, TOKEN_DECIMALS.SUI);
+  const raw = (amount ?? "").trim();
+  try {
+    const n = decimalToBaseUnits(raw, 9);
+    if (n <= 0n) return fallbackMist;
+    return n.toString();
+  } catch {
+    return fallbackMist;
+  }
 }
 
 export function otherSwapToken(symbol: SwapTokenSymbol): SwapTokenSymbol {
   return symbol === "SUI" ? "USDC" : "SUI";
 }
 
-/**
- * Build backend flow node config — FE owns protocol addresses, BE compiles from this payload.
- *
- * Carries `slippageBps` (the user's tolerance) and *not* `min_amount_out` (the floor). The backend
- * derives the floor from live pool state at compile time, so a flow published today still gets a
- * floor priced against today's pool when an agent runs it next week. A floor computed here would be
- * frozen at build time — stale, and stale in the unsafe direction once the price rises.
- */
+/** Build backend flow node config — FE owns protocol addresses, BE compiles from this payload. */
 export function buildCetusSwapFlowConfig(cfg: ActionConfig) {
   const tokenIn = (cfg.tokenIn as SwapTokenSymbol) || "SUI";
   const m = TESTNET_MANIFEST.cetus_swap;
+  const inputCoinType = TOKEN_COIN_TYPE[tokenIn] ?? TOKEN_COIN_TYPE.SUI;
   return {
     integratePackageId: m.integratePackageId,
     globalConfigId: m.globalConfigId,
     pool: m.defaultPoolId,
-    inputCoinType: TOKEN_COIN_TYPE[tokenIn] ?? TOKEN_COIN_TYPE.SUI,
+    inputCoinType,
     outputCoinType: TOKEN_COIN_TYPE[otherSwapToken(tokenIn)],
-    // Scaled by the *input* coin's decimals — a USDC-in swap is 1e6, not mist.
-    amount_in: toBaseUnits(
-      String(cfg.amount ?? "0.1"),
-      "100000000",
-      TOKEN_DECIMALS[tokenIn] ?? TOKEN_DECIMALS.SUI,
-    ),
-    slippageBps: String(toSlippageBps(String(cfg.slippage ?? DEFAULT_SLIPPAGE_PCT))),
+    amount_in: toBaseUnitsString(cfg.amount ?? "0.1", inputCoinType),
+    min_amount_out: "1",
     minSqrtPrice: m.minSqrtPrice,
     maxSqrtPrice: m.maxSqrtPrice,
   };
@@ -178,7 +167,7 @@ export function buildHaedalStakeFlowConfig(cfg: ActionConfig) {
     suiSystemStateId: m.suiSystemStateId,
     stakingObjectId: m.stakingObjectId,
     minStakeMist: m.minStakeMist,
-    amount: toMist(String(cfg.amount ?? "1"), m.minStakeMist),
+    amount: toBaseUnitsString(cfg.amount ?? "1", TOKEN_COIN_TYPE.SUI),
   };
 }
 
@@ -187,7 +176,6 @@ export function buildDeepbookOrderFlowConfig(cfg: ActionConfig) {
   return {
     poolKey: cfg.poolKey || "SUI_DBUSDC",
     balanceManagerId: cfg.balanceManagerId || "",
-    tradeCapId: cfg.tradeCapId || "",
     depositSui: cfg.depositSui || "0",
     price: cfg.price || "1",
     quantity: cfg.quantity || "1",

@@ -36,7 +36,7 @@ test('builds the minimal DeepBook ExecutionEnvelope without signing', async () =
   });
 
   try {
-    const envelope: ExecutionEnvelope = await new SkillRunnerService().runFlow(
+    const built = await new SkillRunnerService().runFlow(
       {
         nodes: [{
           id: 'order',
@@ -68,6 +68,9 @@ test('builds the minimal DeepBook ExecutionEnvelope without signing', async () =
       },
     );
 
+    if ('refused' in built) throw new Error('expected an ExecutionEnvelope, got a refusal');
+    const envelope: ExecutionEnvelope = built;
+
     expect(Object.keys(envelope).sort()).toEqual([
       'actionDigest',
       'actionId',
@@ -98,8 +101,6 @@ test('builds the minimal DeepBook ExecutionEnvelope without signing', async () =
     expect(envelope.resolvedParams).toEqual({
       poolKey,
       poolId: pools[poolKey].address,
-      balanceManagerId,
-      tradeCapId,
       price: 1,
       quantity: 0.01,
       isBid: false,
@@ -127,6 +128,72 @@ test('builds the minimal DeepBook ExecutionEnvelope without signing', async () =
   }
 });
 
+test('refuses to return an ExecutionEnvelope when strict simulation fails — no carve-out (R3/KTD-4)', async () => {
+  const poolKey = config.network === 'testnet' ? 'SUI_DBUSDC' : 'SUI_USDC';
+  const simulate = simulatorService.simulateTransaction;
+  const getBalance = suiClient.core.getBalance;
+  simulatorService.simulateTransaction = async () => ({
+    ok: false,
+    verification: 'verified',
+    error: 'MoveAbort: insufficient balance',
+    gasEstimate: 0,
+    balanceChanges: [],
+    objectChanges: [],
+  });
+  suiClient.core.getBalance = async () => ({
+    balance: { coinType: '0x2::sui::SUI', balance: '0', coinBalance: '0', addressBalance: '0' },
+  });
+
+  try {
+    const result = await new SkillRunnerService().runFlow(
+      {
+        nodes: [{
+          id: 'order',
+          type: 'deepbook_limit_order',
+          config: {
+            poolKey,
+            balanceManagerId: objectId(4),
+            tradeCapId: objectId(5),
+            price: 1,
+            quantity: 0.01,
+            isBid: false,
+            payWithDeep: false,
+            clientOrderId: '71601',
+            depositSui: 0.01,
+          },
+        }],
+        edges: [],
+      },
+      {},
+      {
+        actionId: 'skill_deepbook',
+        sender: objectId(6),
+        agentWallet: {
+          packageId: objectId(1),
+          walletId: objectId(2),
+          capId: objectId(3),
+          coinType: '0x2::sui::SUI',
+        },
+      },
+    );
+
+    if (!('refused' in result)) throw new Error('expected a refusal object, got something else');
+    expect(result.refused).toBe(true);
+    expect(result.actionId).toBe('skill_deepbook');
+    expect(result.reason).toContain('strict simulation');
+    expect(result.simulation.ok).toBe(false);
+    // Deliberately NOT envelope-shaped — no field lets a careless caller mistake this for something
+    // signable.
+    expect(result).not.toHaveProperty('unsignedPtb');
+    expect(result).not.toHaveProperty('actionDigest');
+    expect(result).not.toHaveProperty('version');
+    expect(Object.keys(result).sort()).toEqual(['actionId', 'reason', 'refused', 'simulation']);
+  } finally {
+    simulatorService.simulateTransaction = simulate;
+    suiClient.core.getBalance = getBalance;
+  }
+});
+
 test('rejects action builds without a DeepBook limit order', async () => {
   await expect(new SkillRunnerService().runFlow(
     { nodes: [], edges: [] },
@@ -141,7 +208,7 @@ test('rejects action builds without a DeepBook limit order', async () => {
         coinType: '0x2::sui::SUI',
       },
     },
-  )).rejects.toThrow('Cannot build an empty flow.');
+  )).rejects.toThrow('requires exactly one DeepBook limit-order node');
 });
 
 test('rejects action builds with multiple DeepBook limit orders', async () => {
@@ -164,5 +231,5 @@ test('rejects action builds with multiple DeepBook limit orders', async () => {
         coinType: '0x2::sui::SUI',
       },
     },
-  )).rejects.toThrow('pre-provisioned BalanceManager');
+  )).rejects.toThrow('requires exactly one DeepBook limit-order node; found 2');
 });

@@ -6,16 +6,14 @@ import {
 import { SUI_COIN_TYPE } from '../../core/agent-wallet';
 import { config, suiClient } from '../../core/config';
 import { ValidationError } from '../../core/errors';
-import { resolveDeepbookOrderConfig } from '../../core/node-config';
+import { resolveDeepbookOrderConfig, suiToMist } from '../../core/node-config';
 import type { AdapterCtx, FlowGraph, FlowNode, ProtocolAdapter } from './types';
-
-const toMist = (sui: number) => BigInt(Math.round(sui * 1_000_000_000));
 
 export const deepbookAdapter: ProtocolAdapter = {
   nodeType: 'deepbook_limit_order',
 
   rootSuiFunding(node: FlowNode, _flow: FlowGraph): bigint {
-    return toMist(resolveDeepbookOrderConfig(node).config.depositSui);
+    return suiToMist(resolveDeepbookOrderConfig(node).config.depositSui, `Node ${node.id}: config.depositSui`);
   },
 
   async build(ctx: AdapterCtx): Promise<void> {
@@ -37,7 +35,7 @@ export const deepbookAdapter: ProtocolAdapter = {
       throw new ValidationError(`Node ${node.id}: poolKey, price, and quantity are required.`);
     }
 
-    const spendAmountMist = toMist(order.depositSui);
+    const spendAmountMist = suiToMist(order.depositSui, `Node ${node.id}: config.depositSui`);
     if (spendAmountMist <= 0n) {
       throw new ValidationError(`Node ${node.id}: depositSui must be positive.`);
     }

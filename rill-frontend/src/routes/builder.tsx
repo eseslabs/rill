@@ -11,6 +11,7 @@ import ReactFlow, {
   type Connection,
   type Edge,
   type Node,
+  type OnConnectStartParams,
   ReactFlowProvider,
   useReactFlow,
 } from "reactflow";
@@ -22,13 +23,9 @@ import {
   Download,
   Play,
   ChevronRight,
-  X,
   ScanSearch,
   Shield,
   Layers,
-  Check,
-  Loader2,
-  Wallet,
 } from "lucide-react";
 import { SiteHeader } from "@/components/site-chrome";
 import {
@@ -37,30 +34,45 @@ import {
   OutputNode,
   PtbNode,
   GuardrailNode,
-  WalletNode,
   type ActionNodeData,
-  type WalletNodeData,
 } from "@/components/flow/nodes";
 import { PROTOCOLS, BACKEND_PROTOCOL_IDS, type Protocol } from "@/lib/protocols";
 import { DiscoverDialog } from "@/components/flow/discover-dialog";
+import { ExportDialog } from "@/components/flow/export-dialog";
 import { ProtocolLogo } from "@/components/flow/protocol-logo";
 import { DeletableEdge } from "@/components/flow/deletable-edge";
 import { SimulateDialog } from "@/components/flow/simulate-dialog";
-import { buildFlowGraph } from "@/lib/flow-mapper";
+import { applyWireConstraints } from "@/lib/flow-mapper";
 import {
   inferWireKindFromConnection,
   isValidWireConnection,
   WIRE_IN,
   WIRE_OUT,
 } from "@/lib/wire-inference";
+import { computePublishGate } from "@/lib/publish-gate";
 import { applyProtocolRegistry, defaultActionConfig } from "@/lib/action-config";
 import { getActionPorts } from "@/lib/action-ports";
-import { rillApi, type PublishResult } from "@/lib/rill-api";
+import { rillApi } from "@/lib/rill-api";
+import { loadDraftFromStorage, saveDraftToStorage, maxNodeId } from "@/lib/draft-storage";
 import type { DiscoveredFunction, IntrospectionResult } from "@/lib/rill-types";
 
 export const Route = createFileRoute("/builder")({
   component: BuilderPage,
 });
+
+/** Cosmetic labels shown on a newly-created guardrail node's checklist — informational
+ *  only; the guardrail's actually-enforced field is `minValue`/`coinType` (see
+ *  nodes.tsx GuardrailNode and the read-only panel in simulate-dialog.tsx).
+ *  Not exported — this module is the only remaining consumer. */
+type Guardrail = { id: string; label: string; enabled: boolean };
+
+const DEFAULT_GUARDRAILS: Guardrail[] = [
+  { id: "max_in", label: "Max amount_in ≤ 100 SUI", enabled: true },
+  { id: "slippage", label: "Slippage ≤ 1.0%", enabled: true },
+  { id: "allowlist", label: "Recipient must be on allowlist", enabled: false },
+  { id: "ttl", label: "Deadline within 60s", enabled: true },
+  { id: "dry_run", label: "Require successful dry-run", enabled: true },
+];
 
 const nodeTypes = {
   action: ActionNode,
@@ -68,7 +80,6 @@ const nodeTypes = {
   output: OutputNode,
   ptb: PtbNode,
   guardrail: GuardrailNode,
-  wallet: WalletNode,
 };
 
 const edgeTypes = {
@@ -83,19 +94,6 @@ const initialNodes: Node[] = [
 const initialEdges: Edge[] = [];
 
 const easeOut = [0.22, 1, 0.36, 1] as const;
-
-const stagger = {
-  hidden: { opacity: 0 },
-  show: {
-    opacity: 1,
-    transition: { staggerChildren: 0.07, delayChildren: 0.05 },
-  },
-};
-
-const fadeUp = {
-  hidden: { opacity: 0, y: 14 },
-  show: { opacity: 1, y: 0, transition: { duration: 0.35, ease: easeOut } },
-};
 
 function BuilderPage() {
   return (
@@ -112,10 +110,21 @@ function Builder() {
   const [exportOpen, setExportOpen] = useState(false);
   const [discoverOpen, setDiscoverOpen] = useState(false);
   const [simulateOpen, setSimulateOpen] = useState(false);
+  // Cosmetic seed data for a new guardrail node's checklist (see DEFAULT_GUARDRAILS
+  // doc comment) — not enforcement state, so it's a constant, not a setter pair.
+  const guardrails = DEFAULT_GUARDRAILS;
   const [network, setNetwork] = useState<string | null>(null);
   const idRef = useRef(1);
   const headlineRef = useRef<HTMLHeadingElement>(null);
   const { screenToFlowPosition } = useReactFlow();
+
+  // "Latest ref" pattern (see lib/use-flow-request.ts) — kept current on every
+  // render so the beforeunload listener below can read live canvas state
+  // without re-registering itself on every node/edge change.
+  const nodesRef = useRef(nodes);
+  nodesRef.current = nodes;
+  const edgesRef = useRef(edges);
+  edgesRef.current = edges;
 
   useEffect(() => {
     rillApi.protocols().then(applyProtocolRegistry).catch(() => {
@@ -128,6 +137,51 @@ function Builder() {
         if (n) setNetwork(n);
       })
       .catch(() => {});
+  }, []);
+
+  // Restore-on-mount (R16): a valid autosaved draft replaces the default
+  // trigger/output starter canvas and seeds idRef past the highest restored
+  // node id so newly-created nodes never collide with a restored one. A
+  // corrupt/mismatched draft (deserializeDraft returned null) is discarded —
+  // the canvas simply stays at its default — and surfaced once via toast,
+  // never as a crash.
+  useEffect(() => {
+    const result = loadDraftFromStorage();
+    if (result.status === "restored") {
+      setNodes(result.draft.nodes);
+      setEdges(result.draft.edges);
+      idRef.current = maxNodeId(result.draft.nodes) + 1;
+    } else if (result.status === "corrupt") {
+      toast.error("Previous draft couldn't be restored");
+    }
+  }, []);
+
+  // Debounced autosave (R16): waits for a ~800ms pause in canvas activity
+  // (drags, wiring, node adds) before persisting, so continuous in-flight
+  // changes don't hammer localStorage on every intermediate frame. Standard
+  // effect-cleanup debounce — each nodes/edges change clears the previous
+  // pending save and schedules a fresh one.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      saveDraftToStorage(nodes, edges);
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [nodes, edges]);
+
+  // Warn on tab close/reload once the canvas has diverged from the default
+  // trigger->output starter graph (R16) — registered once and reads live
+  // state via nodesRef/edgesRef rather than re-subscribing on every edit.
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      const hasContent =
+        nodesRef.current.some((n) => n.type !== "trigger" && n.type !== "output") ||
+        edgesRef.current.length > 0;
+      if (!hasContent) return;
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, []);
 
   useEffect(() => {
@@ -161,9 +215,86 @@ function Builder() {
   );
 
   const isValidConnection = useCallback(
-    (c: Connection) => isValidWireConnection(c, nodes),
-    [nodes],
+    (c: Connection) => isValidWireConnection(c, nodes, edges).valid,
+    [nodes, edges],
   );
+
+  // ReactFlow's isValidConnection only returns a boolean (nothing tells the app
+  // *why* a dropped connection didn't attach), so a rejected drag is re-validated
+  // here from the raw DOM handle attributes ReactFlow itself stamps on each
+  // handle element, purely to recover the reason for a toast.
+  const connectStartRef = useRef<OnConnectStartParams | null>(null);
+
+  const onConnectStart = useCallback((_event: unknown, params: OnConnectStartParams) => {
+    connectStartRef.current = params;
+  }, []);
+
+  const onConnectEnd = useCallback(
+    (event: MouseEvent | TouchEvent) => {
+      const start = connectStartRef.current;
+      connectStartRef.current = null;
+      if (!start?.nodeId) return;
+
+      const targetEl = event.target as HTMLElement | null;
+      const handleEl = targetEl?.closest?.(".react-flow__handle") as HTMLElement | null;
+      if (!handleEl) return; // dropped on empty canvas — not a rejected node-to-node attempt
+
+      const otherNodeId = handleEl.getAttribute("data-nodeid");
+      const otherHandleId = handleEl.getAttribute("data-handleid");
+      if (!otherNodeId || otherNodeId === start.nodeId) return;
+
+      const connection: Connection =
+        start.handleType === "source"
+          ? { source: start.nodeId, sourceHandle: start.handleId, target: otherNodeId, targetHandle: otherHandleId }
+          : { source: otherNodeId, sourceHandle: otherHandleId, target: start.nodeId, targetHandle: start.handleId };
+
+      const validation = isValidWireConnection(connection, nodes, edges);
+      if (!validation.valid && validation.reason) {
+        toast.error(validation.reason);
+      }
+    },
+    [nodes, edges],
+  );
+
+  const publishGate = useMemo(() => computePublishGate(nodes, edges), [nodes, edges]);
+
+  // Applies applyWireConstraints' change list to real canvas state (setNodes) and
+  // explains what changed and why — the compiled output was already self-correcting
+  // (buildFlowGraph applies the same list to its own internal copy), this is purely
+  // about making the correction visible instead of silent. A no-op when the canvas
+  // already matches (empty change list), so reopening a conformant flow stays quiet.
+  const applyWireCorrections = useCallback(() => {
+    const changes = applyWireConstraints(nodes, edges);
+    if (changes.length === 0) return;
+
+    setNodes((nds) =>
+      nds.map((n) => {
+        const nodeChanges = changes.filter((c) => c.nodeId === n.id);
+        if (nodeChanges.length === 0) return n;
+        const data = n.data as ActionNodeData;
+        const patchedConfig = { ...(data.config ?? {}) };
+        for (const c of nodeChanges) patchedConfig[c.field] = c.to;
+        return { ...n, data: { ...data, config: patchedConfig } };
+      }),
+    );
+
+    const reasons = Array.from(new Set(changes.map((c) => c.reason)));
+    reasons.forEach((reason) => toast.warning(reason));
+  }, [nodes, edges, setNodes]);
+
+  const openSimulate = useCallback(() => {
+    applyWireCorrections();
+    setSimulateOpen(true);
+  }, [applyWireCorrections]);
+
+  const openExport = useCallback(() => {
+    if (!publishGate.publishable) {
+      if (publishGate.reason) toast.error(publishGate.reason);
+      return;
+    }
+    applyWireCorrections();
+    setExportOpen(true);
+  }, [publishGate, applyWireCorrections]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -256,7 +387,14 @@ function Builder() {
       e.preventDefault();
       const raw = e.dataTransfer.getData("application/rill");
       if (!raw) return;
-      const { protocolId, actionId } = JSON.parse(raw);
+      let parsed: { protocolId?: string; actionId?: string };
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        toast.error("Invalid drop payload");
+        return;
+      }
+      const { protocolId, actionId } = parsed;
       const p = PROTOCOLS.find((x) => x.id === protocolId);
       if (!p) return;
       const action = p.actions.find((a) => a.id === actionId);
@@ -295,27 +433,10 @@ function Builder() {
         type: "guardrail",
         position: { x: 320, y: 480 },
         data: {
-          // No decorative rule labels: a guardrail enforces its minValue via
-          // rill_guard::assert_min_value, and nothing else.
-          rules: [],
-          minValue: "0",
+          rules: guardrails.filter((g) => g.enabled).map((g) => ({ id: g.id, label: g.label })),
+          minValue: "",
           coinType: "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI",
         },
-      } as Node),
-    );
-  };
-
-  const addWallet = () => {
-    const id = `wallet_${idRef.current++}`;
-    setNodes((nds) =>
-      nds.concat({
-        id,
-        type: "wallet",
-        position: { x: 120, y: 420 },
-        data: {
-          label: "Agent wallet",
-          coinType: "0x2::sui::SUI",
-        } as WalletNodeData,
       } as Node),
     );
   };
@@ -405,32 +526,52 @@ function Builder() {
             initial={{ opacity: 0, y: -8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.2, duration: 0.4, ease: easeOut }}
-            className="absolute top-3 right-3 z-10 flex flex-wrap gap-2 justify-end"
+            className="absolute top-3 right-3 z-10 flex flex-col items-end gap-2"
           >
-            {(
-              [
-                { label: "Add Wallet", icon: Wallet, onClick: addWallet, primary: false },
-                { label: "Add PTB", icon: Layers, onClick: addPtb, primary: false },
-                { label: "Guardrails", icon: Shield, onClick: addGuardrail, primary: false },
-                { label: "Simulate", icon: Play, onClick: () => setSimulateOpen(true), primary: false },
-                { label: "Compile & export", icon: Download, onClick: () => setExportOpen(true), primary: true },
-              ] as const
-            ).map(({ label, icon: Icon, onClick, primary }) => (
+            <div className="flex flex-wrap gap-2 justify-end">
+              {(
+                [
+                  { label: "Add PTB", icon: Layers, onClick: addPtb },
+                  { label: "Guardrails", icon: Shield, onClick: addGuardrail },
+                  { label: "Simulate", icon: Play, onClick: openSimulate },
+                ] as const
+              ).map(({ label, icon: Icon, onClick }) => (
+                <motion.button
+                  key={label}
+                  whileHover={{ scale: 1.04, y: -2 }}
+                  whileTap={{ scale: 0.96 }}
+                  transition={{ type: "spring", stiffness: 480, damping: 22 }}
+                  onClick={onClick}
+                  className="inline-flex cursor-pointer items-center gap-2 rounded-full bg-card/90 backdrop-blur border border-border px-3.5 py-2 text-sm font-medium shadow-[var(--shadow-soft)]"
+                >
+                  <Icon className="h-4 w-4" /> {label}
+                </motion.button>
+              ))}
               <motion.button
-                key={label}
-                whileHover={{ scale: 1.04, y: -2 }}
-                whileTap={{ scale: 0.96 }}
+                whileHover={publishGate.publishable ? { scale: 1.04, y: -2 } : undefined}
+                whileTap={publishGate.publishable ? { scale: 0.96 } : undefined}
                 transition={{ type: "spring", stiffness: 480, damping: 22 }}
-                onClick={onClick}
-                className={
-                  primary
-                    ? "inline-flex cursor-pointer items-center gap-2 rounded-full bg-foreground text-background px-3.5 py-2 text-sm font-medium shadow-[var(--shadow-float)]"
-                    : "inline-flex cursor-pointer items-center gap-2 rounded-full bg-card/90 backdrop-blur border border-border px-3.5 py-2 text-sm font-medium shadow-[var(--shadow-soft)]"
-                }
+                onClick={openExport}
+                aria-disabled={!publishGate.publishable}
+                aria-describedby={!publishGate.publishable ? "publish-gate-reason" : undefined}
+                className={`inline-flex items-center gap-2 rounded-full px-3.5 py-2 text-sm font-medium shadow-[var(--shadow-float)] transition-colors ${
+                  publishGate.publishable
+                    ? "cursor-pointer bg-foreground text-background"
+                    : "cursor-not-allowed bg-foreground/50 text-background/80"
+                }`}
               >
-                <Icon className="h-4 w-4" /> {label}
+                <Download className="h-4 w-4" /> Compile & export
               </motion.button>
-            ))}
+            </div>
+            {!publishGate.publishable && publishGate.reason && (
+              <p
+                id="publish-gate-reason"
+                role="status"
+                className="max-w-xs rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-1.5 text-right text-[11px] text-amber-800 dark:text-amber-300"
+              >
+                {publishGate.reason}
+              </p>
+            )}
           </motion.div>
 
           <motion.div
@@ -454,6 +595,8 @@ function Builder() {
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
+              onConnectStart={onConnectStart}
+              onConnectEnd={onConnectEnd}
               isValidConnection={isValidConnection}
               nodeTypes={nodeTypes as any}
               edgeTypes={edgeTypes as any}
@@ -491,13 +634,27 @@ function Builder() {
 
       <AnimatePresence>
         {exportOpen && (
-          <ExportDialog nodes={nodes} edges={edges} onClose={() => setExportOpen(false)} />
+          <ExportDialog
+            nodes={nodes}
+            edges={edges}
+            open
+            onOpenChange={(o) => !o && setExportOpen(false)}
+          />
         )}
         {discoverOpen && (
-          <DiscoverDialog onClose={() => setDiscoverOpen(false)} onImport={importDiscovered} />
+          <DiscoverDialog
+            open
+            onOpenChange={(o) => !o && setDiscoverOpen(false)}
+            onImport={importDiscovered}
+          />
         )}
         {simulateOpen && (
-          <SimulateDialog nodes={nodes} edges={edges} onClose={() => setSimulateOpen(false)} />
+          <SimulateDialog
+            nodes={nodes}
+            edges={edges}
+            open
+            onOpenChange={(o) => !o && setSimulateOpen(false)}
+          />
         )}
       </AnimatePresence>
     </div>
@@ -570,283 +727,5 @@ function ProtocolGroup({
         )}
       </AnimatePresence>
     </div>
-  );
-}
-
-function ExportDialog({
-  nodes,
-  edges,
-  onClose,
-}: {
-  nodes: Node[];
-  edges: Edge[];
-  onClose: () => void;
-}) {
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [published, setPublished] = useState<PublishResult | null>(null);
-  const [copied, setCopied] = useState<"mcp" | "config" | null>(null);
-  const mcpBoxRef = useRef<HTMLDivElement>(null);
-  const actions = nodes.filter((n) => n.type === "action").map((n) => n.data as ActionNodeData);
-
-  useEffect(() => {
-    let cancelled = false;
-    const run = async () => {
-      setLoading(true);
-      setError(null);
-      const { nodes: flowNodes, edges: flowEdges, skipped } = buildFlowGraph(nodes, edges);
-      const actionNodes = flowNodes.filter(
-        (n) => n.type !== "ptb" && n.type !== "guardrail",
-      );
-      if (actionNodes.length === 0) {
-        const message = skipped.length
-          ? `No supported action nodes. Skipped: ${skipped.join(", ")}`
-          : "Add a supported action before publishing.";
-        setError(message);
-        toast.error(message);
-        setLoading(false);
-        return;
-      }
-      try {
-        const data = await rillApi.publish({ nodes: flowNodes, edges: flowEdges });
-        if (!cancelled) setPublished(data);
-      } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Publish failed");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    };
-    run();
-    return () => {
-      cancelled = true;
-    };
-  }, [nodes, edges]);
-
-  useEffect(() => {
-    if (!published || !mcpBoxRef.current) return;
-    gsap.fromTo(
-      mcpBoxRef.current,
-      { scale: 0.96, boxShadow: "0 0 0 rgba(0,0,0,0)" },
-      {
-        scale: 1,
-        boxShadow: "0 0 0 3px oklch(0.72 0.12 165 / 0.35)",
-        duration: 0.55,
-        ease: "back.out(1.6)",
-      },
-    );
-    gsap.to(mcpBoxRef.current, {
-      boxShadow: "0 0 0 0px oklch(0.72 0.12 165 / 0)",
-      delay: 0.9,
-      duration: 0.6,
-      ease: "power2.out",
-    });
-  }, [published]);
-
-  const claudeConfig = useMemo(() => {
-    if (!published) return "";
-    return JSON.stringify(
-      {
-        mcpServers: {
-          "rill-actions": {
-            url: published.mcpUrl,
-          },
-        },
-      },
-      null,
-      2,
-    );
-  }, [published]);
-
-  const copy = async (text: string, kind: "mcp" | "config") => {
-    await navigator.clipboard.writeText(text);
-    setCopied(kind);
-    setTimeout(() => setCopied(null), 2000);
-  };
-
-  return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="fixed inset-0 z-50 cursor-pointer bg-foreground/30 backdrop-blur-sm flex items-center justify-center p-4"
-      onClick={onClose}
-    >
-      <motion.div
-        initial={{ opacity: 0, y: 24, scale: 0.96 }}
-        animate={{ opacity: 1, y: 0, scale: 1 }}
-        exit={{ opacity: 0, y: 12, scale: 0.98 }}
-        transition={{ type: "spring", stiffness: 380, damping: 28 }}
-        onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-2xl cursor-default rounded-2xl bg-card border border-border shadow-[var(--shadow-float)] overflow-hidden"
-      >
-        <div className="flex items-start justify-between px-5 py-4 border-b border-border gap-4">
-          <div className="min-w-0">
-            <div className="text-xs uppercase tracking-widest text-muted-foreground">Publish</div>
-            <h3 className="font-display text-2xl tracking-tight">
-              {loading ? "Publishing flow…" : published ? "MCP server ready" : "Publish failed"}
-            </h3>
-            <p className="mt-1 text-sm text-muted-foreground">
-              {loading
-                ? "Publishing action metadata and registering the bounded Rill tools."
-                : "Copy the URL below into Claude Code, Cursor, or any MCP client — not a browser link."}
-            </p>
-          </div>
-          <motion.button
-            whileHover={{ scale: 1.08, rotate: 90 }}
-            whileTap={{ scale: 0.92 }}
-            onClick={onClose}
-            className="cursor-pointer rounded-full p-1.5 hover:bg-secondary shrink-0"
-          >
-            <X className="h-4 w-4" />
-          </motion.button>
-        </div>
-
-        <div className="p-5 space-y-4 min-h-[180px]">
-          {loading && (
-            <motion.div
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="flex flex-col items-center justify-center py-10 gap-4"
-            >
-              <motion.div
-                animate={{ rotate: 360 }}
-                transition={{ duration: 1.2, repeat: Infinity, ease: "linear" }}
-              >
-                <Loader2 className="h-8 w-8 text-primary" />
-              </motion.div>
-              <div className="flex gap-1.5">
-                {["Compose", "Simulate", "Publish"].map((step, i) => (
-                  <motion.span
-                    key={step}
-                    className="text-[11px] rounded-full border border-border px-2.5 py-1 text-muted-foreground"
-                    initial={{ opacity: 0.4 }}
-                    animate={{ opacity: [0.4, 1, 0.4] }}
-                    transition={{ duration: 1.4, repeat: Infinity, delay: i * 0.35 }}
-                  >
-                    {step}
-                  </motion.span>
-                ))}
-              </div>
-            </motion.div>
-          )}
-
-          {error && !loading && (
-            <motion.p
-              initial={{ opacity: 0, x: -8 }}
-              animate={{ opacity: 1, x: 0 }}
-              className="text-sm text-destructive rounded-lg border border-destructive/30 bg-destructive/5 p-3"
-            >
-              {error}
-            </motion.p>
-          )}
-
-          {published && !loading && (
-            <motion.div variants={stagger} initial="hidden" animate="show" className="space-y-4">
-              <motion.div variants={fadeUp} className="flex items-center gap-2 text-mint-foreground">
-                <motion.span
-                  initial={{ scale: 0 }}
-                  animate={{ scale: 1 }}
-                  transition={{ type: "spring", stiffness: 500, damping: 18, delay: 0.1 }}
-                  className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-mint/30"
-                >
-                  <Check className="h-3.5 w-3.5" />
-                </motion.span>
-                <span className="text-sm font-medium">Published successfully</span>
-              </motion.div>
-
-              <motion.div variants={fadeUp}>
-                <label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                  MCP server URL
-                </label>
-                <div ref={mcpBoxRef} className="mt-1.5 flex gap-2 rounded-xl">
-                  <code className="flex-1 rounded-lg border border-border bg-foreground/5 px-3 py-2.5 text-xs break-all">
-                    {published.mcpUrl}
-                  </code>
-                  <motion.button
-                    whileHover={{ scale: 1.04 }}
-                    whileTap={{ scale: 0.96 }}
-                    onClick={() => copy(published.mcpUrl, "mcp")}
-                    className="shrink-0 cursor-pointer rounded-full bg-foreground text-background px-4 py-2 text-sm font-medium"
-                  >
-                    <AnimatePresence mode="wait">
-                      {copied === "mcp" ? (
-                        <motion.span
-                          key="copied"
-                          initial={{ opacity: 0, y: 6 }}
-                          animate={{ opacity: 1, y: 0 }}
-                          exit={{ opacity: 0, y: -6 }}
-                          className="inline-flex items-center gap-1"
-                        >
-                          <Check className="h-3.5 w-3.5" /> Copied
-                        </motion.span>
-                      ) : (
-                        <motion.span key="copy" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-                          Copy URL
-                        </motion.span>
-                      )}
-                    </AnimatePresence>
-                  </motion.button>
-                </div>
-              </motion.div>
-
-              <motion.div
-                variants={fadeUp}
-                className="rounded-lg border border-border/60 bg-muted/30 px-4 py-3 text-sm space-y-2"
-              >
-                <p className="font-medium">How to use</p>
-                <ol className="list-decimal list-inside text-muted-foreground space-y-1 text-xs">
-                  <li>Copy the MCP URL above and add it as <code className="text-foreground">rill-actions</code></li>
-                  <li>Call <code className="text-foreground">list_actions</code>, then <code className="text-foreground">describe_action</code></li>
-                  <li>
-                    Call <code className="text-foreground">build_action</code> with public wallet IDs and runtime params → get an unsigned ExecutionEnvelope
-                  </li>
-                </ol>
-              </motion.div>
-
-              <motion.div variants={fadeUp}>
-                <label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                  Claude Code config (optional)
-                </label>
-                <pre className="mt-1.5 rounded-lg border border-border bg-foreground/5 p-3 text-[11px] font-mono overflow-auto max-h-36">
-                  {claudeConfig}
-                </pre>
-                <motion.button
-                  whileHover={{ x: 2 }}
-                  onClick={() => copy(claudeConfig, "config")}
-                  className="mt-2 cursor-pointer text-xs text-primary hover:underline"
-                >
-                  {copied === "config" ? "Copied!" : "Copy config JSON"}
-                </motion.button>
-              </motion.div>
-
-              {published.warnings.length > 0 && (
-                <motion.p variants={fadeUp} className="text-xs text-amber-700 dark:text-amber-400">
-                  Warnings: {published.warnings.join(" · ")}
-                </motion.p>
-              )}
-
-              {published.skillUrl && (
-                <motion.p variants={fadeUp} className="text-xs text-muted-foreground border-t border-border pt-3">
-                  Need human-readable docs?{" "}
-                  <a
-                    href={published.skillUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-primary hover:underline"
-                  >
-                    Open SKILL.md
-                  </a>
-                  {" "}(includes the same MCP URL + bounded remote/local handoff)
-                </motion.p>
-              )}
-
-              <motion.p variants={fadeUp} className="text-[10px] text-muted-foreground">
-                Flow: {actions.map((a) => `${a.protocol} · ${a.action}`).join(" → ")}
-              </motion.p>
-            </motion.div>
-          )}
-        </div>
-      </motion.div>
-    </motion.div>
   );
 }

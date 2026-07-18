@@ -2,11 +2,16 @@ import type { Transaction } from '@mysten/sui/transactions';
 import { SUI_COIN_TYPE } from '../../core/agent-wallet';
 import { SUI_CLOCK_ID } from '../../core/protocols';
 import { suiClient } from '../../core/config';
-import { resolveCetusSwapConfig } from '../../core/node-config';
+import { parseConfigU128, parseConfigU64, resolveCetusSwapConfig } from '../../core/node-config';
 import { ValidationError } from '../../core/errors';
 import { pickSwapFunction, resolvePoolTypeArgs } from '../compiler/pool-resolver';
 import { injectMinOutAssert } from './guard';
 import type { AdapterCtx, FlowGraph, FlowNode, ProtocolAdapter } from './types';
+
+/** Hard cap on `listCoins` pagination in `sourceCoinFromSender` (R13) — a wallet with pathologically
+ *  many small coin objects of the same type must not turn one compile request into an unbounded
+ *  number of upstream RPC calls; fail with a clear, actionable error instead of hanging/looping. */
+const MAX_COIN_LIST_PAGES = 10;
 
 /**
  * Source an exact `amount` of a non-SUI coin from the sender's owned coins: gather coin objects of the
@@ -23,7 +28,17 @@ async function sourceCoinFromSender(
   const ids: string[] = [];
   let total = 0n;
   let cursor: string | null | undefined = undefined;
+  let pages = 0;
   do {
+    pages += 1;
+    if (pages > MAX_COIN_LIST_PAGES) {
+      throw new ValidationError(
+        `Node ${nodeId}: ${sender}'s ${coinType} coins span more than ${MAX_COIN_LIST_PAGES} pages `
+          + `without covering the requested ${amount} — refusing to page through the sender's coin `
+          + `list unboundedly. Merge the sender's coins of this type first, or fund from a wallet `
+          + `with fewer, larger coin objects.`,
+      );
+    }
     const page = await suiClient.listCoins({ owner: sender, coinType, cursor: cursor ?? null });
     for (const c of page.objects) {
       ids.push(c.objectId);
@@ -60,21 +75,20 @@ export const cetusAdapter: ProtocolAdapter = {
     if (hasCoinEdge) return 0n;
     const { config } = resolveCetusSwapConfig(node);
     if (config.inputCoinType !== SUI_COIN_TYPE) return 0n;
-    return BigInt(config.amount_in);
+    return parseConfigU64(config.amount_in, `Node ${node.id}: config.amount_in`);
   },
 
   async build(ctx: AdapterCtx): Promise<void> {
-    const { tx, flow, node, nodeOutputs, options, warnings, fundSuiCoin } = ctx;
+    const { tx, flow, node, nodeOutputs, extraCoins, options, warnings, fundSuiCoin } = ctx;
     const { config: swapCfg, warnings: cfgWarnings } = resolveCetusSwapConfig(node);
     warnings.push(...cfgWarnings);
 
-    const amountIn = BigInt(swapCfg.amount_in);
+    const amountIn = parseConfigU64(swapCfg.amount_in, `Node ${node.id}: config.amount_in`);
     const poolId = swapCfg.pool;
     const inputCoinType = swapCfg.inputCoinType;
 
     const poolTypes = await resolvePoolTypeArgs(poolId);
     const swap = pickSwapFunction(inputCoinType, poolTypes, swapCfg.minSqrtPrice, swapCfg.maxSqrtPrice);
-    const hasDownstream = flow.edges.some((e) => e.source === node.id);
 
     const coinInputEdge = flow.edges.find(
       (e) => e.target === node.id && e.targetHandle === 'coin_inputs',
@@ -82,11 +96,28 @@ export const cetusAdapter: ProtocolAdapter = {
     let coinInputArg: unknown;
 
     if (coinInputEdge) {
-      coinInputArg = nodeOutputs[coinInputEdge.source];
-      if (coinInputArg === undefined) {
-        throw new ValidationError(
-          `Node ${node.id}: upstream coin from ${coinInputEdge.source} is missing — ensure swap uses router::swap (wire coin_out → sui_coin).`,
-        );
+      const upstream = nodeOutputs[coinInputEdge.source];
+      if (upstream === undefined) {
+        const sourceNode = flow.nodes.find((n) => n.id === coinInputEdge.source);
+        if (sourceNode?.type === 'guardrail') {
+          // A guardrail with nothing to forward (it guards the root budget, not a real coin) feeding
+          // an action is the documented "guardrail-before-action" gap — guarding a coin flowing INTO
+          // an action isn't supported yet (project-context.md). Degrade to normal root funding
+          // instead of a hard failure so the edge's presence is reported, not fatal.
+          warnings.push(
+            `Node ${node.id}: guardrail ${coinInputEdge.source} has no coin to forward (guarding a `
+              + `coin flowing into a downstream action isn't supported yet) — funding from the root `
+              + `budget instead.`,
+          );
+          coinInputArg = fundSuiCoin(amountIn);
+        } else {
+          throw new ValidationError(
+            `Node ${node.id}: upstream coin from ${coinInputEdge.source} is missing — ensure swap uses router::swap (wire coin_out → sui_coin).`,
+          );
+        }
+      } else {
+        delete nodeOutputs[coinInputEdge.source]; // consumed — keep the sweep from settling it too
+        coinInputArg = upstream.value;
       }
     } else if (inputCoinType !== SUI_COIN_TYPE) {
       // Standalone swap with a non-SUI input → source it from the sender's own coins of that type.
@@ -100,14 +131,36 @@ export const cetusAdapter: ProtocolAdapter = {
       coinInputArg = fundSuiCoin(amountIn);
     }
 
+    // Must match the SAME handle Haedal's own adapter reads from (targetHandle === 'sui_coin') so
+    // this pre-check can never disagree with what actually gets consumed downstream.
     const feedsHaedal = flow.edges.some(
       (e) =>
         e.source === node.id &&
+        e.targetHandle === 'sui_coin' &&
         flow.nodes.some((n) => n.id === e.target && n.type === 'haedal_stake'),
     );
     if (feedsHaedal && swap.outputCoinType !== SUI_COIN_TYPE) {
       throw new ValidationError(
         `Node ${node.id}: swap wired to Haedal stake must output SUI (set Token out = SUI / Token in = USDC).`,
+      );
+    }
+
+    // R7: min_amount_out has no server default — a 1-mist "floor" is not real slippage protection.
+    // It's only safe to omit when a downstream guardrail node will assert its own floor on this
+    // swap's output coin (same handle contract as `feedsHaedal` above, so this can never disagree
+    // with what the guardrail adapter actually consumes).
+    const feedsGuardrail = flow.edges.some(
+      (e) =>
+        e.source === node.id &&
+        e.sourceHandle === 'coin_out' &&
+        flow.nodes.some((n) => n.id === e.target && n.type === 'guardrail'),
+    );
+    if (!swapCfg.min_amount_out && !feedsGuardrail) {
+      throw new ValidationError(
+        `Node ${node.id}: config.min_amount_out is required — Cetus swaps need an explicit slippage `
+          + `floor unless the output coin (coin_out) is wired into a downstream guardrail node that `
+          + `asserts its own minimum. Set config.min_amount_out, or wire coin_out → a guardrail's `
+          + `"in" handle.`,
       );
     }
 
@@ -131,7 +184,12 @@ export const cetusAdapter: ProtocolAdapter = {
         tx.pure.bool(swap.a2b),
         tx.pure.bool(swapCfg.by_amount_in ?? true),
         tx.pure.u64(amountIn),
-        tx.pure.u128(BigInt(swapCfg.sqrt_price_limit ?? swap.sqrtPriceLimit)),
+        tx.pure.u128(
+          parseConfigU128(
+            swapCfg.sqrt_price_limit ?? swap.sqrtPriceLimit,
+            `Node ${node.id}: config.sqrt_price_limit`,
+          ),
+        ),
         tx.pure.bool(false),
         tx.object(SUI_CLOCK_ID),
       ],
@@ -140,33 +198,23 @@ export const cetusAdapter: ProtocolAdapter = {
     const outputCoin = swap.a2b ? outB : outA;
     const leftoverCoin = swap.a2b ? outA : outB;
     const leftoverType = swap.a2b ? poolTypes.coinTypeA : poolTypes.coinTypeB;
-    nodeOutputs[node.id] = outputCoin;
 
     // On-chain slippage floor: abort if the swap output is below min_amount_out (borrows the coin,
-    // so it stays usable below). Deterministic backstop against bad fills / sandwich MEV.
-    injectMinOutAssert(tx, outputCoin, swap.outputCoinType, BigInt(swapCfg.min_amount_out), warnings);
-
-    // Settle a coin: SUI merges back to gas; anything else goes to the owner. Both swap outputs MUST be
-    // consumed or the PTB aborts on execute with UnusedValueWithoutDrop (devInspect won't catch this).
-    const settle = (coin: unknown, coinType: string) => {
-      if (coinType === SUI_COIN_TYPE) {
-        tx.mergeCoins(tx.gas, [coin as never]);
-      } else {
-        if (!options.sender) {
-          throw new ValidationError(
-            `Node ${node.id}: swap produces a non-SUI coin (${coinType}) with no recipient — pass \`sender\` (the owner address) so it isn't lost.`,
-          );
-        }
-        tx.transferObjects([coin as never], options.sender);
-      }
-    };
-
-    // The input-remainder coin (≈0 after an exact-in swap) must always be settled.
-    settle(leftoverCoin, leftoverType);
-
-    // The output coin: hand to a downstream node (via nodeOutputs) or settle it here.
-    if (!hasDownstream) {
-      settle(outputCoin, swap.outputCoinType);
+    // so it stays usable below). Deterministic backstop against bad fills / sandwich MEV. Absent
+    // here only when `feedsGuardrail` is true (checked above) — the downstream guardrail asserts its
+    // own floor on this exact coin later in the same PTB, so skipping a redundant assert here is safe.
+    if (swapCfg.min_amount_out) {
+      const minAmountOut = parseConfigU64(swapCfg.min_amount_out, `Node ${node.id}: config.min_amount_out`);
+      injectMinOutAssert(tx, outputCoin, swap.outputCoinType, minAmountOut, warnings);
     }
+
+    // Single owner of settlement is the compiler's sweep (KTD-3) — this adapter only ever RECORDS
+    // coins it produces, never merges/transfers them itself:
+    //  - the real output is chainable, so it goes in `nodeOutputs` (a downstream node may consume
+    //    it, deleting the entry; whatever is left unconsumed after every node builds gets swept);
+    //  - the opposite-side leftover (≈0 after an exact-in swap) is never chainable — it goes
+    //    straight to `extraCoins`, which the sweep always consumes.
+    nodeOutputs[node.id] = { value: outputCoin, coinType: swap.outputCoinType };
+    extraCoins.push({ value: leftoverCoin, coinType: leftoverType });
   },
 };

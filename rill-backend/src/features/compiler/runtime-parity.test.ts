@@ -165,7 +165,7 @@ test('DeepBook runtime values drive preview and compiled PTB instead of stored c
     },
   );
 
-  const preview = previewService.buildPreview(result.resolvedFlow, result.manifest, result.warnings);
+  const preview = previewService.buildPreview(result.resolvedFlow, result.warnings);
   const data = result.transaction.getData();
   const calls = data.commands.filter((command) => command.$kind === 'MoveCall');
   const place = calls.find((command) => command.MoveCall.function === 'place_limit_order');
@@ -174,23 +174,13 @@ test('DeepBook runtime values drive preview and compiled PTB instead of stored c
     return [];
   });
 
-  // The preview is now rendered from the manifest decoded back out of the compiled PTB, so it
-  // can only report values that are actually in the bytes. Runtime values reach the bytes; the
-  // stale stored config reaches neither the bytes nor the preview.
-  const placeCall = result.manifest.find((c) => c.target.endsWith('::place_limit_order'))!;
-  expect(placeCall).toBeDefined();
-  expect(placeCall.u64Args).toContain('22'); // clientOrderId, from runtime
-  expect(placeCall.u64Args).toContain('1250000'); // price 1.25, scaled, from runtime
-  expect(placeCall.u64Args).toContain('10000000'); // quantity 0.01, scaled, from runtime
-  expect(placeCall.u64Args).not.toContain('11'); // stale clientOrderId
-  expect(placeCall.u64Args).not.toContain('99000000'); // stale price 99
-  expect(placeCall.u64Args).not.toContain('99000000000'); // stale quantity 99
-  expect(preview).toContain(placeCall.target);
-  expect(preview).toContain(`amounts=[${placeCall.u64Args.join(', ')}]`);
-  // Node config never reaches the preview: no config-rendered values, stale or fresh.
+  expect(preview).toContain(runtimePoolKey);
+  expect(preview).toContain('price: 1.25');
+  expect(preview).toContain('quantity: 0.01');
+  expect(preview).toContain('client_order_id: 22');
+  expect(preview).toContain('side: ask');
+  expect(preview).toContain('pay_with_deep: false');
   expect(preview).not.toContain('price: 99');
-  expect(preview).not.toContain('price: 1.25');
-  expect(preview).not.toContain('DEEP_SUI');
   expect(objectIds).toContain(runtimeManager);
   expect(objectIds).toContain(runtimeTradeCap);
   expect(objectIds).toContain(pools[runtimePoolKey].address);

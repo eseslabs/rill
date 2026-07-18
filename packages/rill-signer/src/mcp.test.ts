@@ -8,7 +8,7 @@ import type { ExecutionEnvelope } from '../../rill-sdk/src/types';
 import { createWalletMcpHandler, handleWalletMcpJsonRpc, walletTools } from './mcp';
 import type { LocalSignerPolicy } from './policy';
 import { createSigner, loadConfigFromEnv } from './core';
-import { loadOnboardingConfig, saveOnboardingConfig } from './config';
+import { isAutoOnboardingAllowed, loadOnboardingConfig, saveOnboardingConfig } from './config';
 import { listRunSets, saveRunSet } from './runsets';
 
 const id = (n: number) => `0x${n.toString(16).padStart(64, '0')}`;
@@ -24,7 +24,6 @@ const policy: LocalSignerPolicy = {
   tradeCapId: id(6),
   poolId: id(7),
   allowedTargets: [],
-  requiredObjectIds: [],
   requiredGuards: [],
   maxAmountMist: '10000000',
   minimumRemainingMist: '20000000',
@@ -108,7 +107,7 @@ test('handler imports and lists tools without runtime env or key initialization'
 
 test('execute_rill_action records policy rejection for explain_rejection', async () => {
   const handler = createWalletMcpHandler({
-    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true },
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
     signer: {
       address: policy.sender,
       network: 'testnet',
@@ -141,7 +140,7 @@ test('execute_rill_action records policy rejection for explain_rejection', async
 
 test('execute_rill_action rejects raw PTB arguments', async () => {
   const handler = createWalletMcpHandler({
-    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true },
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
     signer: {
       address: policy.sender,
       network: 'testnet',
@@ -170,7 +169,7 @@ test('execute_rill_action rejects raw PTB arguments', async () => {
 
 test('list_capabilities returns only public run-specific policy data', async () => {
   const handler = createWalletMcpHandler({
-    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true },
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
     signer: {
       address: policy.sender,
       network: 'testnet',
@@ -207,7 +206,7 @@ test('list_capabilities returns only public run-specific policy data', async () 
 
 test('wallet_status reports public budget and strategy eligibility', async () => {
   const handler = createWalletMcpHandler({
-    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true },
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
     signer: {
       address: policy.sender,
       network: 'testnet',
@@ -249,7 +248,7 @@ test('wallet_status reports public budget and strategy eligibility', async () =>
 
 test('wallet_status and list_capabilities require a loaded policy', async () => {
   const handler = createWalletMcpHandler({
-    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true },
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
     signer: {
       address: policy.sender,
       network: 'testnet',
@@ -277,10 +276,13 @@ test('wallet_status and list_capabilities require a loaded policy', async () => 
 });
 
 let originalConfigDir: string | undefined;
+let originalAutoOnboarding: string | undefined;
 let tempConfigDir: string;
 
 beforeEach(() => {
   originalConfigDir = process.env.RILL_CONFIG_DIR;
+  originalAutoOnboarding = process.env.RILL_ALLOW_AUTO_ONBOARDING;
+  delete process.env.RILL_ALLOW_AUTO_ONBOARDING;
   tempConfigDir = mkdtempSync(join(tmpdir(), 'rill-signer-test-'));
   process.env.RILL_CONFIG_DIR = tempConfigDir;
 });
@@ -288,12 +290,14 @@ beforeEach(() => {
 afterEach(() => {
   if (originalConfigDir === undefined) delete process.env.RILL_CONFIG_DIR;
   else process.env.RILL_CONFIG_DIR = originalConfigDir;
+  if (originalAutoOnboarding === undefined) delete process.env.RILL_ALLOW_AUTO_ONBOARDING;
+  else process.env.RILL_ALLOW_AUTO_ONBOARDING = originalAutoOnboarding;
   rmSync(tempConfigDir, { recursive: true, force: true });
 });
 
-test('get_onboarding_config returns defaults and set_onboarding_config persists changes', async () => {
+test('get_onboarding_config returns defaults with autoCreateRunSets read live from env, and set_onboarding_config only updates non-privileged fields', async () => {
   const handler = createWalletMcpHandler({
-    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true },
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
     signer: { address: policy.sender, network: 'testnet', client: {} as never, hasKey: () => true },
   });
   const get = await handler({
@@ -312,19 +316,53 @@ test('get_onboarding_config returns defaults and set_onboarding_config persists 
     jsonrpc: '2.0',
     id: 11,
     method: 'tools/call',
-    params: { name: 'set_onboarding_config', arguments: { autoCreateRunSets: true, maxAutoSetupBudgetMist: '500000000' } },
+    params: { name: 'set_onboarding_config', arguments: { maxAutoSetupBudgetMist: '500000000' } },
   });
   expect(JSON.parse((set?.result as { content: [{ text: string }] }).content[0].text)).toEqual({
+    autoCreateRunSets: false,
+    maxAutoSetupBudgetMist: '500000000',
+    allowTestnetFaucet: true,
+  });
+  expect(loadOnboardingConfig()).toEqual({ maxAutoSetupBudgetMist: '500000000', allowTestnetFaucet: true });
+
+  // autoCreateRunSets is read live from the launch environment on every call — never persisted, and
+  // never settable through this tool (see the dedicated rejection test below).
+  process.env.RILL_ALLOW_AUTO_ONBOARDING = 'true';
+  const getWithGateOn = await handler({
+    jsonrpc: '2.0',
+    id: 12,
+    method: 'tools/call',
+    params: { name: 'get_onboarding_config', arguments: {} },
+  });
+  expect(JSON.parse((getWithGateOn?.result as { content: [{ text: string }] }).content[0].text)).toEqual({
     autoCreateRunSets: true,
     maxAutoSetupBudgetMist: '500000000',
     allowTestnetFaucet: true,
   });
-  expect(loadOnboardingConfig().autoCreateRunSets).toBe(true);
+});
+
+test('set_onboarding_config rejects autoCreateRunSets: the agent-facing MCP surface cannot enable auto onboarding', async () => {
+  const handler = createWalletMcpHandler({
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
+    signer: { address: policy.sender, network: 'testnet', client: {} as never, hasKey: () => true },
+  });
+  const response = await handler({
+    jsonrpc: '2.0',
+    id: 13,
+    method: 'tools/call',
+    params: { name: 'set_onboarding_config', arguments: { autoCreateRunSets: true } },
+  });
+  expect((response?.result as { isError: boolean }).isError).toBe(true);
+  expect(JSON.parse((response?.result as { content: [{ text: string }] }).content[0].text).message).toBe(
+    'Unexpected argument: autoCreateRunSets.',
+  );
+  expect(loadOnboardingConfig()).not.toHaveProperty('autoCreateRunSets');
+  expect(isAutoOnboardingAllowed()).toBe(false);
 });
 
 test('signer_status returns address, network and balance', async () => {
   const handler = createWalletMcpHandler({
-    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true },
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
     signer: {
       address: policy.sender,
       network: 'testnet',
@@ -352,7 +390,7 @@ test('signer_status returns address, network and balance', async () => {
 
 test('request_faucet rejects on mainnet and when disabled', async () => {
   const handler = createWalletMcpHandler({
-    cfg: { network: 'mainnet', allowMainnet: true, requireSimSuccess: true },
+    cfg: { network: 'mainnet', allowMainnet: true, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
     signer: { address: policy.sender, network: 'mainnet', client: {} as never, hasKey: () => true },
   });
   const mainnet = await handler({
@@ -366,7 +404,7 @@ test('request_faucet rejects on mainnet and when disabled', async () => {
 
   saveOnboardingConfig({ allowTestnetFaucet: false });
   const testnetHandler = createWalletMcpHandler({
-    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true },
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
     signer: { address: policy.sender, network: 'testnet', client: {} as never, hasKey: () => true },
   });
   const disabled = await testnetHandler({
@@ -388,7 +426,7 @@ test('list_run_sets returns saved run-sets', async () => {
   };
   saveRunSet('saved_set', runSet);
   const handler = createWalletMcpHandler({
-    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true },
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
     signer: { address: policy.sender, network: 'testnet', client: {} as never, hasKey: () => true },
   });
   const response = await handler({
@@ -402,9 +440,94 @@ test('list_run_sets returns saved run-sets', async () => {
   expect(data[0].label).toBe('saved_set');
 });
 
-test('create_run_set requires confirmation and config', async () => {
+function makeRunSetTemplate(sender: string, walletPackageId: string, label = 'test_label') {
+  return {
+    version: '1',
+    label,
+    actionId: 'skill_deepbook',
+    network: 'testnet',
+    sender,
+    walletPackageId,
+    walletId: '',
+    agentCapId: '',
+    balanceManagerId: '',
+    tradeCapId: '',
+    poolId: id(4),
+    allowedTargets: [],
+    requiredGuards: [],
+    maxAmountMist: '1000000000',
+    minimumRemainingMist: '100000000',
+    demoParams: policy.demoParams,
+    onChainOrder: policy.onChainOrder,
+  };
+}
+
+/**
+ * Builds a setup PTB shaped exactly like rill-backend/src/features/setup/setup.service.ts's
+ * buildSetupTransaction: split gas -> agent_wallet::create_wallet -> balance_manager::new ->
+ * transfer::public_share_object. Options let individual tests deviate from the legitimate shape to
+ * exercise inspectOnboarding's rejections.
+ */
+function buildOnboardingSetupPtb(params: {
+  walletPackageId: string;
+  deepbookPackageId: string;
+  agent: string;
+  budgetMist: bigint;
+  perTxMist?: bigint;
+  expiresAtMs?: bigint;
+  createWalletTarget?: string;
+  appendForeignTransferTo?: string;
+}): string {
+  const tx = new Transaction();
+  tx.setSender(params.agent);
+  const [funds] = tx.splitCoins(tx.gas, [params.budgetMist]);
+  tx.moveCall({
+    target: params.createWalletTarget ?? `${params.walletPackageId}::agent_wallet::create_wallet`,
+    typeArguments: ['0x2::sui::SUI'],
+    arguments: [
+      funds,
+      tx.pure.address(params.agent),
+      tx.pure.u64(params.perTxMist ?? 1_000_000_000n),
+      tx.pure.u64(params.expiresAtMs ?? 9_999_999_999_999n),
+      tx.pure.vector('address', [params.deepbookPackageId]),
+    ],
+  });
+  const manager = tx.moveCall({ target: `${params.deepbookPackageId}::balance_manager::new` });
+  tx.moveCall({
+    target: '0x2::transfer::public_share_object',
+    typeArguments: [`${params.deepbookPackageId}::balance_manager::BalanceManager`],
+    arguments: [manager],
+  });
+  if (params.appendForeignTransferTo) {
+    const [leftover] = tx.splitCoins(tx.gas, [1n]);
+    tx.transferObjects([leftover], params.appendForeignTransferTo);
+  }
+  return Buffer.from(tx.serialize()).toString('base64');
+}
+
+/**
+ * Builds a trade-cap PTB shaped exactly like setup.service.ts's buildMintTradeCapTransaction:
+ * balance_manager::mint_trade_cap -> transferObjects([cap], agent).
+ */
+function buildOnboardingTradeCapPtb(params: {
+  deepbookPackageId: string;
+  balanceManagerId: string;
+  agent: string;
+  transferTo?: string;
+}): string {
+  const tx = new Transaction();
+  tx.setSender(params.agent);
+  const cap = tx.moveCall({
+    target: `${params.deepbookPackageId}::balance_manager::mint_trade_cap`,
+    arguments: [tx.object(params.balanceManagerId)],
+  });
+  tx.transferObjects([cap], params.transferTo ?? params.agent);
+  return Buffer.from(tx.serialize()).toString('base64');
+}
+
+test('create_run_set requires confirmation, then returns the prepared plan without signing when the env gate is off', async () => {
   const handler = createWalletMcpHandler({
-    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true },
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
     signer: { address: policy.sender, network: 'testnet', client: {} as never, hasKey: () => true },
   });
   const unconfirmed = await handler({
@@ -415,47 +538,159 @@ test('create_run_set requires confirmation and config', async () => {
   });
   expect((unconfirmed?.result as { isError: boolean }).isError).toBe(true);
 
-  saveOnboardingConfig({ autoCreateRunSets: false });
-  const runSetTemplate = {
-    version: '1',
-    label: 'test_label',
-    actionId: 'skill_deepbook',
-    network: 'testnet',
-    sender: policy.sender,
-    walletPackageId: id(2),
-    walletId: '',
-    agentCapId: '',
-    balanceManagerId: '',
-    tradeCapId: '',
-    poolId: id(4),
-    allowedTargets: [],
-    requiredObjectIds: [],
-    requiredGuards: [],
-    maxAmountMist: '1000000000',
-    minimumRemainingMist: '100000000',
-    demoParams: policy.demoParams,
-    onChainOrder: policy.onChainOrder,
-  };
-  const disabled = await handler({
+  const walletPackageId = id(2);
+  const deepbookPackageId = id(3);
+  const runSetTemplate = makeRunSetTemplate(policy.sender, walletPackageId);
+  const setupPtb = buildOnboardingSetupPtb({ walletPackageId, deepbookPackageId, agent: policy.sender, budgetMist: 1_000_000_000n });
+  const tradeCapPtb = buildOnboardingTradeCapPtb({ deepbookPackageId, balanceManagerId: id(50), agent: policy.sender });
+
+  expect(isAutoOnboardingAllowed()).toBe(false);
+  const prepared = await handler({
     jsonrpc: '2.0',
     id: 17,
     method: 'tools/call',
     params: {
       name: 'create_run_set',
-      arguments: {
-        plan: {
-          setupPtb: 'cHRi',
-          tradeCapPtb: 'cHRi',
-          runSetTemplate,
-          walletPackageId: id(2),
-          deepbookPackageId: id(3),
-          confirmed: true,
-        },
-      },
+      arguments: { plan: { setupPtb, tradeCapPtb, runSetTemplate, walletPackageId, deepbookPackageId, confirmed: true } },
     },
   });
-  expect((disabled?.result as { isError: boolean }).isError).toBe(true);
-  expect(JSON.parse((disabled?.result as { content: [{ text: string }] }).content[0].text).message).toMatch(/autoCreateRunSets/);
+  expect((prepared?.result as { isError?: boolean }).isError).toBe(false);
+  const result = JSON.parse((prepared?.result as { content: [{ text: string }] }).content[0].text);
+  expect(result.status).toBe('prepared');
+  expect(result.signed).toBe(false);
+  expect(result.reason).toMatch(/RILL_ALLOW_AUTO_ONBOARDING/);
+  expect(result.plan.setupPtb).toBe(setupPtb);
+  expect(result.plan.tradeCapPtb).toBe(tradeCapPtb);
+  expect(listRunSets('testnet')).toHaveLength(0);
+});
+
+test('create_run_set rejects a hostile setup PTB with an appended transfer to a foreign address, even with the env gate on', async () => {
+  process.env.RILL_ALLOW_AUTO_ONBOARDING = 'true';
+  const handler = createWalletMcpHandler({
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
+    signer: { address: policy.sender, network: 'testnet', client: {} as never, hasKey: () => true },
+  });
+  const walletPackageId = id(2);
+  const deepbookPackageId = id(3);
+  const runSetTemplate = makeRunSetTemplate(policy.sender, walletPackageId);
+  const hostileSetupPtb = buildOnboardingSetupPtb({
+    walletPackageId,
+    deepbookPackageId,
+    agent: policy.sender,
+    budgetMist: 1_000_000_000n,
+    appendForeignTransferTo: id(666),
+  });
+  const tradeCapPtb = buildOnboardingTradeCapPtb({ deepbookPackageId, balanceManagerId: id(50), agent: policy.sender });
+
+  const response = await handler({
+    jsonrpc: '2.0',
+    id: 18,
+    method: 'tools/call',
+    params: {
+      name: 'create_run_set',
+      arguments: { plan: { setupPtb: hostileSetupPtb, tradeCapPtb, runSetTemplate, walletPackageId, deepbookPackageId, confirmed: true } },
+    },
+  });
+  expect((response?.result as { isError: boolean }).isError).toBe(true);
+  expect(JSON.parse((response?.result as { content: [{ text: string }] }).content[0].text).message).toMatch(/unexpected address/);
+  expect(listRunSets('testnet')).toHaveLength(0);
+});
+
+test('create_run_set rejects a hostile trade-cap PTB that transfers to a foreign address, even with the env gate on', async () => {
+  process.env.RILL_ALLOW_AUTO_ONBOARDING = 'true';
+  const handler = createWalletMcpHandler({
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
+    signer: { address: policy.sender, network: 'testnet', client: {} as never, hasKey: () => true },
+  });
+  const walletPackageId = id(2);
+  const deepbookPackageId = id(3);
+  const runSetTemplate = makeRunSetTemplate(policy.sender, walletPackageId);
+  const setupPtb = buildOnboardingSetupPtb({ walletPackageId, deepbookPackageId, agent: policy.sender, budgetMist: 1_000_000_000n });
+  const hostileTradeCapPtb = buildOnboardingTradeCapPtb({
+    deepbookPackageId,
+    balanceManagerId: id(50),
+    agent: policy.sender,
+    transferTo: id(666),
+  });
+
+  const response = await handler({
+    jsonrpc: '2.0',
+    id: 19,
+    method: 'tools/call',
+    params: {
+      name: 'create_run_set',
+      arguments: { plan: { setupPtb, tradeCapPtb: hostileTradeCapPtb, runSetTemplate, walletPackageId, deepbookPackageId, confirmed: true } },
+    },
+  });
+  expect((response?.result as { isError: boolean }).isError).toBe(true);
+  expect(JSON.parse((response?.result as { content: [{ text: string }] }).content[0].text).message).toMatch(/unexpected address/);
+  expect(listRunSets('testnet')).toHaveLength(0);
+});
+
+test('create_run_set rejects a hostile setup PTB calling an unexpected MoveCall target, even with the env gate on', async () => {
+  process.env.RILL_ALLOW_AUTO_ONBOARDING = 'true';
+  const handler = createWalletMcpHandler({
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
+    signer: { address: policy.sender, network: 'testnet', client: {} as never, hasKey: () => true },
+  });
+  const walletPackageId = id(2);
+  const deepbookPackageId = id(3);
+  const runSetTemplate = makeRunSetTemplate(policy.sender, walletPackageId);
+  const hostileSetupPtb = buildOnboardingSetupPtb({
+    walletPackageId,
+    deepbookPackageId,
+    agent: policy.sender,
+    budgetMist: 1_000_000_000n,
+    createWalletTarget: `${id(999)}::evil::drain`,
+  });
+  const tradeCapPtb = buildOnboardingTradeCapPtb({ deepbookPackageId, balanceManagerId: id(50), agent: policy.sender });
+
+  const response = await handler({
+    jsonrpc: '2.0',
+    id: 20,
+    method: 'tools/call',
+    params: {
+      name: 'create_run_set',
+      arguments: { plan: { setupPtb: hostileSetupPtb, tradeCapPtb, runSetTemplate, walletPackageId, deepbookPackageId, confirmed: true } },
+    },
+  });
+  expect((response?.result as { isError: boolean }).isError).toBe(true);
+  expect(JSON.parse((response?.result as { content: [{ text: string }] }).content[0].text).message).toMatch(/unexpected target/);
+  expect(listRunSets('testnet')).toHaveLength(0);
+});
+
+test('create_run_set rejects a hostile setup PTB whose actual split amount exceeds the budget ceiling, even when the declared run-set amount is within bounds', async () => {
+  process.env.RILL_ALLOW_AUTO_ONBOARDING = 'true';
+  const handler = createWalletMcpHandler({
+    cfg: { network: 'testnet', allowMainnet: false, requireSimSuccess: true, maxGasBudgetMist: 50000000n },
+    signer: { address: policy.sender, network: 'testnet', client: {} as never, hasKey: () => true },
+  });
+  const walletPackageId = id(2);
+  const deepbookPackageId = id(3);
+  const ceilingMist = BigInt(loadOnboardingConfig().maxAutoSetupBudgetMist);
+  // runSetTemplate.maxAmountMist ('1000000000') is well within the ceiling — only the PTB's own
+  // SplitCoins bytes carry the hostile, over-ceiling amount, isolating the new structural check.
+  const runSetTemplate = makeRunSetTemplate(policy.sender, walletPackageId);
+  const hostileSetupPtb = buildOnboardingSetupPtb({
+    walletPackageId,
+    deepbookPackageId,
+    agent: policy.sender,
+    budgetMist: ceilingMist + 1_000_000_000n,
+  });
+  const tradeCapPtb = buildOnboardingTradeCapPtb({ deepbookPackageId, balanceManagerId: id(50), agent: policy.sender });
+
+  const response = await handler({
+    jsonrpc: '2.0',
+    id: 21,
+    method: 'tools/call',
+    params: {
+      name: 'create_run_set',
+      arguments: { plan: { setupPtb: hostileSetupPtb, tradeCapPtb, runSetTemplate, walletPackageId, deepbookPackageId, confirmed: true } },
+    },
+  });
+  expect((response?.result as { isError: boolean }).isError).toBe(true);
+  expect(JSON.parse((response?.result as { content: [{ text: string }] }).content[0].text).message).toMatch(/budget ceiling/);
+  expect(listRunSets('testnet')).toHaveLength(0);
 });
 
 function makeTestSigner(network: 'mainnet' | 'testnet' = 'testnet') {
@@ -525,65 +760,39 @@ function makeTestSigner(network: 'mainnet' | 'testnet' = 'testnet') {
   return { signer, cfg, created };
 }
 
-function makeBase64Ptb(): string {
-  const tx = new Transaction();
-  tx.setSender(id(1));
-  return Buffer.from(tx.serialize()).toString('base64');
-}
-
-function makeTradeCapPtb(): string {
-  const tx = new Transaction();
-  tx.setSender(id(1));
-  tx.object('0x0000000000000000000000000000000000000000000000000000000000000000');
-  return Buffer.from(tx.serialize()).toString('base64');
-}
-
-test('create_run_set executes setup and trade-cap PTBs and saves the filled run-set', async () => {
-  saveOnboardingConfig({ autoCreateRunSets: true, maxAutoSetupBudgetMist: '2000000000' });
+test('create_run_set executes setup and trade-cap PTBs and saves the filled run-set when the env gate is on', async () => {
+  process.env.RILL_ALLOW_AUTO_ONBOARDING = 'true';
+  saveOnboardingConfig({ maxAutoSetupBudgetMist: '2000000000' });
   const { signer, cfg, created } = makeTestSigner('testnet');
-  const runSetTemplate = {
-    version: '1' as const,
-    label: 'live_set',
-    actionId: 'skill_deepbook',
-    network: 'testnet' as const,
-    sender: signer.address,
-    walletPackageId: id(2),
-    walletId: '',
-    agentCapId: '',
-    balanceManagerId: '',
-    tradeCapId: '',
-    poolId: id(4),
-    allowedTargets: [],
-    requiredObjectIds: [],
-    requiredGuards: [],
-    maxAmountMist: '1000000000',
-    minimumRemainingMist: '100000000',
-    demoParams: policy.demoParams,
-    onChainOrder: policy.onChainOrder,
-  };
+  const walletPackageId = id(2);
+  const deepbookPackageId = id(3);
+  const runSetTemplate = makeRunSetTemplate(signer.address!, walletPackageId, 'live_set');
+  // The backend's tradeCapPtb is only ever structurally inspected, never signed (see buildTradeCapPtb
+  // in mcp.ts) — its placeholder BalanceManager ID does not need to match anything created at runtime.
+  const setupPtb = buildOnboardingSetupPtb({
+    walletPackageId,
+    deepbookPackageId,
+    agent: signer.address!,
+    budgetMist: 1_000_000_000n,
+  });
+  const tradeCapPtb = buildOnboardingTradeCapPtb({ deepbookPackageId, balanceManagerId: id(50), agent: signer.address! });
 
   const handler = createWalletMcpHandler({ cfg, signer, policy: undefined });
   const response = await handler({
     jsonrpc: '2.0',
-    id: 18,
+    id: 22,
     method: 'tools/call',
     params: {
       name: 'create_run_set',
       arguments: {
-        plan: {
-          setupPtb: makeBase64Ptb(),
-          tradeCapPtb: makeTradeCapPtb(),
-          runSetTemplate,
-          walletPackageId: id(2),
-          deepbookPackageId: id(3),
-          confirmed: true,
-        },
+        plan: { setupPtb, tradeCapPtb, runSetTemplate, walletPackageId, deepbookPackageId, confirmed: true },
       },
     },
   });
 
   const result = JSON.parse((response?.result as { content: [{ text: string }] }).content[0].text);
   expect((response?.result as { isError?: boolean }).isError).toBe(false);
+  expect(result.status).toBeUndefined();
   expect(result.walletId).toBe(created.wallet);
   expect(result.agentCapId).toBe(created.agentCap);
   expect(result.balanceManagerId).toBe(created.balanceManager);

@@ -99,7 +99,7 @@ function Landing() {
         >
           Rill is a visual flow builder for Sui protocols. Drag actions, wire them together,
           and publish a hosted <span className="text-foreground font-medium">MCP server</span> any agent
-          (Claude Code, Cursor, any MCP client) can call — grounded, simulated, and signed safely on-chain.
+          (Claude, Cursor, Thiny) can call — grounded, simulated, and signed safely on-chain.
         </motion.p>
 
         <motion.div
@@ -192,9 +192,9 @@ function Landing() {
       <section className="mx-auto max-w-6xl px-6 mt-24">
         <div className="grid md:grid-cols-3 gap-5">
           {[
-            { icon: Plug, label: "MCP Server", code: "Add the hosted MCP URL to Claude Code / Cursor / any MCP client" },
+            { icon: Plug, label: "MCP Server", code: "Add the hosted MCP URL to Claude / Cursor / Thiny" },
             { icon: Terminal, label: "Simulate first", code: "POST /api/simulate → devInspect on Sui" },
-            { icon: Code2, label: "Unsigned PTB", code: "returns a base64 PTB — @rill/signer signs locally" },
+            { icon: Code2, label: "Unsigned PTB", code: "returns a base64 PTB — Thiny / wallet signs" },
           ].map((e) => (
             <motion.div
               key={e.label}

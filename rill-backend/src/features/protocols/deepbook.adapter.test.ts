@@ -156,7 +156,9 @@ test('wallet-bound DeepBook envelope passes the local signer policy', async () =
 
   try {
     const actionId = 'skill_deepbook';
-    const envelope = await new SkillRunnerService().runFlow(flow(), {}, { actionId, ...options });
+    const built = await new SkillRunnerService().runFlow(flow(), {}, { actionId, ...options });
+    if ('refused' in built) throw new Error('expected an ExecutionEnvelope, got a refusal');
+    const envelope = built;
     const policy: LocalSignerPolicy = {
       version: '1',
       actionId,
@@ -175,7 +177,6 @@ test('wallet-bound DeepBook envelope passes the local signer policy', async () =
         `${packageIds.DEEPBOOK_PACKAGE_ID}::pool::place_limit_order`,
       ],
       requiredGuards: [],
-      requiredObjectIds: envelope.requiredObjectIds,
       maxAmountMist: '6000000',
       minimumRemainingMist: '0',
       demoParams: {

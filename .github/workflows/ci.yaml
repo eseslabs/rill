@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches:
+      - develop
       - main
 
 permissions:
@@ -14,12 +15,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  sdk-check:
-    name: SDK Type Check
+  sdk:
+    name: SDK
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: packages/rill-sdk
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,20 +25,20 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.3.9
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
       - name: Type check
-        run: bun run check
+        run: bun run check:sdk
 
-  backend-check:
-    name: Backend Install Check
+      - name: Test
+        run: bun test --cwd packages/rill-sdk
+
+  backend:
+    name: Backend
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: rill-backend
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -48,10 +46,91 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.3.9
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Verify entrypoint imports
-        run: bun -e "import './src/core/config.ts'; import './src/index.ts'; console.log('ok')"
+      - name: Test
+        run: bun test --cwd rill-backend
+
+  signer:
+    name: Signer
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.9
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Test
+        run: bun test --cwd packages/rill-signer
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.9
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build
+        run: bun run --cwd rill-frontend build
+
+      - name: Test
+        working-directory: rill-frontend
+        run: |
+          if [ -f vitest.config.ts ]; then
+            bunx vitest run
+          else
+            echo "vitest.config.ts not present yet (lands with U12) - skipping"
+          fi
+
+  move:
+    name: Move
+    runs-on: ubuntu-latest
+    env:
+      # Pinned Sui CLI release. There is no official MystenLabs GitHub Action,
+      # so the binary is fetched directly from a pinned GitHub release tarball.
+      # Bump deliberately; verify the new tag exists at
+      # https://github.com/MystenLabs/sui/releases before changing.
+      SUI_CLI_VERSION: testnet-v1.75.2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Sui CLI
+        run: |
+          set -euo pipefail
+          asset="sui-${SUI_CLI_VERSION}-ubuntu-x86_64.tgz"
+          curl -fLsS --retry 3 -o "$asset" \
+            "https://github.com/MystenLabs/sui/releases/download/${SUI_CLI_VERSION}/${asset}"
+          install_dir="$HOME/.local/sui-cli"
+          mkdir -p "$install_dir"
+          tar -xzf "$asset" -C "$install_dir"
+          chmod +x "$install_dir/sui"
+          echo "$install_dir" >> "$GITHUB_PATH"
+
+      - name: Verify Sui CLI
+        run: sui --version
+
+      - name: Test agent_wallet
+        working-directory: move/agent_wallet
+        run: sui move test
+
+      - name: Test rill_guard
+        working-directory: move/rill_guard
+        run: sui move test

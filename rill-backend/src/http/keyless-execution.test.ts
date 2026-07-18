@@ -8,6 +8,8 @@ import { buildToolDefs } from '../features/mcp/tool-schema';
 import { buildOpenApiDocument } from './openapi';
 import { assertExecutionEnvelope } from '../../../packages/rill-sdk/src/execution-envelope';
 import type { ExecutionEnvelope } from '../../../packages/rill-sdk/src/types';
+import { config } from '../core/config';
+import { introspectService } from '../features/introspect/introspect.service';
 
 type ObjectSchema = {
   additionalProperties?: boolean;
@@ -265,12 +267,7 @@ test('compile API and OpenAPI expose the actual keyless fields', async () => {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      // A flow that compiles to real MoveCalls: the preview is now derived from the compiled
-      // bytes, so a flow with no on-chain calls is refused rather than previewed.
-      flow: {
-        nodes: [{ id: 'stake', type: 'haedal_stake', config: { amount: '1000000000' } }],
-        edges: [],
-      },
+      flow: { nodes: [], edges: [] },
       sender: `0x${'1'.repeat(64)}`,
       agentWallet: {
         packageId: `0x${'2'.repeat(64)}`,
@@ -284,7 +281,9 @@ test('compile API and OpenAPI expose the actual keyless fields', async () => {
 
   expect(response.status).toBe(200);
   expect(Object.keys(body.data).sort()).toEqual(fields);
-  expect(Object.keys(requestSchema('/compile').properties).sort()).toEqual(['agentWallet', 'flow', 'sender']);
+  // useServerWallet (R13, U5) added alongside agentWallet/flow/sender — an anonymous request now
+  // only binds the operator wallet when it opts in via this flag.
+  expect(Object.keys(requestSchema('/compile').properties).sort()).toEqual(['agentWallet', 'flow', 'sender', 'useServerWallet']);
   expect(responseSchema('/compile').required?.slice().sort()).toEqual(fields);
   expect(Object.keys(responseSchema('/compile').properties).sort()).toEqual(fields);
 });
@@ -292,7 +291,7 @@ test('compile API and OpenAPI expose the actual keyless fields', async () => {
 test('simulate and publish OpenAPI expose their actual request and response fields', () => {
   const simulationSchema = responseSchema('/simulate').properties.simulation as ObjectSchema;
 
-  expect(Object.keys(requestSchema('/simulate').properties).sort()).toEqual(['agentWallet', 'flow', 'sender']);
+  expect(Object.keys(requestSchema('/simulate').properties).sort()).toEqual(['agentWallet', 'flow', 'sender', 'useServerWallet']);
   expect(responseSchema('/simulate').required?.slice().sort()).toEqual([
     'agentWalletBound',
     'preview',
@@ -310,7 +309,7 @@ test('simulate and publish OpenAPI expose their actual request and response fiel
   expect(simulationSchema.required).toContain('verification');
   expect(simulationSchema.properties.verification).toEqual({
     type: 'string',
-    enum: ['verified', 'unverified', 'failed'],
+    enum: ['verified', 'unverified'],
   });
   expect(simulationSchema.properties).not.toHaveProperty('simulatedViaFallback');
   const publishSchema = responseSchema('/publish');
@@ -366,7 +365,7 @@ test('publish rejects unknown fields and documents a strict request body', async
 });
 
 test('build-action OpenAPI exposes only the canonical ExecutionEnvelope', () => {
-  const properties = [
+  const fields = [
     'actionDigest',
     'actionId',
     'agentCapId',
@@ -386,12 +385,11 @@ test('build-action OpenAPI exposes only the canonical ExecutionEnvelope', () => 
     'walletId',
     'walletPackageId',
   ];
-  const required = properties.filter((f) => f !== 'balanceManagerId' && f !== 'tradeCapId');
   const schema = responseSchema('/execute');
   const simulation = schema.properties.simulation as ObjectSchema;
 
-  expect(schema.required?.slice().sort()).toEqual(required);
-  expect(Object.keys(schema.properties).sort()).toEqual(properties);
+  expect(schema.required?.slice().sort()).toEqual(fields);
+  expect(Object.keys(schema.properties).sort()).toEqual(fields);
   expect(simulation.required?.slice().sort()).toEqual([
     'balanceChanges',
     'gasEstimate',
@@ -409,4 +407,156 @@ test('health describes the Walrus read endpoint without claiming availability', 
     availability: 'unchecked',
     uploadsEnabled: false,
   });
+});
+
+// --- Flow-size cap (R13) ------------------------------------------------------------------
+
+function buildOversizedFlow(count: number) {
+  return {
+    nodes: Array.from({ length: count }, (_, i) => ({ id: `n${i}`, type: 'guardrail' })),
+    edges: [],
+  };
+}
+
+test('compile and simulate reject a 21-node flow with 422 (R13)', async () => {
+  const flow = buildOversizedFlow(21);
+  for (const path of ['/compile', '/simulate']) {
+    const response = await apiRouter.request(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ flow }),
+    });
+    const body = await response.json() as { success: boolean; type: string };
+    expect(response.status).toBe(422);
+    expect(body.success).toBe(false);
+    expect(body.type).toBe('FlowTooLarge');
+  }
+});
+
+test('compile and simulate accept a flow at exactly the 20-node cap', async () => {
+  const flow = buildOversizedFlow(20);
+  const response = await apiRouter.request('/compile', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ flow }),
+  });
+  expect(response.status).toBe(200);
+});
+
+// A flow of 21 disconnected nodes with NO deepbook_limit_order is already rejected at 400 by
+// PublishSchema's existing hero-action refine (`isHeroActionFlow` requires exactly one
+// deepbook_limit_order node) before the node-count cap check ever runs — that's a stricter,
+// pre-existing gate the cap check never gets to add anything to. But `isHeroActionFlow` also
+// tolerates `ptb`/`guardrail` wrapper nodes alongside the one order node, so a flow with one order
+// node plus 20 guardrail wrappers (21 nodes total, structurally still a valid "hero action" flow)
+// DOES reach the cap check — this is the actually-reachable 422 path for `/publish` (R13).
+test('publish rejects a 21-node flow with 422 when it would otherwise pass the hero-action check', async () => {
+  const flow = {
+    nodes: [
+      { id: 'order', type: 'deepbook_limit_order' },
+      ...Array.from({ length: 20 }, (_, i) => ({ id: `guard${i}`, type: 'guardrail' })),
+    ],
+    edges: [],
+  };
+  const response = await apiRouter.request('/publish', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ flow }),
+  });
+  const body = await response.json() as { success: boolean; type: string };
+  expect(response.status).toBe(422);
+  expect(body.type).toBe('FlowTooLarge');
+});
+
+// A flow with NO order node at all is rejected at 400 by the stricter, pre-existing hero-action
+// refine — the node-count cap never gets a chance to run (and doesn't need to).
+test('publish rejects an oversized non-hero-action flow at 400 (hero-action check runs first)', async () => {
+  const response = await apiRouter.request('/publish', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ flow: buildOversizedFlow(21) }),
+  });
+  expect(response.status).toBe(400);
+});
+
+// --- Server-wallet fallback opt-in (R13) --------------------------------------------------
+
+test('compile without agentWallet and without useServerWallet never binds the configured operator wallet', async () => {
+  const original = config.agentWallet;
+  config.agentWallet = {
+    packageId: `0x${'a'.repeat(64)}`,
+    walletId: `0x${'b'.repeat(64)}`,
+    capId: `0x${'c'.repeat(64)}`,
+    coinType: '0x2::sui::SUI',
+  };
+  // haedal_stake needs no network access to compile (static object ids) — unlike cetus_swap, which
+  // would hit a real RPC to resolve pool type args.
+  const flow = {
+    nodes: [{ id: 'stake1', type: 'haedal_stake', config: { amount: '1000000000' } }],
+    edges: [],
+  };
+  try {
+    const withoutFlag = await apiRouter.request('/compile', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ flow }),
+    });
+    const withoutFlagBody = await withoutFlag.json() as { data: { agentWalletBound: boolean } };
+    expect(withoutFlag.status).toBe(200);
+    expect(withoutFlagBody.data.agentWalletBound).toBe(false);
+
+    const withFlag = await apiRouter.request('/compile', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ flow, useServerWallet: true }),
+    });
+    const withFlagBody = await withFlag.json() as { data: { agentWalletBound: boolean } };
+    expect(withFlag.status).toBe(200);
+    expect(withFlagBody.data.agentWalletBound).toBe(true);
+  } finally {
+    config.agentWallet = original;
+  }
+});
+
+test('an explicit agentWallet still binds without useServerWallet', async () => {
+  const flow = {
+    nodes: [{ id: 'stake1', type: 'haedal_stake', config: { amount: '1000000000' } }],
+    edges: [],
+  };
+  const response = await apiRouter.request('/compile', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      flow,
+      agentWallet: {
+        packageId: `0x${'a'.repeat(64)}`,
+        walletId: `0x${'b'.repeat(64)}`,
+        capId: `0x${'c'.repeat(64)}`,
+      },
+    }),
+  });
+  const body = await response.json() as { data: { agentWalletBound: boolean } };
+  expect(response.status).toBe(200);
+  expect(body.data.agentWalletBound).toBe(true);
+});
+
+// --- /introspect honest 501 (R15) -----------------------------------------------------------
+
+test('introspectService.introspectPackage rejects with a stable 501 AppError, not a plain Error', async () => {
+  await expect(introspectService.introspectPackage('0x2')).rejects.toMatchObject({
+    name: 'NotImplemented',
+    status: 501,
+  });
+});
+
+test('POST /introspect surfaces the honest 501 over HTTP (via the full app, not the bare sub-router)', async () => {
+  const response = await server.fetch(new Request('http://localhost/api/introspect', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ packageId: '0x2' }),
+  }));
+  const body = await response.json() as { success: boolean; type: string };
+  expect(response.status).toBe(501);
+  expect(body.success).toBe(false);
+  expect(body.type).toBe('NotImplemented');
 });

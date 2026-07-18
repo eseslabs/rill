@@ -1,6 +1,86 @@
+import { decimalToBaseUnits, parseU64String } from '../../../packages/rill-sdk/src/amounts';
 import { ValidationError } from './errors';
 import { CETUS, HAEDAL, SUI_CLOCK_ID } from './protocols';
 import type { FlowGraph, FlowNode } from '../features/protocols/types';
+
+/**
+ * U64-bounded config field (mist amounts, quantities). Wraps the SDK's `parseU64String` so
+ * malformed request-supplied config (`"abc"`, `"1.5"`, `"-1"`, empty) throws the backend's
+ * `ValidationError` (-> 422) instead of a raw `BigInt()`/`Number()` crashing the process with an
+ * uncaught `SyntaxError`/`RangeError` (R6). Exported for the protocol adapters (`cetus.adapter.ts`,
+ * `haedal.adapter.ts`) to call at the exact point they used to do a raw `BigInt(...)`.
+ */
+export function parseConfigU64(value: string, fieldName: string): bigint {
+  try {
+    return parseU64String(value, fieldName);
+  } catch (err) {
+    throw new ValidationError(err instanceof Error ? err.message : String(err));
+  }
+}
+
+/** Sui's u128 maximum — the ceiling for `sqrt_price_limit` (a Q64.64 fixed-point value that can
+ *  legitimately exceed u64::MAX; Cetus's own `maxSqrtPrice` default is ~7.9e28). */
+const U128_MAX = (1n << 128n) - 1n;
+
+/**
+ * U128-bounded config field. Cetus's `sqrt_price_limit` is the one numeric config field in this
+ * codebase that is NOT u64-range (see `U128_MAX` above), so the SDK's u64-bounded `parseU64String`
+ * would wrongly reject a legitimate value — this applies the same non-negative-integer-string
+ * contract without the u64 ceiling, still throwing `ValidationError` instead of a raw `BigInt()`
+ * crash (R6).
+ */
+export function parseConfigU128(value: string, fieldName: string): bigint {
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) {
+    throw new ValidationError(
+      `${fieldName} must be a decimal integer string with no sign, decimal point, or scientific `
+        + `notation; got ${JSON.stringify(value)}.`,
+    );
+  }
+  const result = BigInt(value);
+  if (result > U128_MAX) {
+    throw new ValidationError(`${fieldName} exceeds the u128 maximum (${U128_MAX}); got "${value}".`);
+  }
+  return result;
+}
+
+/**
+ * Validated decimal-number config field (human units, e.g. a DeepBook order `price`/`quantity`)
+ * that this code passes straight through to a downstream SDK as a JS `number` rather than
+ * converting to base units itself. Same non-negative/no-scientific-notation/well-formed contract as
+ * the SDK's `decimalToBaseUnits`, but returns a validated `number` instead of scaling into a bigint
+ * — malformed input (`"abc"`, `""`, `"-1"`, `"1e5"`) throws `ValidationError` instead of silently
+ * producing `NaN` (R6) the way a raw `Number(v)` (optionally `|| 0`-defaulted, which maps NaN AND
+ * every other falsy edge case to 0 alike) used to.
+ */
+export function parseConfigDecimalNumber(value: string, fieldName: string): number {
+  if (typeof value !== 'string' || value.length === 0 || !/^\d+(\.\d+)?$/.test(value)) {
+    throw new ValidationError(`${fieldName} must be a non-negative decimal number; got ${JSON.stringify(value)}.`);
+  }
+  const num = Number(value);
+  if (!Number.isFinite(num)) {
+    throw new ValidationError(`${fieldName} must be a finite decimal number; got "${value}".`);
+  }
+  return num;
+}
+
+/**
+ * Convert a validated SUI amount (human units, e.g. `0.006`) to mist — the single float→mist path
+ * (KTD-2) that `deepbook.adapter.ts` (funding the on-chain deposit), `skill-runner.service.ts`
+ * (mirroring the same amount into the envelope's `spendAmountMist`), and `setup.service.ts`
+ * (computing the onboarding order's own deposit) all call, so the three can never diverge again —
+ * previously each had its own `Math.round(sui * 1e9)`/`Math.ceil(sui * 1e9)`, meaning the identical
+ * `depositSui` input could produce a different mist amount depending on which file computed it.
+ * `.toFixed(9)` mirrors the exact pattern `packages/rill-signer/src/policy.ts` (`nineDecimalUnits`)
+ * already uses to hand a JS number to the SDK's string-based `decimalToBaseUnits` without
+ * reintroducing float parsing on the far side.
+ */
+export function suiToMist(depositSui: number, fieldName: string): bigint {
+  try {
+    return decimalToBaseUnits(depositSui.toFixed(9), 9);
+  } catch (err) {
+    throw new ValidationError(`${fieldName}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
 
 export interface CetusSwapNodeConfig {
   integratePackageId: string;
@@ -8,7 +88,9 @@ export interface CetusSwapNodeConfig {
   pool: string;
   inputCoinType: string;
   amount_in: string;
-  min_amount_out: string;
+  /** No server default (R7) — required unless the swap's output coin is wired into a downstream
+   *  guardrail node that asserts its own floor; `cetus.adapter.ts` enforces that requirement. */
+  min_amount_out?: string;
   minSqrtPrice: string;
   maxSqrtPrice: string;
   by_amount_in?: boolean;
@@ -24,18 +106,8 @@ export interface HaedalStakeNodeConfig {
   minStakeMist: string;
 }
 
-/**
- * The parameters a published MCP tool exposes to the AGENT at call time.
- *
- * These are INTENT, never POLICY. The agent declares how much to swap; the OWNER declares how
- * much slippage is tolerable, and the floor is derived from that policy against live pool price
- * (see `applyQuotedFloors`). Neither `min_amount_out` nor `slippageBps` may appear here: a floor
- * the agent picks is a floor the agent picks as 1, and a tolerance the agent widens to 9999bps is
- * the same hole wearing a different name. A protection the constrained party can switch off is
- * not a protection.
- */
-export const RUNTIME_KEYS: Record<string, readonly string[]> = {
-  cetus_swap: ['amount_in'],
+const RUNTIME_KEYS: Record<string, readonly string[]> = {
+  cetus_swap: ['amount_in', 'min_amount_out'],
   haedal_stake: ['amount'],
   deepbook_limit_order: [
     'poolKey',
@@ -50,17 +122,9 @@ export const RUNTIME_KEYS: Record<string, readonly string[]> = {
   ],
 };
 
-/**
- * The parameters the OWNER may set on a node in the published flow (`node.inputs`).
- *
- * A superset of RUNTIME_KEYS: the owner authors the flow, so the owner may pin the pool and may
- * pin an explicit `min_amount_out` instead of declaring `slippageBps` and letting the compiler
- * derive one. That is policy set by the party the policy protects — the exact opposite of the
- * agent setting it at call time.
- */
 const FLOW_INPUT_KEYS: Record<string, readonly string[]> = {
   ...RUNTIME_KEYS,
-  cetus_swap: [...RUNTIME_KEYS.cetus_swap, 'pool', 'min_amount_out'],
+  cetus_swap: [...RUNTIME_KEYS.cetus_swap, 'pool'],
 };
 
 function selectAllowedEntries(
@@ -87,6 +151,14 @@ function fallbackString(
   }
 
   return String(value);
+}
+
+/** Like `fallbackString`, but returns `undefined` (no warning) when the field is genuinely absent —
+ *  for fields that have no safe server default (R7's `min_amount_out`) and must be handled as
+ *  "missing" by the caller rather than silently substituted. */
+function optionalString(node: FlowNode, key: string): string | undefined {
+  const value = pick(node, key);
+  return value == null || value === '' ? undefined : String(value);
 }
 
 function isTrueLike(value: unknown): boolean {
@@ -141,28 +213,6 @@ function pick(node: FlowNode, key: string): unknown {
   return node.config?.[key];
 }
 
-/**
- * The swap's on-chain floor, or an error. Never a number nobody chose.
- *
- * By the time an adapter reads this, `applyQuotedFloors` has already turned any declared
- * `slippageBps` into a real floor priced against current pool state. So reaching here without one
- * means no floor exists — no owner policy, no explicit floor — and the only honest answer is to
- * refuse. The old `'1'` default was a swap that accepted any fill at all, wearing a number so it
- * looked like a floor; `'0'` would be worse still, since `injectMinOutAssert` no-ops at <= 0 and
- * would emit no assert whatsoever.
- */
-function requireFloor(node: FlowNode): string {
-  const raw = pick(node, 'min_amount_out');
-  if (raw == null || raw === '' || BigInt(String(raw)) <= 0n) {
-    throw new ValidationError(
-      `Node ${node.id}: no slippage floor. Set \`slippageBps\` (owner policy — the floor is then ` +
-        `derived from live pool price at compile time) or an explicit positive \`min_amount_out\`. ` +
-        `Refusing to compile a swap that would accept any fill.`,
-    );
-  }
-  return String(raw);
-}
-
 /** Resolve Cetus swap params — FE should pass full config; server defaults are fallback only. */
 export function resolveCetusSwapConfig(
   node: FlowNode,
@@ -176,7 +226,9 @@ export function resolveCetusSwapConfig(
       pool: fallbackString(node, warnings, 'pool', CETUS.defaultPoolId),
       inputCoinType: fallbackString(node, warnings, 'inputCoinType', CETUS.defaultInputCoinType),
       amount_in: fallbackString(node, warnings, 'amount_in', '0'),
-      min_amount_out: requireFloor(node),
+      // No fallback (R7): a 1-mist "floor" is not a real slippage protection. `cetus.adapter.ts`
+      // requires this explicitly unless the swap's output is wired into a downstream guardrail.
+      min_amount_out: optionalString(node, 'min_amount_out'),
       minSqrtPrice: fallbackString(node, warnings, 'minSqrtPrice', CETUS.minSqrtPrice),
       maxSqrtPrice: fallbackString(node, warnings, 'maxSqrtPrice', CETUS.maxSqrtPrice),
       by_amount_in: pick(node, 'by_amount_in') !== false,
@@ -231,9 +283,13 @@ export function resolveDeepbookOrderConfig(
     const v = pick(node, key);
     return v == null || v === '' ? undefined : String(v);
   };
-  const num = (key: string): number | undefined => {
+  // Validated decimal-number fields (R6): a raw `Number(v)` here used to map both malformed input
+  // AND legitimate 0 alike to `NaN`/0 (`Number(v) || 0` swallows NaN into 0 silently) — a garbage
+  // `price`/`quantity`/`depositSui` must fail loudly (422), not silently corrupt the order.
+  const num = (key: string, fieldName: string): number | undefined => {
     const v = pick(node, key);
-    return v == null || v === '' ? undefined : Number(v);
+    if (v == null || v === '') return undefined;
+    return parseConfigDecimalNumber(String(v), fieldName);
   };
 
   return {
@@ -241,12 +297,12 @@ export function resolveDeepbookOrderConfig(
       poolKey: str('poolKey'),
       balanceManagerId: str('balanceManagerId'),
       tradeCapId: str('tradeCapId'),
-      price: num('price'),
-      quantity: num('quantity'),
+      price: num('price', 'config.price'),
+      quantity: num('quantity', 'config.quantity'),
       isBid: isTrueLike(pick(node, 'isBid')),
       payWithDeep: isTrueLike(pick(node, 'payWithDeep')),
       clientOrderId: String(pick(node, 'clientOrderId') ?? '1'),
-      depositSui: Number(pick(node, 'depositSui') ?? 0) || 0,
+      depositSui: num('depositSui', 'config.depositSui') ?? 0,
     },
     warnings: [],
   };

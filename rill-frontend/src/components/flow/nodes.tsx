@@ -1,36 +1,21 @@
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
-import { Handle, Position, type NodeProps, useReactFlow, useEdges, useNodes } from "reactflow";
+import { memo, useCallback } from "react";
+import { Handle, Position, type NodeProps, useReactFlow } from "reactflow";
 import { motion } from "framer-motion";
-import { Shield, Layers, FileCode2, MessageSquareText, Plug, Wallet } from "lucide-react";
+import { Shield, Layers, FileCode2, MessageSquareText, Plug } from "lucide-react";
 import { RillMark } from "@/components/rill-mark";
 import type { Port } from "@/lib/rill-types";
 import { FlowInLabels, FlowOutLabels, NodePort } from "@/components/flow/aligned-handle";
 import { ProtocolLogo } from "@/components/flow/protocol-logo";
 import { WIRE_IN, WIRE_OUT } from "@/lib/wire-inference";
+import { isGuardrailMinValueValid } from "@/lib/publish-gate";
 import {
+  actionAmountError,
   defaultActionConfig,
-  formatRawAmount,
-  isA2B,
   otherSwapToken,
-  toBaseUnits,
-  toSlippageBps,
-  DEEPBOOK_PAIRS,
-  DEFAULT_SLIPPAGE_PCT,
-  MAX_SLIPPAGE_PCT,
-  TESTNET_MANIFEST,
-  TOKEN_DECIMALS,
+  TOKEN_COIN_TYPE,
   type ActionConfig,
   type SwapTokenSymbol,
-  type DeepbookPairKey,
 } from "@/lib/action-config";
-import { rillApi, type Quote } from "@/lib/rill-api";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { TokenBadge, TokenSelect } from "@/components/flow/token-select";
 
 export type ActionNodeData = {
@@ -65,73 +50,10 @@ const roleBadge: Partial<Record<NonNullable<Port["role"]>, string>> = {
   id: "bg-muted text-muted-foreground",
 };
 
-/**
- * Live spot quote for the swap node's current settings — advisory only.
- *
- * Shows the user the floor their slippage setting implies before they commit. The floor actually
- * asserted on chain is re-derived by the backend at compile time, so a stale or failed quote here
- * can never widen the real guard; it only means this readout goes quiet.
- */
-function useSwapQuote(enabled: boolean, tokenIn: SwapTokenSymbol, amount: string, slippage: string) {
-  const [quote, setQuote] = useState<Quote | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  // Scaled exactly as `buildCetusSwapFlowConfig` scales it, by the input coin's own decimals. If
-  // this readout and the compiled swap disagreed on what "1" means, the quote would describe a
-  // different trade than the one the user is about to sign.
-  const amountIn = enabled
-    ? toBaseUnits(amount, "0", TOKEN_DECIMALS[tokenIn] ?? TOKEN_DECIMALS.SUI)
-    : "0";
-  const slippageBps = toSlippageBps(slippage);
-
-  useEffect(() => {
-    if (!enabled || amountIn === "0") {
-      setQuote(null);
-      setError(null);
-      return;
-    }
-    let cancelled = false;
-    // Debounced: the amount field fires this on every keystroke.
-    const timer = setTimeout(() => {
-      rillApi
-        .quote({
-          poolId: TESTNET_MANIFEST.cetus_swap.defaultPoolId,
-          amountIn,
-          a2b: isA2B(tokenIn),
-          slippageBps,
-        })
-        .then((q) => {
-          if (cancelled) return;
-          setQuote(q);
-          setError(null);
-        })
-        .catch((err: unknown) => {
-          if (cancelled) return;
-          setQuote(null);
-          setError(err instanceof Error ? err.message : "Quote unavailable");
-        });
-    }, 350);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [enabled, amountIn, slippageBps, tokenIn]);
-
-  return { quote, error };
-}
-
 function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
   const c = colorMap[data.color] ?? colorMap.mint;
   const ports = data.ports;
   const { setNodes } = useReactFlow();
-  const edges = useEdges();
-  const nodes = useNodes();
-  const incomingWallet = useMemo(() => {
-    const walletEdge = edges.find((e) => e.target === id && e.source.startsWith("wallet_"));
-    if (!walletEdge) return null;
-    const walletNode = nodes.find((n) => n.id === walletEdge.source);
-    return walletNode?.data as WalletNodeData | undefined;
-  }, [edges, nodes, id]);
 
   const patchConfig = useCallback(
     (patch: ActionConfig) => {
@@ -159,13 +81,15 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
     ...data.config,
   };
 
-  const swapTokenIn = (cfg.tokenIn ?? "SUI") as SwapTokenSymbol;
-  const { quote, error: quoteError } = useSwapQuote(
-    isCetusSwap,
-    swapTokenIn,
-    String(cfg.amount ?? "0.1"),
-    String(cfg.slippage ?? DEFAULT_SLIPPAGE_PCT),
-  );
+  // R5: the amount field's decimals depend on the coin it's denominated in — Cetus swap's
+  // `amount` is in tokenIn units, Haedal stake is always SUI. Same predicate that gates
+  // simulate/publish (publish-gate.ts) drives this inline error, mirroring the guardrail pattern.
+  const amountCoinType = isCetusSwap
+    ? (TOKEN_COIN_TYPE[(cfg.tokenIn as SwapTokenSymbol) || "SUI"] ?? TOKEN_COIN_TYPE.SUI)
+    : TOKEN_COIN_TYPE.SUI;
+  const amountError =
+    isCetusSwap || isHaedalStake ? actionAmountError(cfg.amount, amountCoinType) : null;
+  const amountValid = amountError === null;
 
   const fieldCls =
     "nodrag nowheel w-full rounded-md border border-border bg-background px-2 py-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-primary/40";
@@ -240,61 +164,20 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
                   type="number"
                   min="0.000000001"
                   step="any"
-                  className={fieldCls}
+                  className={`${fieldCls} ${!amountValid ? "border-destructive focus:ring-destructive/40" : ""}`}
                   value={cfg.amount ?? "0.1"}
                   onChange={(e) => patchConfig({ amount: e.target.value })}
+                  aria-invalid={!amountValid}
+                  aria-describedby={!amountValid ? `amount-error-${id}` : undefined}
                 />
-                <TokenBadge symbol={swapTokenIn} />
+                <TokenBadge symbol={(cfg.tokenIn ?? "SUI") as SwapTokenSymbol} />
               </div>
-            </label>
-            <label className="block">
-              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">
-                Max slippage
-              </span>
-              <div className="mt-0.5 flex items-center gap-1.5">
-                <input
-                  type="number"
-                  min="0"
-                  max={MAX_SLIPPAGE_PCT}
-                  step="0.1"
-                  className={fieldCls}
-                  value={cfg.slippage ?? DEFAULT_SLIPPAGE_PCT}
-                  onChange={(e) => patchConfig({ slippage: e.target.value })}
-                />
-                <span className="text-[11px] text-muted-foreground">%</span>
-              </div>
-            </label>
-
-            <div className="rounded-md border border-border/60 bg-muted/30 px-2 py-1.5">
-              {quote ? (
-                <>
-                  <div className="flex items-baseline justify-between gap-2 text-[11px]">
-                    <span className="text-muted-foreground">Expected</span>
-                    <span className="font-mono text-foreground">
-                      ≈ {formatRawAmount(quote.expectedOut, otherSwapToken(swapTokenIn))}{" "}
-                      {otherSwapToken(swapTokenIn)}
-                    </span>
-                  </div>
-                  <div className="mt-0.5 flex items-baseline justify-between gap-2 text-[11px]">
-                    <span className="text-muted-foreground">Floor (on chain)</span>
-                    <span className="font-mono text-foreground">
-                      {formatRawAmount(quote.minAmountOut, otherSwapToken(swapTokenIn))}{" "}
-                      {otherSwapToken(swapTokenIn)}
-                    </span>
-                  </div>
-                  <p className="mt-1 text-[9px] leading-tight text-muted-foreground">
-                    Spot price · ignores price impact. rill_guard aborts the swap below the floor.
-                  </p>
-                </>
-              ) : quoteError ? (
-                <p className="text-[10px] leading-tight text-muted-foreground">
-                  No quote: {quoteError}. The floor is set at compile time — without a quote the
-                  compile fails rather than swapping unguarded.
+              {!amountValid && (
+                <p id={`amount-error-${id}`} className="mt-1 text-[10px] text-destructive">
+                  {amountError}
                 </p>
-              ) : (
-                <p className="text-[10px] text-muted-foreground">Quoting…</p>
               )}
-            </div>
+            </label>
           </div>
         )}
 
@@ -307,12 +190,19 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
                   type="number"
                   min="1"
                   step="any"
-                  className={fieldCls}
+                  className={`${fieldCls} ${!amountValid ? "border-destructive focus:ring-destructive/40" : ""}`}
                   value={cfg.amount ?? "1"}
                   onChange={(e) => patchConfig({ amount: e.target.value })}
+                  aria-invalid={!amountValid}
+                  aria-describedby={!amountValid ? `amount-error-${id}` : undefined}
                 />
                 <TokenBadge symbol="SUI" />
               </div>
+              {!amountValid && (
+                <p id={`amount-error-${id}`} className="mt-1 text-[10px] text-destructive">
+                  {amountError}
+                </p>
+              )}
               <p className="mt-1 text-[10px] text-muted-foreground">Minimum 1 SUI on testnet</p>
             </label>
           </div>
@@ -321,28 +211,22 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
         {isDeepbookLimit && (
           <div className="mt-3 space-y-2">
             <label className="block">
-              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Pair</span>
-              <Select
-                value={(cfg.poolKey as DeepbookPairKey) || "SUI_DBUSDC"}
-                onValueChange={(v) => patchConfig({ poolKey: v })}
-              >
-                <SelectTrigger className="nodrag nowheel mt-0.5 h-8 w-full cursor-pointer bg-background text-[11px] shadow-none focus:ring-1 focus:ring-primary/40">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent className="z-[200] cursor-pointer">
-                  {DEEPBOOK_PAIRS.map((p) => (
-                    <SelectItem
-                      key={p.key}
-                      value={p.key}
-                      className="cursor-pointer py-2 pl-2 pr-8 text-[11px]"
-                    >
-                      {p.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Pool</span>
+              <input
+                className={fieldCls}
+                value={cfg.poolKey ?? "SUI_DBUSDC"}
+                onChange={(e) => patchConfig({ poolKey: e.target.value })}
+              />
             </label>
-
+            <label className="block">
+              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">BalanceManager</span>
+              <input
+                className={fieldCls}
+                placeholder="0x…"
+                value={cfg.balanceManagerId ?? ""}
+                onChange={(e) => patchConfig({ balanceManagerId: e.target.value })}
+              />
+            </label>
             <div className="grid grid-cols-2 gap-2">
               <label className="block">
                 <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Price</span>
@@ -356,7 +240,7 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
                 />
               </label>
               <label className="block">
-                <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Amount</span>
+                <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Quantity</span>
                 <input
                   type="number"
                   min="0"
@@ -367,35 +251,6 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
                 />
               </label>
             </div>
-
-            <div>
-              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Side</span>
-              <div className="mt-0.5 grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => patchConfig({ isBid: "true" })}
-                  className={`nodrag nowheel rounded-md border px-2 py-1 text-[11px] font-medium transition ${
-                    cfg.isBid === "true"
-                      ? "border-mint bg-mint/20 text-mint-foreground"
-                      : "border-border bg-background text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  Buy
-                </button>
-                <button
-                  type="button"
-                  onClick={() => patchConfig({ isBid: "false" })}
-                  className={`nodrag nowheel rounded-md border px-2 py-1 text-[11px] font-medium transition ${
-                    cfg.isBid !== "true"
-                      ? "border-peach bg-peach/20 text-peach-foreground"
-                      : "border-border bg-background text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  Sell
-                </button>
-              </div>
-            </div>
-
             <label className="block">
               <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Deposit SUI</span>
               <input
@@ -407,19 +262,6 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
                 onChange={(e) => patchConfig({ depositSui: e.target.value })}
               />
             </label>
-
-            {incomingWallet ? (
-              <div className="rounded-lg border border-mint/30 bg-mint/10 px-2.5 py-1.5 text-[10px] text-mint-foreground">
-                <span className="font-medium">Wallet connected</span>
-                <div className="mt-0.5 truncate font-mono opacity-80">
-                  {incomingWallet.walletId || "0x…"}
-                </div>
-              </div>
-            ) : (
-              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[10px] text-amber-700 dark:text-amber-400">
-                Connect a Wallet node to supply BalanceManager & TradeCap.
-              </div>
-            )}
           </div>
         )}
 
@@ -572,6 +414,7 @@ function GuardrailNodeImpl({ id, data, selected }: NodeProps<GuardrailNodeData>)
   );
   const fieldCls =
     "nodrag nowheel w-full rounded-md border border-border bg-background px-2 py-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-primary/40";
+  const minValueValid = isGuardrailMinValueValid(data.minValue);
   return (
     <motion.div
       initial={{ opacity: 0, y: 6 }}
@@ -603,10 +446,18 @@ function GuardrailNodeImpl({ id, data, selected }: NodeProps<GuardrailNodeData>)
             type="number"
             min="0"
             step="any"
-            className={fieldCls}
-            value={data.minValue ?? "0"}
+            placeholder="Required — e.g. 0.05"
+            className={`${fieldCls} ${!minValueValid ? "border-destructive focus:ring-destructive/40" : ""}`}
+            value={data.minValue ?? ""}
             onChange={(e) => patch({ minValue: e.target.value })}
+            aria-invalid={!minValueValid}
+            aria-describedby={!minValueValid ? `guardrail-min-error-${id}` : undefined}
           />
+          {!minValueValid && (
+            <p id={`guardrail-min-error-${id}`} className="mt-1 text-[10px] text-destructive">
+              Required — must be greater than 0, or this guardrail enforces nothing.
+            </p>
+          )}
         </label>
         <label className="block">
           <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Coin type</span>
@@ -623,59 +474,3 @@ function GuardrailNodeImpl({ id, data, selected }: NodeProps<GuardrailNodeData>)
   );
 }
 export const GuardrailNode = memo(GuardrailNodeImpl);
-
-
-export type WalletNodeData = {
-  label?: string;
-  packageId?: string;
-  walletId?: string;
-  capId?: string;
-  balanceManagerId?: string;
-  tradeCapId?: string;
-  coinType?: string;
-};
-
-function WalletNodeImpl({ data, selected }: NodeProps<WalletNodeData>) {
-  const balance = "$0.000735";
-  const suiBalance = "0.001 SUI";
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 6 }}
-      animate={{ opacity: 1, y: 0 }}
-      className={`relative min-w-[260px] overflow-visible rounded-2xl border border-border/70 bg-card shadow-[var(--shadow-soft)] ${
-        selected ? "ring-2 ring-primary/60" : ""
-      }`}
-    >
-      <div className="flex items-center gap-2 px-3 py-2 rounded-t-2xl bg-mint text-mint-foreground">
-        <span className="inline-flex h-6 w-6 items-center justify-center rounded-md bg-mint-foreground/15">
-          <Wallet className="h-3.5 w-3.5" strokeWidth={2.25} />
-        </span>
-        <div>
-          <div className="text-[11px] uppercase tracking-widest opacity-80">Agent wallet</div>
-          <div className="text-sm font-semibold">{data.label || "Wallet"}</div>
-        </div>
-      </div>
-
-      <div className="px-3 py-3">
-        <div className="relative overflow-hidden rounded-xl bg-gradient-to-br from-mint/80 via-emerald-500/60 to-teal-600/80 p-3 text-background">
-          <div className="absolute right-2 top-2 flex items-center gap-1 text-[10px] font-medium">
-            <span className="h-1.5 w-1.5 rounded-full bg-background" />
-            ACTIVE
-          </div>
-          <div className="text-[10px] uppercase tracking-widest opacity-90">Balance</div>
-          <div className="mt-1 text-2xl font-semibold tracking-tight">{balance}</div>
-          <div className="mt-2 flex items-center justify-between text-[11px] opacity-90">
-            <span>{suiBalance}</span>
-            <span>{balance}</span>
-          </div>
-        </div>
-      </div>
-
-      <Handle id={WIRE_IN} type="target" position={Position.Left} className="flow-handle" />
-      <Handle id={WIRE_OUT} type="source" position={Position.Right} className="flow-handle" />
-    </motion.div>
-  );
-}
-
-export const WalletNode = memo(WalletNodeImpl);
