@@ -7,7 +7,7 @@ import {
   type OnChainRuleConfigValue,
   type OnChainRuleParams,
 } from '../../../../packages/rill-sdk/src/capability-manifest';
-import { SUI_COIN_TYPE, type AgentWalletBinding } from '../../core/agent-wallet';
+import { normalizeAgentWallet, type AgentWalletBinding } from '../../core/agent-wallet';
 import { config } from '../../core/config';
 import { getProtocolRegistry, DEFAULT_SIMULATE_SENDER } from '../../core/protocols';
 import { introspectService } from '../../features/introspect/introspect.service';
@@ -97,23 +97,17 @@ function isAllowedMcpOrigin(origin: string): boolean {
   }
 }
 
-function normalizeAgentWallet(
-  agentWallet: Omit<AgentWalletBinding, 'coinType'> & { coinType?: string },
-): AgentWalletBinding {
-  return {
-    packageId: agentWallet.packageId,
-    walletId: agentWallet.walletId,
-    capId: agentWallet.capId,
-    coinType: agentWallet.coinType ?? SUI_COIN_TYPE,
-  };
-}
-
 /**
  * R13: an anonymous /compile or /simulate request binds the operator's configured `config.agentWallet`
  * ONLY when the caller explicitly opts in with `useServerWallet: true` — never by default. Silently
  * defaulting every wallet-less request to the operator's real wallet meant any anonymous caller could
  * get a PTB that spends from it without ever asking; the honest behavior (KTD-1) is the no-wallet
  * warning branch unless the caller asks for the server wallet by name.
+ *
+ * F7: `normalizeAgentWallet` (`core/agent-wallet.ts`) is the single place that resolves which of the
+ * two coexisting agent_wallet packages a binding actually uses — v2 `spend()` when the request's
+ * `agentWallet` carries no `capabilityManifest`, the redesigned request_spend/confirm_spend package
+ * when it does. This route no longer duplicates that resolution.
  */
 function resolveAgentWallet(body: {
   agentWallet?: Omit<AgentWalletBinding, 'coinType'> & { coinType?: string };

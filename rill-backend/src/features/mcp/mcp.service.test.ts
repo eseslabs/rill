@@ -5,6 +5,7 @@ import { apiRouter } from '../../http/routes/api.routes';
 import { actionTools, assertKeylessToolArguments, handleMcpJsonRpc } from './mcp.service';
 import { skillsStore, type PublishedSkill } from './skills.store';
 import { buildToolDefs } from './tool-schema';
+import type { CapabilityManifest } from '../../../../packages/rill-sdk/src/capability-manifest';
 
 const skill = {
   id: 'skill_deepbook',
@@ -31,7 +32,9 @@ test('build_action schema requires only public per-call build inputs', () => {
   const wallet = schema.properties.agentWallet;
 
   expect(Object.keys(schema.properties)).toEqual(['actionId', 'sender', 'agentWallet', 'params']);
-  expect(Object.keys(wallet.properties)).toEqual(['packageId', 'walletId', 'capId', 'coinType']);
+  expect(Object.keys(wallet.properties)).toEqual([
+    'packageId', 'walletId', 'capId', 'coinType', 'capabilityManifest', 'versionId',
+  ]);
   expect(wallet.required).toEqual(['packageId', 'walletId', 'capId']);
   expect(JSON.stringify(schema)).not.toMatch(/execute|force|private.?key/i);
 });
@@ -221,6 +224,116 @@ test('build_action uses the per-call public AgentWallet binding', async () => {
       },
     },
   ]);
+});
+
+// --- F7: manifest-gated agent-wallet flow wired to build_action (MCP) --------------------------
+
+const budgetManifest: CapabilityManifest = {
+  walletCoinType: '0x2::sui::SUI',
+  rules: [{ kind: 'budget', totalMist: '5000000000' }],
+};
+
+const HERO_PARAMS = {
+  poolKey: 'SUI_DBUSDC',
+  balanceManagerId: '0x4',
+  tradeCapId: '0x5',
+  price: 1,
+  quantity: 0.005,
+  isBid: false,
+  payWithDeep: false,
+  clientOrderId: '71601',
+  depositSui: 0.006,
+};
+
+test('build_action carries a capabilityManifest + versionId through to runFlow, normalized to the redesigned binding', async () => {
+  let received: unknown[] = [];
+  const response = await handleMcpJsonRpc('skill_deepbook', {
+    jsonrpc: '2.0',
+    id: 10,
+    method: 'tools/call',
+    params: {
+      name: 'build_action',
+      arguments: {
+        actionId: skill.id,
+        sender: '0x1',
+        agentWallet: {
+          packageId: '0x2',
+          walletId: '0x3',
+          capId: '0x6',
+          versionId: '0x9',
+          capabilityManifest: budgetManifest,
+        },
+        params: HERO_PARAMS,
+      },
+    },
+  }, {
+    getSkill: () => skill,
+    runFlow: async (...args) => {
+      received = args;
+      return { version: '1' } as never;
+    },
+  });
+
+  expect((response?.result as { isError: boolean }).isError).toBe(false);
+  expect(received).toEqual([
+    skill.flow,
+    HERO_PARAMS,
+    {
+      actionId: skill.id,
+      sender: '0x1',
+      agentWallet: {
+        packageId: '0x2',
+        walletId: '0x3',
+        capId: '0x6',
+        coinType: '0x2::sui::SUI',
+        versionId: '0x9',
+        capabilityManifest: budgetManifest,
+      },
+    },
+  ]);
+});
+
+test('build_action with a capabilityManifest but no versionId (and no server env fallback) is rejected before runFlow is ever called', async () => {
+  const originalVersionEnv = process.env.AGENT_WALLET_VERSION_ID;
+  delete process.env.AGENT_WALLET_VERSION_ID;
+  let called = false;
+  try {
+    const response = await handleMcpJsonRpc('skill_deepbook', {
+      jsonrpc: '2.0',
+      id: 11,
+      method: 'tools/call',
+      params: {
+        name: 'build_action',
+        arguments: {
+          actionId: skill.id,
+          sender: '0x1',
+          agentWallet: {
+            packageId: '0x2',
+            walletId: '0x3',
+            capId: '0x6',
+            capabilityManifest: budgetManifest,
+          },
+          params: HERO_PARAMS,
+        },
+      },
+    }, {
+      getSkill: () => skill,
+      runFlow: async () => {
+        called = true;
+        return { version: '1' } as never;
+      },
+    });
+    const result = response?.result as { content: [{ text: string }]; isError: boolean };
+    const body = JSON.parse(result.content[0].text) as { code: string; message: string };
+
+    expect(result.isError).toBe(true);
+    expect(body.code).toBe('build_rejected');
+    expect(body.message).toMatch(/versionId/);
+    expect(called).toBe(false);
+  } finally {
+    if (originalVersionEnv === undefined) delete process.env.AGENT_WALLET_VERSION_ID;
+    else process.env.AGENT_WALLET_VERSION_ID = originalVersionEnv;
+  }
 });
 
 test('every remote tool rejects forbidden fields with structured tool errors', async () => {
