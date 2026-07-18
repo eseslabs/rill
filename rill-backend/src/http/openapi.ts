@@ -184,6 +184,165 @@ const errorEnvelope = {
   },
 };
 
+// ---- CapabilityManifest (U7/R11: /capabilities/preview) --------------------------------------
+// Mirrors `packages/rill-sdk/src/capability-manifest.ts`'s `CapabilityManifestSchema` — one object
+// schema per rule kind, discriminated on `kind`.
+
+const budgetRuleSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['kind', 'totalMist'],
+  properties: {
+    kind: { type: 'string', enum: ['budget'] },
+    totalMist: { type: 'string', description: 'Lifetime spend ceiling, decimal u64 base units.' },
+  },
+} as const;
+
+const perTxRuleSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['kind', 'maxMist'],
+  properties: {
+    kind: { type: 'string', enum: ['per_tx'] },
+    maxMist: { type: 'string', description: 'Per-transaction spend ceiling, decimal u64 base units.' },
+  },
+} as const;
+
+const rateLimitRuleSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['kind', 'windowMs', 'maxMist'],
+  properties: {
+    kind: { type: 'string', enum: ['rate_limit'] },
+    windowMs: { type: 'string', description: 'Rolling window length in milliseconds.' },
+    maxMist: { type: 'string', description: 'Max spend within any one window, decimal u64 base units.' },
+  },
+} as const;
+
+const protocolScopeRuleSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['kind', 'allowedPackages'],
+  properties: {
+    kind: { type: 'string', enum: ['protocol_scope'] },
+    allowedPackages: { type: 'array', items: { type: 'string' }, minItems: 1 },
+  },
+} as const;
+
+const slippageFloorRuleSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['kind', 'minOutMist'],
+  properties: {
+    kind: { type: 'string', enum: ['slippage_floor'] },
+    minOutMist: { type: 'string' },
+  },
+} as const;
+
+const assetScopeRuleSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['kind', 'allowedCoinTypes'],
+  properties: {
+    kind: { type: 'string', enum: ['asset_scope'] },
+    allowedCoinTypes: { type: 'array', items: { type: 'string' }, minItems: 1 },
+  },
+} as const;
+
+const recipientAllowlistRuleSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['kind', 'addresses'],
+  properties: {
+    kind: { type: 'string', enum: ['recipient_allowlist'] },
+    addresses: { type: 'array', items: { type: 'string' }, minItems: 1 },
+  },
+} as const;
+
+const timeWindowRuleSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['kind', 'notBeforeMs', 'notAfterMs'],
+  properties: {
+    kind: { type: 'string', enum: ['time_window'] },
+    notBeforeMs: { type: 'string', description: 'Unix ms lower bound (inclusive); must be < notAfterMs.' },
+    notAfterMs: { type: 'string', description: 'Unix ms upper bound (exclusive).' },
+  },
+} as const;
+
+const capabilityRuleSchema = {
+  oneOf: [
+    budgetRuleSchema,
+    perTxRuleSchema,
+    rateLimitRuleSchema,
+    protocolScopeRuleSchema,
+    slippageFloorRuleSchema,
+    assetScopeRuleSchema,
+    recipientAllowlistRuleSchema,
+    timeWindowRuleSchema,
+  ],
+  discriminator: { propertyName: 'kind' },
+} as const;
+
+const capabilityManifestSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['walletCoinType', 'rules'],
+  properties: {
+    walletCoinType: { type: 'string', example: '0x2::sui::SUI' },
+    rules: { type: 'array', items: capabilityRuleSchema },
+  },
+} as const;
+
+const onChainRuleParamsSchema = {
+  type: 'object',
+  required: ['module', 'config'],
+  properties: {
+    module: { type: 'string', description: 'The Move module the rule\'s prove/config-attach functions live in.' },
+    config: { type: 'object', additionalProperties: true },
+  },
+} as const;
+
+const signerPolicySchema = {
+  type: 'object',
+  properties: {
+    maxAmountMist: { type: 'string' },
+    perTxMaxMist: { type: 'string' },
+    window: {
+      type: 'object',
+      properties: { windowMs: { type: 'string' }, maxMist: { type: 'string' } },
+    },
+    allowedPackages: { type: 'array', items: { type: 'string' } },
+    minSlippageOutMist: { type: 'string' },
+    allowedCoinTypes: { type: 'array', items: { type: 'string' } },
+    allowedRecipients: { type: 'array', items: { type: 'string' } },
+    timeWindow: {
+      type: 'object',
+      required: ['notBeforeMs', 'notAfterMs'],
+      properties: {
+        notBeforeMs: { type: 'string' },
+        notAfterMs: { type: 'string' },
+      },
+    },
+  },
+} as const;
+
+const capabilityDeclarationSchema = {
+  type: 'object',
+  required: ['summaryLines', 'caps'],
+  properties: {
+    summaryLines: { type: 'array', items: { type: 'string' } },
+    caps: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['label', 'value'],
+        properties: { label: { type: 'string' }, value: { type: 'string' } },
+      },
+    },
+  },
+} as const;
+
 const exampleSwapStakeFlow = {
   nodes: [
     {
@@ -215,6 +374,7 @@ export function buildOpenApiDocument(publicBaseUrl: string) {
     tags: [
       { name: 'Introspect', description: 'Move package discovery' },
       { name: 'Compiler', description: 'Flow → PTB compilation and simulation' },
+      { name: 'Capabilities', description: 'CapabilityManifest preview — read-only, pure projections' },
       { name: 'Skills', description: 'MCP skill publish and execution' },
       { name: 'Walrus', description: 'Decentralized audit trail storage' },
       { name: 'MCP', description: 'Model Context Protocol JSON-RPC' },
@@ -396,6 +556,70 @@ export function buildOpenApiDocument(publicBaseUrl: string) {
                     },
                   }),
                 },
+              },
+            },
+          },
+        },
+      },
+      '/capabilities/preview': {
+        post: {
+          tags: ['Capabilities'],
+          summary: 'Preview a CapabilityManifest\'s three projections before publishing',
+          description:
+            '(U7/R11) "See exactly what you\'re granting" before an owner attaches a manifest to a '
+            + 'wallet. Read-only, pure projection — never signs, never touches a chain client, never '
+            + 'persists anything. Returns the on-chain `add_rule`/`prove` params the compiler would '
+            + 'assemble into a PTB, the signer\'s flat pre-flight policy shape, and the human/'
+            + 'agent-readable declaration rendered into skill.md / agent-instructions elsewhere. '
+            + 'An empty-rules or otherwise invalid manifest is rejected with 422 and the SDK\'s own '
+            + 'honest message — a manifest with zero rules grants unlimited spend, which is unsafe, '
+            + 'not a lenient default (KTD-6).',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['manifest'],
+                  properties: { manifest: capabilityManifestSchema },
+                },
+                example: {
+                  manifest: {
+                    walletCoinType: '0x2::sui::SUI',
+                    rules: [
+                      { kind: 'budget', totalMist: '5000000000' },
+                      { kind: 'rate_limit', windowMs: '3600000', maxMist: '1000000000' },
+                      { kind: 'slippage_floor', minOutMist: '990000000' },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            '200': {
+              description: 'The manifest\'s three synchronized projections',
+              content: {
+                'application/json': {
+                  schema: successEnvelope({
+                    type: 'object',
+                    required: ['onChainRules', 'signerPolicy', 'declaration'],
+                    properties: {
+                      onChainRules: { type: 'array', items: onChainRuleParamsSchema },
+                      signerPolicy: signerPolicySchema,
+                      declaration: capabilityDeclarationSchema,
+                    },
+                  }),
+                },
+              },
+            },
+            '422': {
+              description:
+                'Invalid, or empty-rules, manifest — rejected with the SDK\'s own validation '
+                + 'message(s) (KTD-6); there is no honest "no restrictions" default.',
+              content: {
+                'application/json': { schema: errorEnvelope },
               },
             },
           },
