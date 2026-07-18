@@ -25,11 +25,11 @@ RUN bun install --frozen-lockfile
 COPY rill-backend ./rill-backend
 COPY packages/rill-sdk ./packages/rill-sdk
 
-ENV PORT=3002
-EXPOSE 3002
+ENV PORT=3939
+EXPOSE 3939
 
 HEALTHCHECK --interval=15s --timeout=5s --retries=3 --start-period=20s \
-  CMD curl -f http://localhost:3002/health || exit 1
+  CMD curl -f http://localhost:3939/health || exit 1
 
 WORKDIR /app/rill-backend
 CMD ["bun", "run", "src/index.ts"]

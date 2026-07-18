@@ -150,8 +150,13 @@ export async function prepareSetupPlan(
     serializeUnsignedPtb(tradeCapTx),
   ]);
 
+  // There is ONE agent_wallet package now (the manifest-gated Rule + Hot Potato design) — a compiled
+  // build_action PTB always calls request_spend/confirm_spend, never the retired legacy spend().
+  // (Any per-manifest-rule `prove` calls aren't listed here: this template can't know the run-set's
+  // capability manifest ahead of time.)
   const allowedTargets = [
-    `${walletPackageId}::agent_wallet::spend`,
+    `${walletPackageId}::agent_wallet::request_spend`,
+    `${walletPackageId}::agent_wallet::confirm_spend`,
     `${deepbookPackageId}::balance_manager::deposit`,
     `${deepbookPackageId}::balance_manager::generate_proof_as_trader`,
     `${deepbookPackageId}::pool::place_limit_order`,

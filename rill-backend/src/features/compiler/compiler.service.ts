@@ -34,7 +34,8 @@ export type { FlowEdge, FlowGraph, FlowNode, CompileOptions, CompileResult };
  * Compiles a visual flow graph into one unsigned PTB.
  *
  * Orchestration only — each node's Move calls live in its `ProtocolAdapter` (`features/protocols/*`).
- * Funding flows through one chokepoint: `agent_wallet::spend()` (when an agent wallet is bound) or
+ * Funding flows through one chokepoint: the manifest-gated agent_wallet `request_spend` -> prove x N
+ * -> `confirm_spend` sequence (when an agent wallet is bound — see `buildManifestGatedSpend`) or
  * `tx.gas`, then `fundSuiCoin` hands SUI to whichever node needs it.
  *
  * PTB-default (R7): there is no node-type branch for `ptb` here, or anywhere in this file — PTB is
@@ -79,25 +80,12 @@ export class CompilerService {
         );
       }
 
-      // U5/R8 backward-compat gate: a manifest present on the binding drives the redesigned Rule +
-      // Hot Potato sequence; its absence keeps today's single `agent_wallet::spend()` call BYTE-
-      // IDENTICAL (this `else` branch is untouched by U5) — the redesigned package (U1) isn't
-      // deployed yet, so already-working flows against the live v2 package must keep compiling
-      // exactly as they do today.
-      if (options.agentWallet.capabilityManifest) {
-        budgetCoin = this.buildManifestGatedSpend(tx, options.agentWallet, rootTotal, extraCoins);
-      } else {
-        budgetCoin = tx.moveCall({
-          target: `${options.agentWallet.packageId}::agent_wallet::spend`,
-          typeArguments: [options.agentWallet.coinType],
-          arguments: [
-            tx.object(options.agentWallet.walletId),
-            tx.object(options.agentWallet.capId),
-            tx.pure.u64(rootTotal),
-            tx.object(SUI_CLOCK_ID),
-          ],
-        });
-      }
+      // There is now ONE agent_wallet package: every bound wallet funds through the redesigned Rule +
+      // Hot Potato sequence (`buildManifestGatedSpend` — `request_spend` -> one `prove` per manifest
+      // rule -> `confirm_spend`). A binding with no `capabilityManifest` is not a legacy fallback
+      // (that call/package no longer exists) — `buildManifestGatedSpend` itself fails closed with a
+      // `ValidationError` before any command is emitted (see `parseManifestOrThrow`).
+      budgetCoin = this.buildManifestGatedSpend(tx, options.agentWallet, rootTotal, extraCoins);
       // The released coin must be fully consumed (UnusedValueWithoutDrop) — after nodes split what
       // they need from it via `fundSuiCoin`, the ≈0 remainder is settled by the same sweep as every
       // other produced coin (KTD-3 single owner), not a bespoke merge here.
