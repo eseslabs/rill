@@ -1,4 +1,5 @@
 import { Transaction } from '@mysten/sui/transactions';
+import type { AgentWalletBinding } from '../../core/agent-wallet';
 import { SUI_COIN_TYPE } from '../../core/agent-wallet';
 import { ValidationError } from '../../core/errors';
 import { resolveEffectiveFlow } from '../../core/node-config';
@@ -6,6 +7,7 @@ import { SUI_CLOCK_ID } from '../../core/protocols';
 import { getAdapter } from '../protocols/registry';
 import { findFlowStructureIssues } from '../protocols/handles';
 import { injectMinOutAssert, resolveGuardrailCoinType, resolveGuardrailMinValue } from '../protocols/guard';
+import { CapabilityManifestSchema, toOnChainRuleParams } from '../../../../packages/rill-sdk/src/capability-manifest';
 import type {
   CompileOptions,
   CompileResult,
@@ -67,17 +69,26 @@ export class CompilerService {
         );
       }
 
-      budgetCoin = tx.moveCall({
-        target: `${options.agentWallet.packageId}::agent_wallet::spend`,
-        typeArguments: [options.agentWallet.coinType],
-        arguments: [
-          tx.object(options.agentWallet.walletId),
-          tx.object(options.agentWallet.capId),
-          tx.pure.u64(rootTotal),
-          tx.object(SUI_CLOCK_ID),
-        ],
-      });
-      // The spend() output must be fully consumed (UnusedValueWithoutDrop) — after nodes split what
+      // U5/R8 backward-compat gate: a manifest present on the binding drives the redesigned Rule +
+      // Hot Potato sequence; its absence keeps today's single `agent_wallet::spend()` call BYTE-
+      // IDENTICAL (this `else` branch is untouched by U5) — the redesigned package (U1) isn't
+      // deployed yet, so already-working flows against the live v2 package must keep compiling
+      // exactly as they do today.
+      if (options.agentWallet.capabilityManifest) {
+        budgetCoin = this.buildManifestGatedSpend(tx, options.agentWallet, rootTotal, options.sender, extraCoins);
+      } else {
+        budgetCoin = tx.moveCall({
+          target: `${options.agentWallet.packageId}::agent_wallet::spend`,
+          typeArguments: [options.agentWallet.coinType],
+          arguments: [
+            tx.object(options.agentWallet.walletId),
+            tx.object(options.agentWallet.capId),
+            tx.pure.u64(rootTotal),
+            tx.object(SUI_CLOCK_ID),
+          ],
+        });
+      }
+      // The released coin must be fully consumed (UnusedValueWithoutDrop) — after nodes split what
       // they need from it via `fundSuiCoin`, the ≈0 remainder is settled by the same sweep as every
       // other produced coin (KTD-3 single owner), not a bespoke merge here.
       extraCoins.push({ value: budgetCoin, coinType: SUI_COIN_TYPE });
@@ -159,6 +170,121 @@ export class CompilerService {
       agentWalletBound: Boolean(options.agentWallet && rootTotal > 0n),
       budgetSpendMist: rootTotal,
     };
+  }
+
+  /**
+   * U5/R8: the redesigned agent_wallet package's Rule + Hot Potato spend sequence — `request_spend`
+   * -> one `prove` per manifest rule (in manifest order) -> `confirm_spend` — replacing the legacy
+   * single `agent_wallet::spend()` call when `agentWallet.capabilityManifest` is set. Returns the
+   * released `Coin<T>` (the SAME chainable shape `budgetCoin` always had, so `fundSuiCoin` and every
+   * downstream adapter need no changes — the manifest gate is entirely local to this method).
+   *
+   * An invalid manifest throws `ValidationError` (422) BEFORE any command is emitted (R1: never emit
+   * an unguarded spend) — `CapabilityManifestSchema` is re-validated here rather than trusted, since
+   * `AgentWalletBinding.capabilityManifest` may be handed in from an untyped caller (e.g. a direct
+   * `compileFlow` call bypassing the HTTP schema layer, same defense-in-depth reasoning as
+   * `findFlowStructureIssues` above).
+   *
+   * `slippage_floor`'s `prove<T, OutT>(req, wallet, version, coin_out: &Coin<OutT>)` needs a REAL
+   * coin to check against, but at this point in the PTB — before `confirm_spend` has released
+   * anything and before any action has run — no swap output exists yet to borrow (the Move rule's
+   * own test fixture confirms `coin_out` must already exist pre-`confirm_spend`; it is deliberately
+   * NOT the wallet's own budget coin, see `slippage_floor.move`'s doc comment). Reconciling with the
+   * existing guardrail pass-through (`protocols/guard.ts`'s `injectMinOutAssert`, left completely
+   * untouched — it still runs against a swap's REAL output later, exactly as today): this method
+   * satisfies the rule with a coin representing the amount actually being authorized here — split
+   * from `tx.gas` for exactly `amount`, checked against the owner's on-chain-configured floor, then
+   * left in `extraCoins` for the normal settle sweep (KTD-3) to merge back into gas. This is a real,
+   * honest comparison (not a rigged always-pass), just scoped to "this spend meets the floor" rather
+   * than "this swap's fill met the floor" — the latter stays enforced by the untouched pass-through.
+   */
+  private buildManifestGatedSpend(
+    tx: Transaction,
+    agentWallet: AgentWalletBinding,
+    amount: bigint,
+    sender: string | undefined,
+    extraCoins: NodeOutput[],
+  ): unknown {
+    const parsed = CapabilityManifestSchema.safeParse(agentWallet.capabilityManifest);
+    if (!parsed.success) {
+      throw new ValidationError(
+        `Invalid capability manifest: ${parsed.error.issues.map((issue) => issue.message).join('; ')}`,
+      );
+    }
+    if (!agentWallet.versionId) {
+      throw new ValidationError(
+        'agentWallet.capabilityManifest requires agentWallet.versionId (the shared Version object id) '
+          + 'to build the redesigned request_spend/confirm_spend/prove sequence.',
+      );
+    }
+    if (!agentWallet.targetPackage) {
+      throw new ValidationError(
+        'agentWallet.capabilityManifest requires agentWallet.targetPackage (the protocol package this '
+          + 'spend authorizes) — there is no honest default across arbitrary flow shapes.',
+      );
+    }
+    const recipient = agentWallet.recipient ?? sender;
+    if (!recipient) {
+      throw new ValidationError(
+        'agentWallet.capabilityManifest requires a recipient — set agentWallet.recipient, or pass `sender` '
+          + 'so it can default to the flow owner.',
+      );
+    }
+
+    const manifest = parsed.data;
+    const { packageId, walletId, capId, versionId, targetPackage, coinType } = agentWallet;
+    const typeArgs = [coinType];
+
+    // request_spend's coin_in/coin_out are Move `TypeName` VALUES, not type arguments — constructed
+    // on-chain via `std::type_name::get<T>()` (a zero-arg generic call usable as a PTB command whose
+    // result feeds the next command). Simplification (documented, not silent): coin_out defaults to
+    // the wallet's own coin type — this compiler's manifest-gated spend never commits to a declared
+    // swap-out type at authorization time; `asset_scope`, the only rule that reads `coin_out`, checks
+    // it against the SAME allowlist as `coin_in` as a result.
+    const coinInTypeName = tx.moveCall({ target: '0x1::type_name::get', typeArguments: [coinType] });
+    const coinOutTypeName = tx.moveCall({ target: '0x1::type_name::get', typeArguments: [coinType] });
+
+    const req = tx.moveCall({
+      target: `${packageId}::agent_wallet::request_spend`,
+      typeArguments: typeArgs,
+      arguments: [
+        tx.object(walletId),
+        tx.object(capId),
+        tx.object(versionId),
+        tx.pure.u64(amount),
+        tx.pure.address(targetPackage),
+        coinInTypeName,
+        coinOutTypeName,
+        tx.pure.address(recipient),
+        tx.object(SUI_CLOCK_ID),
+      ],
+    });
+
+    for (const rule of toOnChainRuleParams(manifest)) {
+      const args: unknown[] = [req, tx.object(walletId), tx.object(versionId)];
+      let ruleTypeArgs = typeArgs;
+
+      if (rule.module === 'rate_limit' || rule.module === 'time_window') {
+        args.push(tx.object(SUI_CLOCK_ID));
+      } else if (rule.module === 'slippage_floor') {
+        const [shadow] = tx.splitCoins(tx.gas, [amount]);
+        args.push(shadow);
+        extraCoins.push({ value: shadow, coinType: SUI_COIN_TYPE });
+        ruleTypeArgs = [coinType, coinType]; // <T, OutT> — OutT is SUI here (see doc comment above).
+      }
+
+      tx.moveCall({
+        target: `${packageId}::${rule.module}::prove`,
+        typeArguments: ruleTypeArgs,
+        arguments: args as never[],
+      });
+    }
+
+    return tx.moveCall({
+      target: `${packageId}::agent_wallet::confirm_spend`,
+      typeArguments: typeArgs,
+      arguments: [tx.object(walletId), req, tx.object(versionId), tx.object(SUI_CLOCK_ID)],
+    });
   }
 
   /** SUI settles by merging into `tx.gas`; any other coin type settles by transferring to `sender`

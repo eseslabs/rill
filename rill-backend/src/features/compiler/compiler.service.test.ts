@@ -4,6 +4,7 @@ import { config, suiClient } from '../../core/config';
 import { ValidationError } from '../../core/errors';
 import { FlowSchema } from '../../http/schemas/api.schema';
 import { compilerService } from './compiler.service';
+import type { CapabilityManifest, CapabilityRule } from '../../../../packages/rill-sdk/src/capability-manifest';
 
 type PtbCommand = ReturnType<Transaction['getData']>['commands'][number];
 
@@ -131,11 +132,14 @@ function producedCoinSlots(command: PtbCommand): number {
   if (target.endsWith('::router::swap')) return 2; // Cetus router::swap always returns (CoinA, CoinB)
   if (target.endsWith('::coin::zero')) return 1;
   if (target.endsWith('::agent_wallet::spend')) return 1;
-  return 0; // assert_min_value, request_stake, DeepBook calls, etc. — nothing referenceable produced
+  if (target.endsWith('::agent_wallet::confirm_spend')) return 1; // U5: releases Coin<T>, same as spend()
+  return 0; // assert_min_value, request_stake, DeepBook calls, request_spend (a hot potato, not a
+  // coin — not swept), type_name::get (a TypeName, not a coin), etc. — nothing coin-referenceable.
 }
 
 function assertEveryProducedCoinConsumedExactlyOnce(
   transaction: Awaited<ReturnType<typeof compilerService.compileFlow>>['transaction'],
+  opts: { expectedProveModules?: string[] } = {},
 ): void {
   const commands = transaction.getData().commands;
   const produced = new Set<string>();
@@ -171,6 +175,27 @@ function assertEveryProducedCoinConsumedExactlyOnce(
   // (the identical reference passed twice) would show up as fewer unique `consumed` entries than
   // total argument occurrences for that slot — covered implicitly by the per-scenario command-shape
   // assertions below (each test pins the exact command sequence and argument wiring it expects).
+
+  // U5: exactly one request_spend/confirm_spend pair per spend, on EVERY compiled flow (manifest or
+  // not) — never a request without its matching confirm (a hot potato that could never clear,
+  // aborting the whole PTB) and never two independent spends in one compile (a double spend).
+  const targets = commands.map((command) =>
+    command.$kind === 'MoveCall'
+      ? `${command.MoveCall.package}::${command.MoveCall.module}::${command.MoveCall.function}`
+      : '',
+  );
+  const requestSpendCount = targets.filter((t) => t.endsWith('::agent_wallet::request_spend')).length;
+  const confirmSpendCount = targets.filter((t) => t.endsWith('::agent_wallet::confirm_spend')).length;
+  expect(requestSpendCount).toBeLessThanOrEqual(1);
+  expect(confirmSpendCount).toBe(requestSpendCount);
+
+  // U5: exactly one `prove` per attached rule, when the caller knows the expected rule sequence.
+  if (opts.expectedProveModules) {
+    const proveModules = commands
+      .filter((command) => command.$kind === 'MoveCall' && command.MoveCall.function === 'prove')
+      .map((command) => (command.$kind === 'MoveCall' ? command.MoveCall.module : ''));
+    expect(proveModules).toEqual(opts.expectedProveModules);
+  }
 }
 
 // --- TDD anchor: written first, observed red against pre-U3 code -----------
@@ -423,4 +448,275 @@ test('a cycle in the flow -> ValidationError (422) via the topological sort', as
   expect(thrown).toBeInstanceOf(ValidationError);
   expect((thrown as InstanceType<typeof ValidationError>).message).toBe('Cyclic dependency detected in flow wiring!');
   expect((thrown as InstanceType<typeof ValidationError>).status).toBe(422);
+});
+
+// --- U5: manifest-gated spend (Rule + Hot Potato) -----------------------------
+//
+// When `agentWallet.capabilityManifest` is set, the compiler emits the redesigned agent_wallet
+// package's `request_spend -> prove x N -> confirm_spend` sequence instead of the legacy single
+// `agent_wallet::spend()` call. The redesigned package (U1) is a fresh, not-yet-deployed deploy —
+// these tests assert the PTB *structure* (targets, order, argument wiring), not live execution.
+
+const AGENT_WALLET_VERSION_ID = objectId(20);
+const RECIPIENT = objectId(21);
+
+/** `agentWallet` (no manifest) plus the fields the redesigned sequence needs, so a test only has to
+ *  add `capabilityManifest` to opt into the new path. */
+const manifestWallet = {
+  ...agentWallet,
+  versionId: AGENT_WALLET_VERSION_ID,
+  targetPackage: CETUS_INTEGRATE_PKG,
+  recipient: RECIPIENT,
+};
+
+function ruleProveTarget(module: string) {
+  return `${agentWallet.packageId}::${module}::prove`;
+}
+
+/** Types a manifest fixture's `rules` array against `CapabilityRule`'s discriminated union so each
+ *  literal's `kind` narrows correctly, instead of every call site needing its own type annotation. */
+function manifest(rules: CapabilityRule[]): CapabilityManifest {
+  return { walletCoinType: SUI, rules };
+}
+
+const REQUEST_SPEND_TARGET = `${agentWallet.packageId}::agent_wallet::request_spend`;
+const CONFIRM_SPEND_TARGET = `${agentWallet.packageId}::agent_wallet::confirm_spend`;
+const LEGACY_SPEND_TARGET = `${agentWallet.packageId}::agent_wallet::spend`;
+
+test('a manifest with 3 rules compiles request_spend + 3 proves (in order) + confirm_spend', async () => {
+  const flow = { nodes: [cetusSwapNode('s1')], edges: [] };
+
+  const result = await compilerService.compileFlow(flow, {
+    sender,
+    agentWallet: {
+      ...manifestWallet,
+      capabilityManifest: manifest([
+        { kind: 'budget', totalMist: '5000000000' },
+        { kind: 'per_tx', maxMist: '5000000000' },
+        { kind: 'protocol_scope', allowedPackages: [CETUS_INTEGRATE_PKG] },
+      ]),
+    },
+  });
+  const targets = moveCallTargets(result.transaction);
+
+  const requestIdx = targets.indexOf(REQUEST_SPEND_TARGET);
+  const confirmIdx = targets.indexOf(CONFIRM_SPEND_TARGET);
+  expect(requestIdx).toBeGreaterThanOrEqual(0);
+  expect(confirmIdx).toBeGreaterThan(requestIdx);
+  // No legacy spend() when a manifest drives the redesigned sequence.
+  expect(targets).not.toContain(LEGACY_SPEND_TARGET);
+
+  // Every prove sits strictly between request_spend and confirm_spend, in manifest order.
+  const proveIdxs = [
+    targets.indexOf(ruleProveTarget('budget')),
+    targets.indexOf(ruleProveTarget('per_tx')),
+    targets.indexOf(ruleProveTarget('protocol_scope')),
+  ];
+  for (const idx of proveIdxs) {
+    expect(idx).toBeGreaterThan(requestIdx);
+    expect(idx).toBeLessThan(confirmIdx);
+  }
+  expect(proveIdxs).toEqual([...proveIdxs].sort((a, b) => a - b)); // manifest order preserved
+
+  assertEveryProducedCoinConsumedExactlyOnce(result.transaction, {
+    expectedProveModules: ['budget', 'per_tx', 'protocol_scope'],
+  });
+});
+
+test('request_spend carries amount/target_package/recipient from the flow and options', async () => {
+  const flow = { nodes: [cetusSwapNode('s1')], edges: [] };
+
+  const result = await compilerService.compileFlow(flow, {
+    sender,
+    agentWallet: {
+      ...manifestWallet,
+      capabilityManifest: manifest([{ kind: 'budget', totalMist: '5000000000' }]),
+    },
+  });
+  const commands = result.transaction.getData().commands;
+  const requestCmd = commands.find(
+    (c) => c.$kind === 'MoveCall' && c.MoveCall.function === 'request_spend',
+  );
+  expect(requestCmd?.$kind).toBe('MoveCall');
+  if (requestCmd?.$kind !== 'MoveCall') throw new Error('expected a MoveCall');
+
+  // arguments: [wallet, cap, version, amount, target_package, coin_in, coin_out, recipient, clock]
+  expect(requestCmd.MoveCall.arguments).toHaveLength(9);
+  const inputs = result.transaction.getData().inputs;
+  const pureArg = (arg: unknown) => {
+    const a = arg as { $kind?: string; Input?: number };
+    if (a?.$kind !== 'Input' || a.Input == null) return undefined;
+    const input = inputs[a.Input] as { Pure?: { bytes: string } };
+    return input?.Pure;
+  };
+  // amount = rootTotal (1_000_000_000 mist, the cetus swap's amount_in) as a u64 pure arg.
+  expect(pureArg(requestCmd.MoveCall.arguments[3])).toBeDefined();
+  expect(result.budgetSpendMist).toBe(1_000_000_000n);
+
+  assertEveryProducedCoinConsumedExactlyOnce(result.transaction);
+});
+
+test('a swap+slippage manifest injects the slippage_floor prove', async () => {
+  const flow = { nodes: [cetusSwapNode('s1')], edges: [] };
+
+  const result = await compilerService.compileFlow(flow, {
+    sender,
+    agentWallet: {
+      ...manifestWallet,
+      capabilityManifest: manifest([
+        { kind: 'budget', totalMist: '5000000000' },
+        { kind: 'slippage_floor', minBps: 50 },
+      ]),
+    },
+  });
+  const commands = result.transaction.getData().commands;
+  const slippageProve = commands.find(
+    (c) => c.$kind === 'MoveCall' && c.MoveCall.function === 'prove' && c.MoveCall.module === 'slippage_floor',
+  );
+  expect(slippageProve?.$kind).toBe('MoveCall');
+  if (slippageProve?.$kind !== 'MoveCall') throw new Error('expected a MoveCall');
+  // prove<T, OutT>(req, wallet, version, coin_out) — 4 arguments, 2 type arguments.
+  expect(slippageProve.MoveCall.arguments).toHaveLength(4);
+  expect(slippageProve.MoveCall.typeArguments).toEqual([SUI, SUI]);
+
+  assertEveryProducedCoinConsumedExactlyOnce(result.transaction, {
+    expectedProveModules: ['budget', 'slippage_floor'],
+  });
+});
+
+test('rate_limit and time_window proves thread the shared Clock', async () => {
+  const flow = { nodes: [cetusSwapNode('s1')], edges: [] };
+
+  const result = await compilerService.compileFlow(flow, {
+    sender,
+    agentWallet: {
+      ...manifestWallet,
+      capabilityManifest: manifest([
+        { kind: 'rate_limit', windowMs: '3600000', maxMist: '5000000000' },
+        { kind: 'time_window', notBeforeMs: '0', notAfterMs: '99999999999999' },
+      ]),
+    },
+  });
+  const commands = result.transaction.getData().commands;
+  const rateLimitProve = commands.find(
+    (c) => c.$kind === 'MoveCall' && c.MoveCall.function === 'prove' && c.MoveCall.module === 'rate_limit',
+  );
+  const timeWindowProve = commands.find(
+    (c) => c.$kind === 'MoveCall' && c.MoveCall.function === 'prove' && c.MoveCall.module === 'time_window',
+  );
+  // prove<T>(req, wallet, version, clock) — 4 arguments each.
+  expect(rateLimitProve?.$kind === 'MoveCall' && rateLimitProve.MoveCall.arguments).toHaveLength(4);
+  expect(timeWindowProve?.$kind === 'MoveCall' && timeWindowProve.MoveCall.arguments).toHaveLength(4);
+
+  assertEveryProducedCoinConsumedExactlyOnce(result.transaction, {
+    expectedProveModules: ['rate_limit', 'time_window'],
+  });
+});
+
+test('changing the manifest\'s rule set changes the injected proves', async () => {
+  const flow = { nodes: [cetusSwapNode('s1')], edges: [] };
+  const baseWallet = { ...manifestWallet };
+
+  const resultA = await compilerService.compileFlow(flow, {
+    sender,
+    agentWallet: {
+      ...baseWallet,
+      capabilityManifest: manifest([{ kind: 'budget', totalMist: '5000000000' }]),
+    },
+  });
+  const resultB = await compilerService.compileFlow(flow, {
+    sender,
+    agentWallet: {
+      ...baseWallet,
+      capabilityManifest: manifest([
+        { kind: 'budget', totalMist: '5000000000' },
+        { kind: 'per_tx', maxMist: '5000000000' },
+        { kind: 'recipient_allowlist', addresses: [RECIPIENT] },
+      ]),
+    },
+  });
+
+  const provesOf = (r: typeof resultA) =>
+    r.transaction.getData().commands
+      .filter((c) => c.$kind === 'MoveCall' && c.MoveCall.function === 'prove')
+      .map((c) => (c.$kind === 'MoveCall' ? c.MoveCall.module : ''));
+
+  expect(provesOf(resultA)).toEqual(['budget']);
+  expect(provesOf(resultB)).toEqual(['budget', 'per_tx', 'recipient_allowlist']);
+  expect(provesOf(resultA)).not.toEqual(provesOf(resultB));
+
+  assertEveryProducedCoinConsumedExactlyOnce(resultA.transaction, { expectedProveModules: ['budget'] });
+  assertEveryProducedCoinConsumedExactlyOnce(resultB.transaction, {
+    expectedProveModules: ['budget', 'per_tx', 'recipient_allowlist'],
+  });
+});
+
+test('an invalid manifest (empty rules) -> ValidationError (422), never an unguarded spend', async () => {
+  const flow = { nodes: [cetusSwapNode('s1')], edges: [] };
+
+  let thrown: unknown;
+  try {
+    await compilerService.compileFlow(flow, {
+      sender,
+      agentWallet: { ...manifestWallet, capabilityManifest: manifest([]) },
+    });
+  } catch (err) {
+    thrown = err;
+  }
+
+  expect(thrown).toBeInstanceOf(ValidationError);
+  expect((thrown as InstanceType<typeof ValidationError>).status).toBe(422);
+  expect((thrown as InstanceType<typeof ValidationError>).message).toContain('Invalid capability manifest');
+});
+
+test('an invalid manifest (unknown rule kind) -> ValidationError (422)', async () => {
+  const flow = { nodes: [cetusSwapNode('s1')], edges: [] };
+
+  await expect(
+    compilerService.compileFlow(flow, {
+      sender,
+      agentWallet: {
+        ...manifestWallet,
+        capabilityManifest: { walletCoinType: SUI, rules: [{ kind: 'not_a_real_rule', totalMist: '1' }] } as never,
+      },
+    }),
+  ).rejects.toThrow(ValidationError);
+});
+
+test('a manifest present but missing versionId/targetPackage -> ValidationError (422)', async () => {
+  const flow = { nodes: [cetusSwapNode('s1')], edges: [] };
+
+  await expect(
+    compilerService.compileFlow(flow, {
+      sender,
+      // no versionId/targetPackage on this binding
+      agentWallet: { ...agentWallet, capabilityManifest: manifest([{ kind: 'budget', totalMist: '5000000000' }]) },
+    }),
+  ).rejects.toThrow(ValidationError);
+});
+
+test('a flow WITHOUT a manifest compiles the CURRENT spend() path — byte-identical regression', async () => {
+  const flow = { nodes: [cetusSwapNode('s1')], edges: [] };
+
+  const resultLegacy = await compilerService.compileFlow(flow, { sender, agentWallet });
+  const resultExplicitUndefined = await compilerService.compileFlow(flow, {
+    sender,
+    agentWallet: { ...manifestWallet, capabilityManifest: undefined },
+  });
+
+  for (const result of [resultLegacy, resultExplicitUndefined]) {
+    const targets = moveCallTargets(result.transaction);
+    expect(targets).toContain(LEGACY_SPEND_TARGET);
+    expect(targets).not.toContain(REQUEST_SPEND_TARGET);
+    expect(targets).not.toContain(CONFIRM_SPEND_TARGET);
+    expect(targets.some((t) => t.endsWith('::prove'))).toBe(false);
+  }
+
+  // Same flow/sender/wallet-identity compiled through the untouched legacy branch: byte-identical
+  // commands/inputs — this is the U5 backward-compat gate's core proof (R8: the deployed v2 package's
+  // path never changes shape).
+  expect(resultExplicitUndefined.transaction.getData().commands).toEqual(resultLegacy.transaction.getData().commands);
+  expect(resultExplicitUndefined.transaction.getData().inputs).toEqual(resultLegacy.transaction.getData().inputs);
+
+  assertEveryProducedCoinConsumedExactlyOnce(resultLegacy.transaction);
 });
