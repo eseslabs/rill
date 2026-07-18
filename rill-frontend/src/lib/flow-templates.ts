@@ -121,7 +121,7 @@ function guardrailNode(id: string, position: { x: number; y: number }, minValue:
  *  `inferWireKind`, exactly like the canvas does for a hand-drawn connection,
  *  so a template edge renders (solid/dashed, animated) identically to one the
  *  user drew themselves. */
-function connectEdge(id: string, source: Node, target: Node): Edge {
+export function connectEdge(id: string, source: Node, target: Node): Edge {
   const wireKind: WireKind = inferWireKind(source, target);
   return {
     id,

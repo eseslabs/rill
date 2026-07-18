@@ -56,7 +56,7 @@ import {
 import { computePublishGate } from "@/lib/publish-gate";
 import { applyProtocolRegistry, defaultActionConfig } from "@/lib/action-config";
 import { getActionPorts } from "@/lib/action-ports";
-import { FLOW_TEMPLATES } from "@/lib/flow-templates";
+import { FLOW_TEMPLATES, connectEdge } from "@/lib/flow-templates";
 import { rillApi } from "@/lib/rill-api";
 import { loadDraftFromStorage, saveDraftToStorage, maxNodeId } from "@/lib/draft-storage";
 import { emptyManifest, type CapabilityManifest } from "@/lib/capabilities";
@@ -446,8 +446,23 @@ function Builder() {
       // position the user moved them to), falling back to the defaults if either was removed.
       const trigger = nodesRef.current.find((n) => n.type === "trigger") ?? initialNodes[0];
       const output = nodesRef.current.find((n) => n.type === "output") ?? initialNodes[1];
+      // Auto-wire the FULL flow: Trigger → entry node(s), exit node(s) → Output, so a template
+      // drops a complete, connected canvas — never floating nodes the user has to wire by hand.
+      // Entry = a template node with no incoming template edge; exit = one with no outgoing edge
+      // (a single-node template is both). `connectEdge` derives the wire kind exactly like a
+      // hand-drawn wire, so these read as normal flow edges.
+      const targeted = new Set(built.edges.map((e) => e.target));
+      const sourced = new Set(built.edges.map((e) => e.source));
+      const scaffoldEdges = [
+        ...built.nodes
+          .filter((n) => !targeted.has(n.id))
+          .map((n) => connectEdge(makeId(), trigger, n)),
+        ...built.nodes
+          .filter((n) => !sourced.has(n.id))
+          .map((n) => connectEdge(makeId(), n, output)),
+      ];
       setNodes([trigger, output, ...built.nodes]);
-      setEdges(built.edges);
+      setEdges([...built.edges, ...scaffoldEdges]);
       setManifest(template.manifest ?? emptyManifest());
       idRef.current = maxNodeId(built.nodes) + 1;
     },
