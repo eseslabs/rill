@@ -3,6 +3,11 @@ import type { SuiGrpcClient } from '@mysten/sui/grpc';
 import { Transaction } from '@mysten/sui/transactions';
 import { normalizeSuiAddress } from '@mysten/sui/utils';
 import { decimalToBaseUnits, parseU64String } from '../../rill-sdk/src/amounts';
+import {
+  toOnChainRuleParams,
+  toSignerPolicy,
+  type CapabilityManifest,
+} from '../../rill-sdk/src/capability-manifest';
 import { assertExecutionEnvelope, digestUnsignedPtb } from '../../rill-sdk/src/execution-envelope';
 import type { EnvelopeStep, ExecutionEnvelope, RillNetwork } from '../../rill-sdk/src/types';
 import { stepValidators } from './steps/registry';
@@ -76,6 +81,26 @@ export interface LocalSignerPolicy {
    * that wants to know which custody model a given run-set's policy was written for.
    */
   custodyMode?: 'bounded' | 'direct';
+  /**
+   * Manifest-gated signer policy (KTD-3/U6): when set, this policy is validated against the
+   * REDESIGNED agent_wallet package's Rule + Hot Potato spend flow (`request_spend` -> one
+   * `<module>::prove` per attached on-chain rule -> `confirm_spend`) instead of the legacy single
+   * `agent_wallet::spend()` call — see `validateExecutionEnvelope`'s dispatcher. Its presence alone
+   * selects the new path; `version` on this interface stays `'1'` regardless (it identifies the
+   * LocalSignerPolicy file format, not the on-chain wallet generation). ADDITIVE ONLY: every
+   * existing run-set on disk has no `capabilityManifest` field and keeps validating through the
+   * untouched legacy/generic paths exactly as before.
+   */
+  capabilityManifest?: CapabilityManifest;
+  /**
+   * The redesigned agent_wallet package's shared `version::Version` object id — required whenever
+   * `capabilityManifest` is set (mirrors `rill-backend`'s `AgentWalletBinding.versionId`
+   * requirement for `buildManifestGatedSpend`). Pinned by `inspectManifestGated` on every
+   * `request_spend`/`<module>::prove`/`confirm_spend` call, exactly like `walletId`/`agentCapId`,
+   * so a hostile PTB cannot substitute a different Version object to dodge the gate it controls.
+   * Not read by the legacy/generic paths at all.
+   */
+  versionId?: string;
 }
 
 export interface ValidatedEnvelope {
@@ -329,6 +354,15 @@ export async function validateExecutionEnvelope(
   gasCeilingMist?: bigint,
 ): Promise<ValidatedEnvelope> {
   const envelope = assertExecutionEnvelope(value);
+  // Manifest-gated signer policy — branch point, checked FIRST and independently of the WS2 generic
+  // dispatch below. A policy carrying `capabilityManifest` is validated against the REDESIGNED
+  // agent_wallet Rule + Hot Potato flow (validateManifestEnvelope), never the legacy/generic paths —
+  // see policy.capabilityManifest's doc comment. Every existing run-set has no `capabilityManifest`
+  // field, so this branch is never taken for them; the WS2 generic/legacy dispatch immediately below
+  // is completely UNCHANGED.
+  if (policy.capabilityManifest !== undefined) {
+    return validateManifestEnvelope(envelope, signerAddress, signerNetwork, policy, now, gasCeilingMist);
+  }
   // WS2 generic signer policy — branch point. A step-bearing envelope validated against a
   // step-bearing policy takes the NEW generic path (inspectGeneric + per-step structural
   // validators); every other combination — including every existing run-set, which has no
@@ -341,6 +375,183 @@ export async function validateExecutionEnvelope(
     return validateGenericEnvelope(envelope, signerAddress, signerNetwork, policy, now, gasCeilingMist);
   }
   return validateLegacyEnvelope(envelope, signerAddress, signerNetwork, policy, now, gasCeilingMist);
+}
+
+/**
+ * Manifest-gated signer policy: validates an envelope against the REDESIGNED agent_wallet package's
+ * Rule + Hot Potato spend flow (`request_spend` -> one `<module>::prove` per attached on-chain rule
+ * -> `confirm_spend`). Shares no code with validateLegacyEnvelope/validateGenericEnvelope by design
+ * (same reasoning as the generic/legacy split above) — every "keep verbatim" universal invariant
+ * below is reproduced with IDENTICAL logic and error text to its legacy/generic twin.
+ *
+ * `protocol_scope`/`asset_scope`/`recipient_allowlist`/`slippage_floor` are PRE-FLIGHT rules (not
+ * proved on-chain — see capability-manifest.ts's `CAP_ENFORCEMENT_BY_KIND` doc comment): the signer
+ * re-verifies all four independently from the actual PTB bytes below, mirroring (but never trusting)
+ * rill-backend's compiler-side `enforceManifestPreflight`. `budget`/`per_tx`/`rate_limit`/
+ * `time_window` are on-chain rules instead — their enforcement is the mandatory, ordered `prove`
+ * sequence `inspectManifestGated` structurally requires, not anything checked again here.
+ */
+async function validateManifestEnvelope(
+  envelope: ExecutionEnvelope,
+  signerAddress: string,
+  signerNetwork: RillNetwork,
+  policy: LocalSignerPolicy,
+  now: number,
+  gasCeilingMist: bigint | undefined,
+): Promise<ValidatedEnvelope> {
+  const manifest = policy.capabilityManifest;
+  if (!manifest) {
+    // Unreachable in practice: the dispatcher only calls this function when
+    // policy.capabilityManifest is already defined. This guard exists purely so TypeScript can
+    // narrow `CapabilityManifest | undefined` to `CapabilityManifest` for the rest of this function.
+    throw new Error('Manifest-gated envelope validation requires policy.capabilityManifest.');
+  }
+  if (!policy.versionId) {
+    throw new Error('Manifest-gated local policy requires policy.versionId.');
+  }
+
+  const expiresAt = Date.parse(envelope.expiresAt);
+  if (!Number.isFinite(expiresAt)) throw new Error('ExecutionEnvelope expiresAt is invalid.');
+  if (expiresAt <= now) throw new Error('ExecutionEnvelope expired.');
+  if (expiresAt > now + 5 * 60_000) {
+    throw new Error('ExecutionEnvelope exceeds the five-minute maximum TTL.');
+  }
+  if (envelope.network !== signerNetwork || envelope.network !== policy.network) {
+    throw new Error('ExecutionEnvelope network mismatch.');
+  }
+  if (
+    normalized(envelope.sender) !== normalized(signerAddress) ||
+    normalized(envelope.sender) !== normalized(policy.sender)
+  ) {
+    throw new Error('ExecutionEnvelope sender mismatch.');
+  }
+  if (envelope.actionId !== policy.actionId) throw new Error('ExecutionEnvelope actionId mismatch.');
+
+  // Only the three identity fields every manifest-gated flow shares are pinned here — mirrors
+  // validateGenericEnvelope's identity trio (not the legacy path's five-field set): the redesigned
+  // wallet's request_spend/prove/confirm_spend sequence has no universal balanceManagerId/tradeCapId,
+  // those are per-step (deepbook_limit_order) concerns pinned by the DeepBook step validator itself.
+  const identityPairs: Array<[string, string, string]> = [
+    ['walletPackageId', envelope.walletPackageId, policy.walletPackageId],
+    ['walletId', envelope.walletId, policy.walletId],
+    ['agentCapId', envelope.agentCapId, policy.agentCapId],
+  ];
+  for (const [name, actual, expected] of identityPairs) {
+    if (normalized(actual) !== normalized(expected)) {
+      throw new Error(`ExecutionEnvelope ${name} mismatch.`);
+    }
+  }
+
+  if (!envelope.simulation.ok || envelope.simulation.verification !== 'verified') {
+    throw new Error('ExecutionEnvelope simulation is not a verified success.');
+  }
+  if (gasCeilingMist !== undefined) {
+    const gasEstimateMist = nonNegativeIntegerMist(
+      envelope.simulation.gasEstimate,
+      'ExecutionEnvelope simulation gasEstimate',
+    );
+    if (gasEstimateMist > gasCeilingMist) {
+      throw new Error('ExecutionEnvelope simulation gasEstimate exceeds the local gas ceiling.');
+    }
+  }
+  const requiredGuards = policy.requiredGuards.map(normalizeTarget);
+  if (!sameValues(envelope.requiredGuards.map(normalizeTarget), requiredGuards)) {
+    throw new Error('ExecutionEnvelope required guard policy mismatch.');
+  }
+  if (await digestUnsignedPtb(envelope.unsignedPtb) !== envelope.actionDigest) {
+    throw new Error('ExecutionEnvelope actionDigest mismatch.');
+  }
+
+  let transaction: Transaction;
+  try {
+    transaction = Transaction.from(Buffer.from(envelope.unsignedPtb, 'base64').toString('utf8'));
+  } catch {
+    throw new Error('ExecutionEnvelope unsignedPtb is invalid.');
+  }
+
+  // The signer trusts ITS OWN approved plan (policy.steps), not the backend's envelope.steps, to
+  // drive structural inspection — mirrors validateGenericEnvelope inspecting against `policy` fields,
+  // never `envelope` fields, on principle.
+  const inspected = inspectManifestGated(transaction, {
+    walletPackageId: policy.walletPackageId,
+    walletId: policy.walletId,
+    agentCapId: policy.agentCapId,
+    versionId: policy.versionId,
+    steps: policy.steps ?? [],
+    manifest,
+  });
+  const data = transaction.getData();
+  if (typeof data.sender !== 'string' || normalized(data.sender) !== normalized(envelope.sender)) {
+    throw new Error('PTB sender mismatch.');
+  }
+  for (const guard of requiredGuards) {
+    if (!inspected.targets.includes(guard)) throw new Error(`PTB is missing required guard ${guard}.`);
+  }
+
+  // ── Signer-side manifest verification ──────────────────────────────────────────────────────────
+  // The mirror of rill-backend's compiler-side `enforceManifestPreflight`, computed INDEPENDENTLY
+  // from the PTB bytes `inspectManifestGated` just parsed — the signer never trusts the backend's own
+  // pre-flight check, it re-derives every pre-flight rule from scratch and fails closed (R8: the
+  // signer is the last line of defense, not a rubber stamp for whatever the backend claims it did).
+  const signerPolicy = toSignerPolicy(manifest);
+
+  // protocol_scope: every called package except the wallet package and the Sui framework
+  // (0x1/0x2/0x3) must be in allowedPackages. Deliberately scanned against `inspected.callTargets`
+  // (the RAW, full-PTB command scan), not `inspected.targets` (the narrower, step-attributed subset
+  // inspectManifestGated builds up from stepValidators' own reported targets only) — a step
+  // validator's forward `findFrom` search tolerates an unrelated MoveCall sitting between its cursor
+  // and the fragment it's looking for, so an attacker-injected off-scope call could sit in such a
+  // gap and never be reported by any step validator. `callTargets` cannot be dodged that way: it is
+  // every MoveCall target in the compiled PTB, exactly mirroring rill-backend's `checkProtocolScope`
+  // (`inspectTransaction(tx)`'s full call-target list). Error text style matches the legacy path's
+  // off-scope rejection (`PTB contains off-scope target ${target}.`).
+  if (signerPolicy.allowedPackages) {
+    const allowedPackageIds = new Set(signerPolicy.allowedPackages.map(normalized));
+    const systemPackageIds = new Set([policy.walletPackageId, '0x1', '0x2', '0x3'].map(normalized));
+    const offScopeTarget = inspected.callTargets.find((target) => {
+      const packageId = normalized(target.split('::')[0]);
+      return !systemPackageIds.has(packageId) && !allowedPackageIds.has(packageId);
+    });
+    if (offScopeTarget) throw new Error(`PTB contains off-scope target ${offScopeTarget}.`);
+  }
+
+  // asset_scope: every coin type the PTB moves (every MoveCall typeArgument) must be in
+  // allowedCoinTypes.
+  if (signerPolicy.allowedCoinTypes) {
+    const allowedCoinTypes = new Set(signerPolicy.allowedCoinTypes.map((coinType) => normalizeCoinType(coinType)));
+    const offScopeCoinType = inspected.coinTypes.find((coinType) => !allowedCoinTypes.has(coinType));
+    if (offScopeCoinType) throw new Error(`PTB contains off-scope coin type ${offScopeCoinType}.`);
+  }
+
+  // recipient_allowlist: every TransferObjects recipient must be in allowedRecipients.
+  if (signerPolicy.allowedRecipients) {
+    const allowedRecipients = new Set(signerPolicy.allowedRecipients.map(normalized));
+    const offScopeRecipient = inspected.transferRecipients.find((recipient) => !allowedRecipients.has(recipient));
+    if (offScopeRecipient) throw new Error(`PTB contains off-scope transfer recipient ${offScopeRecipient}.`);
+  }
+
+  // slippage_floor: every on-chain slippage guard's ACTUAL minOut argument — independently re-read
+  // from the PTB bytes here, not trusted from any step's declared minOutMist — must be at/above the
+  // manifest's floor. This is the check capability-manifest.ts's SlippageFloorRuleSchema doc comment
+  // promises: "the signer independently re-checks the actual swap output before countersigning."
+  if (signerPolicy.minSlippageOutMist) {
+    const floorMist = parseU64String(signerPolicy.minSlippageOutMist, 'Local policy manifest minSlippageOutMist');
+    const reader = makeReader(data);
+    for (const command of data.commands) {
+      if (command.$kind !== 'MoveCall' || !targetOf(command).endsWith('::guard::assert_min_value')) continue;
+      const minOutMist = reader.u64(command.MoveCall.arguments[1], 'Cetus guard min value');
+      if (minOutMist < floorMist) {
+        throw new Error('PTB Cetus guard minOut is below the manifest slippage floor.');
+      }
+    }
+  }
+
+  return {
+    transaction,
+    targets: inspected.targets,
+    objectIds: inspected.objectIds,
+    spendAmountMist: inspected.spendAmountMist,
+  };
 }
 
 /**
@@ -731,9 +942,17 @@ export async function assertCapabilitiesActive(
   if (BigInt(now) >= expiresAtMs) {
     throw new Error('AgentWallet has expired.');
   }
-  const perTxMaxMist = parseU64String(readMoveU64(fields, 'per_tx_max'), 'AgentWallet per_tx_max');
-  if (spendAmountMist > perTxMaxMist) {
-    throw new Error('AgentWallet spend exceeds per_tx_max.');
+  // Manifest-gated branch: the REDESIGNED agent_wallet's on-chain object has NO per_tx_max field at
+  // all (per_tx is a Rule, enforced on-chain by `per_tx::prove` — already structurally mandatory in
+  // inspectManifestGated's ordered prove sequence whenever the manifest attaches a per_tx rule, not
+  // something this live pre-sign check could re-read here even if it wanted to). The non-manifest
+  // (legacy/generic) branch below is EXACTLY the prior behavior, unchanged: it still reads the live
+  // v2 wallet's own per_tx_max field.
+  if (policy.capabilityManifest === undefined) {
+    const perTxMaxMist = parseU64String(readMoveU64(fields, 'per_tx_max'), 'AgentWallet per_tx_max');
+    if (spendAmountMist > perTxMaxMist) {
+      throw new Error('AgentWallet spend exceeds per_tx_max.');
+    }
   }
   const remainingMist = parseU64String(readMoveU64(fields, 'budget'), 'AgentWallet budget');
   if (remainingMist < spendAmountMist) throw new Error('AgentWallet balance cannot cover this action.');
@@ -1014,6 +1233,213 @@ export function inspectGeneric(transaction: Transaction, params: InspectGenericP
       return target ? [target] : [];
     }),
     objectIds: [...new Set(objectIds)],
+    guards: [...new Set(guards)],
+    spendAmountMist,
+  };
+}
+
+// ── inspectManifestGated ───────────────────────────────────────────────────────────────────────
+//
+// The manifest-gated counterpart to inspectGeneric, for the REDESIGNED agent_wallet package's Rule +
+// Hot Potato spend flow: `request_spend<T>(wallet, cap, version, amount, clock): SpendRequest` -> one
+// `<module>::prove(req, wallet, version[, clock])` per attached on-chain rule (in the exact order
+// `toOnChainRuleParams` projects the manifest — budget/per_tx/rate_limit/time_window only,
+// rate_limit/time_window take a trailing clock argument) -> `confirm_spend<T>(wallet, req, version,
+// clock): Coin<T>`. `confirm_spend`'s released coin is the funding chokepoint the owner-approved
+// `steps` fund from — mirrors inspectGeneric's single agent_wallet::spend chokepoint, just with the
+// released coin arriving three (or more) commands later than the funding call itself.
+//
+// Not used by validateLegacyEnvelope/validateGenericEnvelope/inspect/inspectGeneric — this function
+// and validateManifestEnvelope are the ONLY consumers, selected solely by policy.capabilityManifest.
+
+export interface InspectManifestGatedParams {
+  walletPackageId: string;
+  walletId: string;
+  agentCapId: string;
+  versionId: string;
+  steps: EnvelopeStep[];
+  manifest: CapabilityManifest;
+}
+
+export function inspectManifestGated(transaction: Transaction, params: InspectManifestGatedParams) {
+  const data = transaction.getData();
+  const reader = makeReader(data);
+
+  // 1. request_spend<T>(wallet, cap, version, amount, clock) — 5 args, walletId/agentCapId/versionId/
+  // clock pinned, amount read as u64. No typeArguments assertion here (unlike the legacy/generic
+  // spend chokepoint): the wallet's coin type is whatever the manifest's asset_scope rule (checked
+  // independently below, in validateManifestEnvelope) allows, not hardcoded to SUI.
+  const requestSpendTarget = normalizeTarget(`${params.walletPackageId}::agent_wallet::request_spend`);
+  const requestSpendIndex = data.commands.findIndex((command) => targetOf(command) === requestSpendTarget);
+  const requestSpend = data.commands[requestSpendIndex];
+  if (!requestSpend || requestSpend.$kind !== 'MoveCall') {
+    throw new Error('PTB is missing the wallet request_spend.');
+  }
+  reader.exactArity(requestSpend.MoveCall.arguments, 5, 'wallet request_spend');
+  expectNormalizedMatch(
+    reader.objectArgument(requestSpend.MoveCall.arguments[0], 'wallet'),
+    params.walletId,
+    'walletId mismatch.',
+  );
+  expectNormalizedMatch(
+    reader.objectArgument(requestSpend.MoveCall.arguments[1], 'cap'),
+    params.agentCapId,
+    'agentCapId mismatch.',
+  );
+  expectNormalizedMatch(
+    reader.objectArgument(requestSpend.MoveCall.arguments[2], 'version'),
+    params.versionId,
+    'versionId mismatch.',
+  );
+  expectNormalizedMatch(
+    reader.objectArgument(requestSpend.MoveCall.arguments[4], 'clock'),
+    '0x6',
+    'clock mismatch.',
+  );
+  const spendAmountMist = reader.u64(requestSpend.MoveCall.arguments[3], 'request_spend amount');
+
+  // 2. One <module>::prove per on-chain manifest rule, in the exact order toOnChainRuleParams
+  // projects the manifest — every prove proves the SAME SpendRequest request_spend returned (taken
+  // by reference, not threaded/reassigned: `prove` mutates the wallet's own on-chain rule state and
+  // returns nothing usable downstream), pinned to the same wallet/version, clock only for
+  // rate_limit/time_window.
+  const onChainRuleModules = toOnChainRuleParams(params.manifest).map((rule) => rule.module);
+  let cursor = requestSpendIndex + 1;
+  for (const module of onChainRuleModules) {
+    const command = data.commands[cursor];
+    const proveTarget = normalizeTarget(`${params.walletPackageId}::${module}::prove`);
+    if (!command || command.$kind !== 'MoveCall' || targetOf(command) !== proveTarget) {
+      throw new Error(`PTB is missing ordered ${module} prove.`);
+    }
+    const needsClock = module === 'rate_limit' || module === 'time_window';
+    reader.exactArity(command.MoveCall.arguments, needsClock ? 4 : 3, `${module} prove`);
+    const requestArgument = command.MoveCall.arguments[0] as { $kind?: string; Result?: number };
+    if (requestArgument.$kind !== 'Result' || requestArgument.Result !== requestSpendIndex) {
+      throw new Error(`PTB ${module} prove does not prove the wallet's own SpendRequest.`);
+    }
+    expectNormalizedMatch(
+      reader.objectArgument(command.MoveCall.arguments[1], `${module} prove wallet`),
+      params.walletId,
+      'walletId mismatch.',
+    );
+    expectNormalizedMatch(
+      reader.objectArgument(command.MoveCall.arguments[2], `${module} prove version`),
+      params.versionId,
+      'versionId mismatch.',
+    );
+    if (needsClock) {
+      expectNormalizedMatch(
+        reader.objectArgument(command.MoveCall.arguments[3], `${module} prove clock`),
+        '0x6',
+        'clock mismatch.',
+      );
+    }
+    cursor += 1;
+  }
+
+  // 3. confirm_spend<T>(wallet, req, version, clock) — 4 args, releases the funding coin. Must
+  // immediately follow the last prove (cursor already sits right after the prove loop above).
+  const confirmSpendIndex = cursor;
+  const confirmSpend = data.commands[confirmSpendIndex];
+  const confirmSpendTarget = normalizeTarget(`${params.walletPackageId}::agent_wallet::confirm_spend`);
+  if (!confirmSpend || confirmSpend.$kind !== 'MoveCall' || targetOf(confirmSpend) !== confirmSpendTarget) {
+    throw new Error('PTB is missing the wallet confirm_spend immediately after its rule proofs.');
+  }
+  reader.exactArity(confirmSpend.MoveCall.arguments, 4, 'wallet confirm_spend');
+  expectNormalizedMatch(
+    reader.objectArgument(confirmSpend.MoveCall.arguments[0], 'confirm_spend wallet'),
+    params.walletId,
+    'walletId mismatch.',
+  );
+  const confirmRequestArgument = confirmSpend.MoveCall.arguments[1] as { $kind?: string; Result?: number };
+  if (confirmRequestArgument.$kind !== 'Result' || confirmRequestArgument.Result !== requestSpendIndex) {
+    throw new Error("PTB confirm_spend does not confirm the wallet's own SpendRequest.");
+  }
+  expectNormalizedMatch(
+    reader.objectArgument(confirmSpend.MoveCall.arguments[2], 'confirm_spend version'),
+    params.versionId,
+    'versionId mismatch.',
+  );
+  expectNormalizedMatch(
+    reader.objectArgument(confirmSpend.MoveCall.arguments[3], 'confirm_spend clock'),
+    '0x6',
+    'clock mismatch.',
+  );
+
+  // 4. Walk the owner-approved steps in order, exactly like inspectGeneric — funded from
+  // confirm_spend's released coin, so `spendIndex` for provenance checks (SplitCoins.coin.Result ===
+  // spendIndex) is confirmSpendIndex, not requestSpendIndex.
+  cursor = confirmSpendIndex + 1;
+  const targets: string[] = [];
+  const objectIds: string[] = [
+    normalized(params.walletId),
+    normalized(params.agentCapId),
+    normalized(params.versionId),
+    normalized('0x6'),
+  ];
+  const guards: string[] = [];
+  for (const step of params.steps) {
+    const validate = stepValidators[step.nodeType];
+    if (!validate) throw new Error(`No validator for step ${step.nodeType}.`);
+    const result = validate({ data, reader, cursor, spendIndex: confirmSpendIndex, spendAmountMist }, step);
+    cursor = result.cursor;
+    targets.push(...result.targets);
+    objectIds.push(...result.objectIds);
+    guards.push(...result.guards);
+  }
+
+  // 5. Universal command manifest + terminal merge-to-gas of the spend remainder — same universal
+  // invariant as inspectGeneric, anchored at confirmSpendIndex instead of the legacy/generic single
+  // spend index. TransferObjects is additionally allowed here (unlike inspectGeneric): the
+  // redesigned flow's settle sweep may transfer a non-SUI settled coin to the sender, which the
+  // recipient_allowlist manifest check below needs to see.
+  const allowedCommands = data.commands.every(
+    (command) =>
+      command.$kind === 'MoveCall'
+      || command.$kind === 'SplitCoins'
+      || command.$kind === 'MergeCoins'
+      || command.$kind === 'TransferObjects',
+  );
+  if (!allowedCommands) throw new Error('PTB has an unsupported command kind.');
+  const mergeIndex = data.commands.findIndex((command) => command.$kind === 'MergeCoins');
+  const merge = data.commands[mergeIndex];
+  const mergeSource = merge?.$kind === 'MergeCoins' ? merge.MergeCoins.sources[0] : undefined;
+  if (
+    merge?.$kind !== 'MergeCoins' ||
+    mergeIndex !== data.commands.length - 1 ||
+    merge.MergeCoins.destination.$kind !== 'GasCoin' ||
+    merge.MergeCoins.sources.length !== 1 ||
+    mergeSource?.$kind !== 'Result' ||
+    mergeSource.Result !== confirmSpendIndex
+  ) {
+    throw new Error('PTB must end by merging only the wallet spend remainder into gas.');
+  }
+
+  // 6. Independent, raw derivations for the manifest checks in validateManifestEnvelope — NOT
+  // trusted from any step's own declarations: every MoveCall's typeArguments (asset_scope) and every
+  // TransferObjects recipient (recipient_allowlist), scanned straight off the parsed PTB.
+  const coinTypes = [...new Set(
+    data.commands.flatMap((command) =>
+      command.$kind === 'MoveCall' ? command.MoveCall.typeArguments.map((value) => normalizeCoinType(value)) : [],
+    ),
+  )];
+  const transferRecipients = [...new Set(
+    data.commands.flatMap((command, index) =>
+      command.$kind === 'TransferObjects'
+        ? [onboardingAddress(data.inputs, command.TransferObjects.address, `TransferObjects command ${index} recipient`)]
+        : [],
+    ),
+  )];
+
+  return {
+    targets: [...new Set(targets)],
+    callTargets: data.commands.flatMap((command) => {
+      const target = targetOf(command);
+      return target ? [target] : [];
+    }),
+    objectIds: [...new Set(objectIds)],
+    coinTypes,
+    transferRecipients,
     guards: [...new Set(guards)],
     spendAmountMist,
   };
