@@ -5,6 +5,15 @@ import { normalizeSuiAddress } from '@mysten/sui/utils';
 import { decimalToBaseUnits, parseU64String } from '../../rill-sdk/src/amounts';
 import { assertExecutionEnvelope, digestUnsignedPtb } from '../../rill-sdk/src/execution-envelope';
 import type { ExecutionEnvelope, RillNetwork } from '../../rill-sdk/src/types';
+import {
+  expectNormalizedMatch,
+  makeReader,
+  normalizeCoinType,
+  normalizeTarget,
+  normalized,
+  SUI_COIN_TYPE,
+  targetOf,
+} from './steps/types';
 
 export interface LocalSignerPolicy {
   version: '1';
@@ -56,41 +65,12 @@ export interface ValidatedEnvelope {
   spendAmountMist: bigint;
 }
 
-const normalized = (value: string) => normalizeSuiAddress(value);
-
-function expectNormalizedMatch(actual: string, expected: string, message: string): void {
-  if (normalized(actual) !== normalized(expected)) {
-    throw new Error(message);
-  }
-}
-
-function normalizeTarget(target: string): string {
-  const [packageId, module, fn, extra] = target.split('::');
-  if (!packageId || !module || !fn || extra) throw new Error(`Invalid Move target ${target}.`);
-  return `${normalized(packageId)}::${module}::${fn}`;
-}
-
 function sameValues(a: readonly string[], b: readonly string[]): boolean {
   if (a.length !== b.length) return false;
   const left = [...a].sort();
   const right = [...b].sort();
   return left.every((value, index) => value === right[index]);
 }
-
-/**
- * Normalizes a simple (non-generic) Move coin type string `address::module::Name` — the shape every
- * coin type in the DeepBook hero flow takes (SUI, DBUSDC, mainnet USDC, ...). Rejects anything with a
- * different arity, e.g. a nested generic like `0x2::coin::Coin<0x2::sui::SUI>`, which this flow never
- * legitimately produces (R10 typeArguments validation).
- */
-function normalizeCoinType(coinType: string): string {
-  const [address, module, name, extra] = coinType.split('::');
-  if (!address || !module || !name || extra) throw new Error(`Invalid coin type ${coinType}.`);
-  return `${normalized(address)}::${module}::${name}`;
-}
-
-/** The DeepBook hero flow always spends/deposits SUI — see the typeArguments checks in inspect(). */
-const SUI_COIN_TYPE = normalizeCoinType('0x2::sui::SUI');
 
 function assertTypeArguments(actual: readonly string[], expected: readonly string[], label: string): void {
   const normalizedActual = actual.map((value) => normalizeCoinType(value));
@@ -153,57 +133,17 @@ function readMoveId(fields: Record<string, unknown>, name: string): string {
 
 function inspect(transaction: Transaction, policy: LocalSignerPolicy) {
   const data = transaction.getData();
-  const targetOf = (command: (typeof data.commands)[number]) => command.$kind === 'MoveCall'
-    ? `${normalized(command.MoveCall.package)}::${command.MoveCall.module}::${command.MoveCall.function}`
-    : '';
+  const reader = makeReader(data);
+  const { objectIdFromInput, objectArgument, u64, byte, exactArity } = reader;
   const targets = data.commands.flatMap((command) => {
     const target = targetOf(command);
     return target ? [target] : [];
   });
   const uniqueTargets = [...new Set(targets)];
-  const objectIdFromInput = (input: (typeof data.inputs)[number]): string | undefined => {
-    if (input.$kind === 'UnresolvedObject') return normalized(input.UnresolvedObject.objectId);
-    if (input.$kind !== 'Object') return undefined;
-    if (input.Object.$kind === 'SharedObject') return normalized(input.Object.SharedObject.objectId);
-    if (input.Object.$kind === 'ImmOrOwnedObject') return normalized(input.Object.ImmOrOwnedObject.objectId);
-    return normalized(input.Object.Receiving.objectId);
-  };
   const objectIds = [...new Set(data.inputs.flatMap((input) => {
     const objectId = objectIdFromInput(input);
     return objectId ? [objectId] : [];
   }))];
-  const inputAt = (argument: unknown, label: string) => {
-    const value = argument as { $kind?: string; Input?: number };
-    if (value.$kind !== 'Input' || value.Input == null) throw new Error(`${label} is not an input.`);
-    const input = data.inputs[value.Input];
-    if (!input) throw new Error(`${label} input is missing.`);
-    return input;
-  };
-  const objectArgument = (argument: unknown, label: string) => {
-    const objectId = objectIdFromInput(inputAt(argument, label));
-    if (!objectId) throw new Error(`${label} is not an object input.`);
-    return objectId;
-  };
-  const pureBytes = (argument: unknown, label: string) => {
-    const input = inputAt(argument, label);
-    if (input.$kind !== 'Pure') throw new Error(`${label} is not pure.`);
-    return Buffer.from(input.Pure.bytes, 'base64');
-  };
-  const u64 = (argument: unknown, label: string) => {
-    const bytes = pureBytes(argument, label);
-    if (bytes.length !== 8) throw new Error(`${label} is not a u64.`);
-    return bytes.readBigUInt64LE();
-  };
-  const byte = (argument: unknown, label: string) => {
-    const bytes = pureBytes(argument, label);
-    if (bytes.length !== 1) throw new Error(`${label} is not a byte.`);
-    return bytes[0];
-  };
-  const exactArity = (arguments_: readonly unknown[], expected: number, label: string) => {
-    if (arguments_.length !== expected) {
-      throw new Error(`${label} must have exactly ${expected} arguments.`);
-    }
-  };
 
   const walletTarget = normalizeTarget(`${policy.walletPackageId}::agent_wallet::spend`);
   const spendIndex = data.commands.findIndex((command) => targetOf(command) === walletTarget);
