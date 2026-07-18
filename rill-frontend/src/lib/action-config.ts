@@ -1,4 +1,8 @@
-import { decimalToBaseUnits, findToken } from "@rill/sdk";
+// Relative import into the workspace SDK source — matches the convention used by rill-backend and
+// rill-signer. The package has no committed build output, so importing by the "@rill/sdk" name would
+// only resolve where a local dist/ happens to exist (it fails in a clean CI install); importing the
+// source directly always resolves and lets the bundler compile it.
+import { decimalToBaseUnits, findToken } from "../../../packages/rill-sdk/src";
 
 /** Testnet protocol manifest — passed in full to backend on every compile/simulate. */
 
