@@ -235,7 +235,10 @@ for (const field of [
 
 test('wrong pool identity is rejected', async () => {
   const value = await envelope();
-  value.resolvedParams.poolId = id(99);
+  // `resolvedParams` is optional on `ExecutionEnvelope` (WS1: the generic `steps` shape has none) —
+  // this legacy-DeepBook fixture always populates it, so the assertion here is just narrowing the
+  // type back down, not a behavior change.
+  value.resolvedParams!.poolId = id(99);
   await expect(validateExecutionEnvelope(value, sender, 'testnet', policy)).rejects.toThrow('poolId');
 });
 

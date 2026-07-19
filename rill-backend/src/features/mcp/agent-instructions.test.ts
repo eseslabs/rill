@@ -68,6 +68,25 @@ test('renders both mcp-add commands and the 4-step tool order', () => {
   assertNoPrivateKeyMaterial(doc);
 });
 
+test('documents one-time local signer setup: auto-generated keypair, address, and funding — honest against the current signer', () => {
+  const doc = renderAgentInstructions(skill);
+
+  // Auto-keypair behavior, verified against packages/rill-signer/src/keystore.ts /core.ts — not
+  // the old SKILL.md's manual-env-var-only story.
+  expect(doc).toContain('.rill/keys/agent-<network>.key');
+  expect(doc).toContain('no manual key setup is required to get started');
+  expect(doc).toContain('`signer_status`');
+  expect(doc).toContain('`request_faucet`');
+
+  // Ordered before the tool sequence section, and before every tool-sequence-section occurrence.
+  const setupIdx = doc.indexOf('## 2. Local signer setup');
+  const sequenceIdx = doc.indexOf('## 3. Tool sequence');
+  expect(setupIdx).toBeGreaterThan(-1);
+  expect(sequenceIdx).toBeGreaterThan(setupIdx);
+
+  assertNoPrivateKeyMaterial(doc);
+});
+
 test('with a manifest (budget + rate_limit + slippage_floor) it declares all three caps honestly', () => {
   const doc = renderAgentInstructions(skill, manifest);
   const declaration = toDeclaration(manifest);

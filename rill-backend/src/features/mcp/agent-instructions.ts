@@ -23,6 +23,12 @@ import { actionTools } from './mcp.service';
  */
 const EXECUTE_TOOL_NAME = 'execute_rill_action';
 
+/** The local `rill-wallet` tools this document references for one-time signer setup — real tools
+ *  registered in `packages/rill-signer/src/mcp.ts`'s `walletTools` (`signer_status`,
+ *  `request_faucet`), same zero-coupling literal convention as `EXECUTE_TOOL_NAME` above. */
+const SIGNER_STATUS_TOOL_NAME = 'signer_status';
+const REQUEST_FAUCET_TOOL_NAME = 'request_faucet';
+
 /** No-wallet honest state (KTD-6) — reused verbatim so every rendering surface says the same thing. */
 export const NO_MANIFEST_DECLARATION =
   'This skill runs without an agent-wallet budget binding — no on-chain spend limit is enforced yet.';
@@ -65,6 +71,32 @@ function renderMcpAddCommands(skill: PublishedSkill): string[] {
 function toolSequence(skill: PublishedSkill): readonly [string, string, string, string] {
   const [listActions, describeAction] = actionTools;
   return [listActions.name, describeAction.name, skill.toolDefs.name, EXECUTE_TOOL_NAME] as const;
+}
+
+/**
+ * One-time local signer setup: how the agent gets a Sui address to build with, and how it funds
+ * that address — the piece the old `packages/rill-signer/SKILL.md` covered (manual
+ * `RILL_SUI_PRIVATE_KEY`) that regressed out of this generated doc. Verified against the CURRENT
+ * signer (`packages/rill-signer/src/keystore.ts`'s `loadOrCreateKeypair`, `src/core.ts`'s
+ * `resolveSignerKeypair`) rather than the old SKILL.md's env-var-only story: today, an explicit
+ * `RILL_SUI_PRIVATE_KEY`/`SUI_PRIVATE_KEY` still wins when set, but absent either one the local
+ * signer generates and persists its OWN keypair on first use — no manual key setup is required to
+ * get started. Named tools (`signer_status`, `request_faucet`) are real entries in
+ * `packages/rill-signer/src/mcp.ts`'s `walletTools`, not invented.
+ */
+function renderSignerSetup(): string[] {
+  return [
+    'The local `rill-wallet` signer holds its own key — Rill Cloud never does. If neither the',
+    '`RILL_SUI_PRIVATE_KEY` nor the `SUI_PRIVATE_KEY` environment variable is set when it starts, it',
+    'generates and persists a keypair on first use (`.rill/keys/agent-<network>.key`, file mode',
+    '0600) — no manual key setup is required to get started.',
+    '',
+    `1. Call local \`${SIGNER_STATUS_TOOL_NAME}\` to read the signer's address, network, and SUI balance.`,
+    '2. Use that address as `sender` on every build call in the tool sequence below.',
+    `3. Fund it before building/executing anything: on testnet, call local \`${REQUEST_FAUCET_TOOL_NAME}\`;`,
+    '   on mainnet, send SUI to the address yourself. Gas alone is enough to build/simulate — the',
+    '   agent-wallet budget (section 4 below) is what actually funds a spend.',
+  ];
 }
 
 function renderToolSequence(skill: PublishedSkill): string[] {
@@ -137,15 +169,19 @@ export function renderAgentInstructions(skill: PublishedSkill, manifest?: Capabi
     '',
     ...renderMcpAddCommands(skill),
     '',
-    '## 2. Tool sequence',
+    '## 2. Local signer setup (one-time)',
+    '',
+    ...renderSignerSetup(),
+    '',
+    '## 3. Tool sequence',
     '',
     ...renderToolSequence(skill),
     '',
-    '## 3. Active guardrails',
+    '## 4. Active guardrails',
     '',
     ...renderGuardrails(manifest),
     '',
-    '## 4. Example agent prompt',
+    '## 5. Example agent prompt',
     '',
     ...renderExamplePrompt(manifest),
     '',

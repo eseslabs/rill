@@ -14,6 +14,14 @@ import { z } from 'zod';
  * and what the previous hand-written `assertExecutionEnvelope` validated — no new fields, no new
  * semantic checks (e.g. `expiresAt`/`actionDigest` stay plain non-empty strings here; format/digest
  * verification is `packages/rill-signer/src/policy.ts`'s job, unchanged by this unit).
+ *
+ * `balanceManagerId`/`tradeCapId`/`resolvedParams` are OPTIONAL (WS1: restoring generic
+ * build_action for Cetus swap / Haedal stake): `runFlow`'s DeepBook branch (exactly one
+ * `deepbook_limit_order` node) still populates all three, byte-identical to before. Its generic
+ * branch (a single `cetus_swap` or `haedal_stake` node) omits all three and populates `steps`
+ * instead. The `.superRefine` below is what still makes the DeepBook trio effectively mandatory on
+ * a DeepBook envelope — an envelope satisfying neither shape (the full trio, or a non-empty `steps`)
+ * fails validation, so "optional" here never means "absent from every real envelope."
  */
 
 // ---- Field-name constants -----------------------------------------------------------------
@@ -186,9 +194,15 @@ export const ExecutionEnvelopeSchema = z.object({
   walletPackageId: nonEmptyString,
   walletId: nonEmptyString,
   agentCapId: nonEmptyString,
-  balanceManagerId: nonEmptyString,
-  tradeCapId: nonEmptyString,
-  resolvedParams: DeepBookResolvedParamsSchema,
+  // OPTIONAL (WS1 generic build_action): the DeepBook-shaped identity of the hero flow.
+  // `runFlow`'s DeepBook branch (exactly one `deepbook_limit_order` node) still populates all three
+  // of these — byte-identical to before — and the `.superRefine` below still requires all three
+  // together whenever `steps` is absent. A Cetus-swap/Haedal-stake envelope built by `runFlow`'s
+  // generic branch omits all three and populates `steps` instead; see the DeepBook-vs-generic
+  // dispatch below.
+  balanceManagerId: nonEmptyString.optional(),
+  tradeCapId: nonEmptyString.optional(),
+  resolvedParams: DeepBookResolvedParamsSchema.optional(),
   allowedTargets: z.array(z.string()),
   requiredObjectIds: z.array(z.string()),
   requiredGuards: z.array(z.string()),
@@ -196,10 +210,32 @@ export const ExecutionEnvelopeSchema = z.object({
   preview: nonEmptyString,
   simulation: StrictSimulationResultSchema,
   expiresAt: nonEmptyString,
-  /** Optional owner-approved step manifest — see the block above. Absent for every envelope the
-   * backend emits today (DeepBook-only); populated once WS1 lands generic multi-step flows. */
+  /** Owner-approved step manifest — see the block above. Populated by `runFlow`'s generic
+   * (non-DeepBook) branch instead of the `balanceManagerId`/`tradeCapId`/`resolvedParams` trio;
+   * absent on every DeepBook envelope, which stays on the original trio instead (unchanged). */
   steps: z.array(StepSchema).min(1).optional(),
-}).strict();
+}).strict().superRefine((envelope, ctx) => {
+  const isDeepBookShaped = envelope.balanceManagerId !== undefined
+    && envelope.tradeCapId !== undefined
+    && envelope.resolvedParams !== undefined;
+  const isStepShaped = envelope.steps !== undefined && envelope.steps.length > 0;
+
+  // Every ExecutionEnvelope must be recognizably ONE of the two shapes this codebase knows how to
+  // validate downstream (the signer's legacy `inspect()` vs. its generic `inspectGeneric()` —
+  // `packages/rill-signer/src/policy.ts`): the original all-three DeepBook trio, or a non-empty
+  // `steps` manifest (enforced `.min(1)` above already; this only adds the "at least one of the two
+  // shapes is present" requirement `.min(1)` alone can't express). An envelope satisfying NEITHER —
+  // e.g. one with `steps` omitted and no DeepBook trio either — is a malformed envelope no signer
+  // path can structurally inspect, so it must fail validation here rather than parse into something
+  // downstream code silently mishandles.
+  if (!isDeepBookShaped && !isStepShaped) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'ExecutionEnvelope must be either DeepBook-shaped (balanceManagerId, tradeCapId, and '
+        + 'resolvedParams all present) or step-shaped (steps present with at least one entry).',
+    });
+  }
+});
 
 export type ExecutionEnvelope = z.infer<typeof ExecutionEnvelopeSchema>;
 export type DeepBookResolvedParams = z.infer<typeof DeepBookResolvedParamsSchema>;

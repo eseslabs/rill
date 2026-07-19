@@ -586,23 +586,39 @@ async function validateLegacyEnvelope(
   }
   if (envelope.actionId !== policy.actionId) throw new Error('ExecutionEnvelope actionId mismatch.');
 
+  // `balanceManagerId`/`tradeCapId`/`resolvedParams` are OPTIONAL on `ExecutionEnvelope` (WS1:
+  // envelope.schema.ts's generic `steps` shape has none of the three) — this function is the
+  // DeepBook-only legacy path, dispatched to whenever `envelope.steps`/`policy.steps` aren't BOTH
+  // present (see `validateExecutionEnvelope`'s dispatcher). That includes the mismatched case of a
+  // step-shaped envelope validated against a non-step-shaped policy, which has no DeepBook trio to
+  // read — fail closed with a clear message instead of crashing on an undefined property access.
+  // Destructured into local consts (not `envelope.foo` narrowing) so the narrowing survives every
+  // `await` below.
+  const { balanceManagerId, tradeCapId, resolvedParams } = envelope;
+  if (balanceManagerId === undefined || tradeCapId === undefined || resolvedParams === undefined) {
+    throw new Error(
+      'ExecutionEnvelope is missing the DeepBook balanceManagerId/tradeCapId/resolvedParams fields '
+        + 'this local policy requires (it has no `steps` plan to validate against instead).',
+    );
+  }
+
   const identityPairs: Array<[string, string, string]> = [
     ['walletPackageId', envelope.walletPackageId, policy.walletPackageId],
     ['walletId', envelope.walletId, policy.walletId],
     ['agentCapId', envelope.agentCapId, policy.agentCapId],
-    ['balanceManagerId', envelope.balanceManagerId, policy.balanceManagerId],
-    ['tradeCapId', envelope.tradeCapId, policy.tradeCapId],
+    ['balanceManagerId', balanceManagerId, policy.balanceManagerId],
+    ['tradeCapId', tradeCapId, policy.tradeCapId],
   ];
   for (const [name, actual, expected] of identityPairs) {
     if (normalized(actual) !== normalized(expected)) {
       throw new Error(`ExecutionEnvelope ${name} mismatch.`);
     }
   }
-  if (normalized(envelope.resolvedParams.poolId) !== normalized(policy.poolId)) {
+  if (normalized(resolvedParams.poolId) !== normalized(policy.poolId)) {
     throw new Error('ExecutionEnvelope poolId mismatch.');
   }
   for (const [name, expected] of Object.entries(policy.demoParams)) {
-    const actual = envelope.resolvedParams[name as keyof ExecutionEnvelope['resolvedParams']];
+    const actual = resolvedParams[name as keyof typeof resolvedParams];
     if (typeof expected === 'number' && typeof actual === 'number') {
       if (nineDecimalUnits(actual, `resolved ${name}`) !== nineDecimalUnits(expected, `policy demoParams ${name}`)) {
         throw new Error(`ExecutionEnvelope resolved ${name} mismatch.`);
@@ -676,7 +692,7 @@ async function validateLegacyEnvelope(
     throw new Error('PTB object policy must contain exactly the fixed hero objects and Sui clock.');
   }
   const resolvedSpend = parseU64String(
-    envelope.resolvedParams.spendAmountMist,
+    resolvedParams.spendAmountMist,
     'ExecutionEnvelope resolved spendAmountMist',
   );
   if (inspected.spendAmountMist !== resolvedSpend) {

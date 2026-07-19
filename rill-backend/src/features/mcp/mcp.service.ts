@@ -2,9 +2,11 @@ import { mainnetPackageIds, mainnetPools, testnetPackageIds, testnetPools } from
 import { skillsStore, type PublishedSkill } from './skills.store';
 import { skillRunnerService } from './skill-runner.service';
 import { config } from '../../core/config';
+import { CETUS, HAEDAL, SUI_CLOCK_ID } from '../../core/protocols';
 import { normalizeAgentWallet, type AgentWalletBinding } from '../../core/agent-wallet';
 import type { CapabilityManifest } from '../../../../packages/rill-sdk/src/capability-manifest';
 import {
+  actionKindOf,
   buildActionInputSchema,
   HERO_ACTION_DESCRIPTION,
 } from './tool-schema';
@@ -145,6 +147,110 @@ function readBuildActionArgs(args: Record<string, unknown>, skillId: string) {
     sender,
     agentWallet,
     params: args.params,
+  };
+}
+
+/** `describe_action`'s AgentWallet PROVISIONING schema (budget/per-tx/expiry/clientOrderId) —
+ *  action-agnostic: every action shares the same wallet-setup shape (`/setup/prepare` accepts
+ *  `clientOrderId` regardless of the eventual action; it is simply unused by a flow that never
+ *  places a DeepBook order). */
+function describeActionSetupSchema() {
+  return {
+    type: 'object',
+    properties: {
+      budgetMist: { type: 'string', description: 'Total wallet budget in MIST.' },
+      perTxMist: { type: 'string', description: 'Maximum spend per transaction in MIST.' },
+      minimumRemainingMist: { type: 'string', description: 'Minimum remaining budget in MIST.' },
+      expiresAtMs: { type: 'string', description: 'Wallet expiration timestamp in milliseconds.' },
+      clientOrderId: { type: 'string', description: 'Unique u64 client order ID.' },
+    },
+    required: ['budgetMist', 'perTxMist'],
+    additionalProperties: false,
+  };
+}
+
+/**
+ * Honest, action-appropriate `describe_action` metadata (targets, required public objects, and any
+ * action-specific defaults) — derived from `skill.flow` via `actionKindOf` (`tool-schema.ts`, the
+ * SAME dispatch `skill-runner.service.ts`'s `runFlow` and `buildRuntimeParamsSchema` use), so a
+ * Cetus swap skill is never described with DeepBook fields (BalanceManager/TradeCap/poolKey) and a
+ * Haedal stake skill never claims a DeepBook pool. DeepBook's branch is byte-identical to what this
+ * endpoint always returned.
+ */
+function describeActionMetadata(skill: PublishedSkill, walletPackageId: string) {
+  const kind = actionKindOf(skill.flow);
+
+  if (kind === 'cetus_swap') {
+    const guardTarget = config.guardPackageId
+      ? `${config.guardPackageId}::guard::assert_min_value`
+      : undefined;
+    return {
+      cetusPackageId: CETUS.integratePackageId,
+      defaultPoolId: CETUS.defaultPoolId,
+      requiredTargets: [
+        `${walletPackageId}::agent_wallet::request_spend`,
+        `${walletPackageId}::agent_wallet::confirm_spend`,
+        `${CETUS.integratePackageId}::router::swap`,
+        ...(guardTarget ? [guardTarget] : []),
+      ],
+      requiredPublicObjects: [
+        { role: 'AgentWallet', source: 'agentWallet.walletId' },
+        { role: 'AgentCap', source: 'agentWallet.capId' },
+        { role: 'CetusPool', source: "params.pool, defaulting to the published skill's pool" },
+        { role: 'Clock', objectId: SUI_CLOCK_ID },
+      ],
+      requiredGuards: guardTarget ? [guardTarget] : [],
+    };
+  }
+
+  if (kind === 'haedal_stake') {
+    return {
+      haedalPackageId: HAEDAL.packageId,
+      requiredTargets: [
+        `${walletPackageId}::agent_wallet::request_spend`,
+        `${walletPackageId}::agent_wallet::confirm_spend`,
+        HAEDAL.stakeTarget,
+      ],
+      requiredPublicObjects: [
+        { role: 'AgentWallet', source: 'agentWallet.walletId' },
+        { role: 'AgentCap', source: 'agentWallet.capId' },
+        { role: 'SuiSystemState', objectId: HAEDAL.suiSystemStateId },
+        { role: 'HaedalStakingObject', objectId: HAEDAL.stakingObjectId },
+        { role: 'Clock', objectId: SUI_CLOCK_ID },
+      ],
+      requiredGuards: [],
+    };
+  }
+
+  const deepbookPackageId = (
+    config.network === 'testnet' ? testnetPackageIds : mainnetPackageIds
+  ).DEEPBOOK_PACKAGE_ID;
+  const defaultPoolKey = config.network === 'testnet' ? 'SUI_DBUSDC' : 'SUI_USDC';
+  const defaultPoolId = (config.network === 'testnet' ? testnetPools : mainnetPools)[defaultPoolKey]?.address ?? '';
+  return {
+    deepbookPackageId,
+    defaultPoolKey,
+    defaultPoolId,
+    // There is ONE agent_wallet package now (the manifest-gated Rule + Hot Potato design) — a
+    // compiled build_action PTB always calls request_spend/confirm_spend, never the retired
+    // legacy spend(). (Any per-manifest-rule `prove` calls aren't listed here: this discovery
+    // response can't know the caller's capability manifest ahead of time.)
+    requiredTargets: [
+      `${walletPackageId}::agent_wallet::request_spend`,
+      `${walletPackageId}::agent_wallet::confirm_spend`,
+      `${deepbookPackageId}::balance_manager::deposit`,
+      `${deepbookPackageId}::balance_manager::generate_proof_as_trader`,
+      `${deepbookPackageId}::pool::place_limit_order`,
+    ],
+    requiredPublicObjects: [
+      { role: 'AgentWallet', source: 'agentWallet.walletId' },
+      { role: 'AgentCap', source: 'agentWallet.capId' },
+      { role: 'BalanceManager', source: 'params.balanceManagerId' },
+      { role: 'TradeCap', source: 'params.tradeCapId' },
+      { role: 'DeepBookPool', source: 'params.poolKey resolved on the selected network' },
+      { role: 'Clock', objectId: SUI_CLOCK_ID },
+    ],
+    requiredGuards: [],
   };
 }
 
@@ -289,11 +395,6 @@ export async function handleMcpJsonRpc(
           return toolError(id, 'action_unavailable', 'Action is not available from this endpoint.');
         }
         const walletPackageId = config.agentWallet?.packageId ?? '<agentWallet.packageId>';
-        const deepbookPackageId = (
-          config.network === 'testnet' ? testnetPackageIds : mainnetPackageIds
-        ).DEEPBOOK_PACKAGE_ID;
-        const defaultPoolKey = config.network === 'testnet' ? 'SUI_DBUSDC' : 'SUI_USDC';
-        const defaultPoolId = (config.network === 'testnet' ? testnetPools : mainnetPools)[defaultPoolKey]?.address ?? '';
         return toolResult(id, {
           actionId: skill.id,
           name: skill.name,
@@ -302,42 +403,9 @@ export async function handleMcpJsonRpc(
           runtimeParameters: skill.toolDefs.inputSchema.properties.params,
           agentWallet: skill.toolDefs.inputSchema.properties.agentWallet,
           requiresSetup: true,
-          setupSchema: {
-            type: 'object',
-            properties: {
-              budgetMist: { type: 'string', description: 'Total wallet budget in MIST.' },
-              perTxMist: { type: 'string', description: 'Maximum spend per transaction in MIST.' },
-              minimumRemainingMist: { type: 'string', description: 'Minimum remaining budget in MIST.' },
-              expiresAtMs: { type: 'string', description: 'Wallet expiration timestamp in milliseconds.' },
-              clientOrderId: { type: 'string', description: 'Unique u64 client order ID.' },
-            },
-            required: ['budgetMist', 'perTxMist'],
-            additionalProperties: false,
-          },
+          setupSchema: describeActionSetupSchema(),
           walletPackageId,
-          deepbookPackageId,
-          defaultPoolKey,
-          defaultPoolId,
-          // There is ONE agent_wallet package now (the manifest-gated Rule + Hot Potato design) — a
-          // compiled build_action PTB always calls request_spend/confirm_spend, never the retired
-          // legacy spend(). (Any per-manifest-rule `prove` calls aren't listed here: this discovery
-          // response can't know the caller's capability manifest ahead of time.)
-          requiredTargets: [
-            `${walletPackageId}::agent_wallet::request_spend`,
-            `${walletPackageId}::agent_wallet::confirm_spend`,
-            `${deepbookPackageId}::balance_manager::deposit`,
-            `${deepbookPackageId}::balance_manager::generate_proof_as_trader`,
-            `${deepbookPackageId}::pool::place_limit_order`,
-          ],
-          requiredPublicObjects: [
-            { role: 'AgentWallet', source: 'agentWallet.walletId' },
-            { role: 'AgentCap', source: 'agentWallet.capId' },
-            { role: 'BalanceManager', source: 'params.balanceManagerId' },
-            { role: 'TradeCap', source: 'params.tradeCapId' },
-            { role: 'DeepBookPool', source: 'params.poolKey resolved on the selected network' },
-            { role: 'Clock', objectId: '0x6' },
-          ],
-          requiredGuards: [],
+          ...describeActionMetadata(skill, walletPackageId),
           simulationRule: 'Rill Cloud and rill-wallet both require a verified successful simulation.',
           signingRule: 'Only local rill-wallet.execute_rill_action may validate, re-simulate, sign, and submit.',
         });

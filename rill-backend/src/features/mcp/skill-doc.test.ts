@@ -39,4 +39,74 @@ test('documents the bounded remote and local MCP handoff', () => {
   expect(doc).toContain('call `create_run_set`');
   expect(doc).toContain('call `request_faucet`');
   expect(doc).toContain('call `build_action` and then `execute_rill_action`');
+
+  // Educational sections restored on top of the operational ones (coordinator addendum).
+  expect(doc).toContain('## Parameters');
+  expect(doc).toContain('## Run it');
+  expect(doc).toContain('## Signing');
+  expect(doc).toContain('## Safety');
+  expect(doc).toContain('9. Query digest, the DeepBook limit order outcome, wallet Spent event, and remaining budget.');
+});
+
+test('a Cetus swap skill is described as a swap throughout — never "DeepBook order"', () => {
+  const skill = {
+    id: 'skill_swap_doc',
+    name: 'Cetus swap',
+    description: 'Build one wallet-bound Cetus swap for strict local execution.',
+    flow: { nodes: [{ id: 'swap', type: 'cetus_swap' }], edges: [] },
+    toolDefs: buildToolDefs({ nodes: [{ id: 'swap', type: 'cetus_swap' }], edges: [] }, 'skill_swap_doc'),
+    createdAt: '2026-07-18T00:00:00.000Z',
+  } satisfies PublishedSkill;
+  const doc = buildSkillDoc(skill);
+
+  expect(doc).not.toContain('DeepBook');
+  expect(doc).toContain('- `amount_in`');
+  expect(doc).toContain('- `min_amount_out`');
+  expect(doc).not.toContain('- `poolKey`');
+  expect(doc).not.toContain('- `balanceManagerId`');
+  expect(doc).toContain('9. Query digest, the Cetus swap outcome, wallet Spent event, and remaining budget.');
+  expect(doc).toContain('Build one Cetus swap — pick one:');
+});
+
+test('a Haedal stake skill is described as a stake throughout — never "DeepBook order"', () => {
+  const skill = {
+    id: 'skill_stake_doc',
+    name: 'Haedal stake',
+    description: 'Build one wallet-bound Haedal stake for strict local execution.',
+    flow: { nodes: [{ id: 'stake', type: 'haedal_stake' }], edges: [] },
+    toolDefs: buildToolDefs({ nodes: [{ id: 'stake', type: 'haedal_stake' }], edges: [] }, 'skill_stake_doc'),
+    createdAt: '2026-07-18T00:00:00.000Z',
+  } satisfies PublishedSkill;
+  const doc = buildSkillDoc(skill);
+
+  expect(doc).not.toContain('DeepBook');
+  expect(doc).toContain('- `amount`');
+  expect(doc).not.toContain('- `poolKey`');
+  expect(doc).toContain('9. Query digest, the Haedal stake outcome, wallet Spent event, and remaining budget.');
+  expect(doc).toContain('Build one Haedal stake — pick one:');
+});
+
+test('a chained Cetus-swap -> Haedal-stake flow ("swap then stake") renders correctly', () => {
+  const skill = {
+    id: 'skill_combo_doc',
+    name: 'Cetus swap → Haedal stake',
+    description: 'Build one wallet-bound Cetus swap chained into a Haedal stake for strict local execution.',
+    flow: {
+      nodes: [
+        { id: 'swap', type: 'cetus_swap' },
+        { id: 'stake', type: 'haedal_stake' },
+      ],
+      edges: [{ source: 'swap', sourceHandle: 'coin_out', target: 'stake', targetHandle: 'sui_coin' }],
+    },
+    toolDefs: buildToolDefs({
+      nodes: [{ id: 'swap', type: 'cetus_swap' }, { id: 'stake', type: 'haedal_stake' }],
+      edges: [],
+    }, 'skill_combo_doc'),
+    createdAt: '2026-07-18T00:00:00.000Z',
+  } satisfies PublishedSkill;
+  const doc = buildSkillDoc(skill);
+
+  expect(doc).toContain('Cetus swap → Haedal stake');
+  expect(doc).toContain('## Parameters');
+  expect(doc).toContain('## Signing');
 });

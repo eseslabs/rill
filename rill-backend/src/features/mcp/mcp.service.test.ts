@@ -176,6 +176,89 @@ test('describe_action publishes runtime parameters and local signing rules', asy
   expect(JSON.stringify(JSON.parse(result.content[0].text).runtimeParameters)).not.toContain('sender');
 });
 
+// --- Generic (non-DeepBook) describe_action restore: Cetus swap / Haedal stake ----------------
+
+const swapSkill = {
+  id: 'skill_swap',
+  name: 'Cetus swap',
+  description: 'Place one bounded Cetus swap.',
+  flow: { nodes: [{ id: 'swap', type: 'cetus_swap' }], edges: [] },
+  toolDefs: buildToolDefs({ nodes: [{ id: 'swap', type: 'cetus_swap' }], edges: [] }, 'skill_swap'),
+  createdAt: '2026-07-18T00:00:00.000Z',
+} satisfies PublishedSkill;
+
+const stakeSkill = {
+  id: 'skill_stake',
+  name: 'Haedal stake',
+  description: 'Place one bounded Haedal stake.',
+  flow: { nodes: [{ id: 'stake', type: 'haedal_stake' }], edges: [] },
+  toolDefs: buildToolDefs({ nodes: [{ id: 'stake', type: 'haedal_stake' }], edges: [] }, 'skill_stake'),
+  createdAt: '2026-07-18T00:00:00.000Z',
+} satisfies PublishedSkill;
+
+test('describe_action returns swap-appropriate params and targets for a Cetus swap skill — never DeepBook fields', async () => {
+  const response = await handleMcpJsonRpc('skill_swap', {
+    jsonrpc: '2.0',
+    id: 20,
+    method: 'tools/call',
+    params: { name: 'describe_action', arguments: { actionId: swapSkill.id } },
+  }, {
+    getSkill: () => swapSkill,
+    runFlow: async () => { throw new Error('not called'); },
+  });
+  const result = response?.result as { content: [{ text: string }]; isError: boolean };
+  const body = JSON.parse(result.content[0].text) as Record<string, unknown>;
+  const buildSchema = swapSkill.toolDefs.inputSchema as ReturnType<typeof buildToolDefs>['inputSchema'];
+
+  expect(result.isError).toBe(false);
+  expect(body.runtimeParameters).toEqual(buildSchema.properties.params);
+  expect(Object.keys((body.runtimeParameters as { properties: object }).properties)).toEqual([
+    'amount_in', 'min_amount_out', 'pool',
+  ]);
+  expect(body.cetusPackageId).toBeTruthy();
+  expect(typeof body.cetusPackageId).toBe('string');
+  expect(body.requiredTargets).toEqual(
+    expect.arrayContaining([expect.stringContaining('::router::swap')]),
+  );
+  expect(body.requiredPublicObjects).toEqual(
+    expect.arrayContaining([{ role: 'CetusPool', source: "params.pool, defaulting to the published skill's pool" }]),
+  );
+  // Never DeepBook-shaped for a swap skill (honesty requirement).
+  expect(body).not.toHaveProperty('deepbookPackageId');
+  expect(body).not.toHaveProperty('defaultPoolKey');
+  expect(body).not.toHaveProperty('haedalPackageId');
+  expect(JSON.stringify(body.requiredPublicObjects)).not.toContain('BalanceManager');
+  expect(JSON.stringify(body.requiredPublicObjects)).not.toContain('TradeCap');
+});
+
+test('describe_action returns stake-appropriate params and targets for a Haedal stake skill — never DeepBook fields', async () => {
+  const response = await handleMcpJsonRpc('skill_stake', {
+    jsonrpc: '2.0',
+    id: 21,
+    method: 'tools/call',
+    params: { name: 'describe_action', arguments: { actionId: stakeSkill.id } },
+  }, {
+    getSkill: () => stakeSkill,
+    runFlow: async () => { throw new Error('not called'); },
+  });
+  const result = response?.result as { content: [{ text: string }]; isError: boolean };
+  const body = JSON.parse(result.content[0].text) as Record<string, unknown>;
+  const buildSchema = stakeSkill.toolDefs.inputSchema as ReturnType<typeof buildToolDefs>['inputSchema'];
+
+  expect(result.isError).toBe(false);
+  expect(body.runtimeParameters).toEqual(buildSchema.properties.params);
+  expect(Object.keys((body.runtimeParameters as { properties: object }).properties)).toEqual(['amount']);
+  expect(body.haedalPackageId).toBeTruthy();
+  expect(body.requiredTargets).toEqual(
+    expect.arrayContaining([expect.stringContaining('::interface::request_stake')]),
+  );
+  expect(body).not.toHaveProperty('deepbookPackageId');
+  expect(body).not.toHaveProperty('defaultPoolKey');
+  expect(body).not.toHaveProperty('cetusPackageId');
+  expect(JSON.stringify(body.requiredPublicObjects)).not.toContain('BalanceManager');
+  expect(JSON.stringify(body.requiredPublicObjects)).not.toContain('TradeCap');
+});
+
 test('build_action uses the per-call public AgentWallet binding', async () => {
   let received: unknown[] = [];
   const params = {
