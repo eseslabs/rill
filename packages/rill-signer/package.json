@@ -5,14 +5,23 @@
   "type": "module",
   "description": "Local signer for policy-validated Rill ExecutionEnvelopes. Raw rill-sign --unsafe-ptb execution is development-only.",
   "bin": {
+    "rill-wallet": "./src/mcp.ts",
     "rill-signer-mcp": "./src/mcp.ts",
     "rill-sign": "./src/cli.ts"
   },
+  "files": [
+    "src",
+    "README.md"
+  ],
   "scripts": {
     "mcp": "bun run src/mcp.ts",
     "check": "tsc --noEmit -p tsconfig.json",
     "test": "bun test",
-    "test:live": "bun run scripts/mcp-live-test.ts"
+    "test:live": "bun run scripts/mcp-live-test.ts",
+    "build:mcp": "bun build --compile ./src/mcp.ts --outfile dist/rill-wallet",
+    "build:mcp:mac-arm": "bun build --compile --target=bun-darwin-arm64 ./src/mcp.ts --outfile dist/rill-wallet-darwin-arm64",
+    "build:mcp:mac-x64": "bun build --compile --target=bun-darwin-x64 ./src/mcp.ts --outfile dist/rill-wallet-darwin-x64",
+    "build:mcp:linux-x64": "bun build --compile --target=bun-linux-x64 ./src/mcp.ts --outfile dist/rill-wallet-linux-x64"
   },
   "dependencies": {
     "@mysten/sui": "^2.19.0"
