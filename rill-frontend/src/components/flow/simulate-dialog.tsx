@@ -1,5 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
-import { Loader2, Check, AlertTriangle, Activity, ShieldOff } from "lucide-react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
+import {
+  Loader2,
+  Check,
+  AlertTriangle,
+  Activity,
+  ShieldOff,
+  ShieldCheck,
+  KeyRound,
+  type LucideIcon,
+} from "lucide-react";
 import type { Edge, Node } from "reactflow";
 import type { ActionNodeData, GuardrailNodeData } from "./nodes";
 import { buildFlowGraph } from "@/lib/flow-mapper";
@@ -195,56 +204,92 @@ export function SimulateDialog({
             Enforced at execution
           </div>
           <p className="mt-1 text-xs text-muted-foreground">
-            Read-only — what actually runs, not a toggle. Spend caps and the swap slippage floor are
-            wallet-level, set in <strong>Capabilities</strong>; a guardrail below is a legacy node
-            from an older draft — there's no way to add a new one.
+            What actually runs — read-only, not a toggle.
           </p>
-          <div className="mt-3 space-y-1.5">
-            {guardrailNodes.length === 0 && (
-              <p className="rounded-lg border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
-                No legacy guardrail nodes on this flow — the swap slippage floor is a wallet-level
-                cap in Capabilities.
-              </p>
-            )}
-            {guardrailNodes.map((n) => {
-              const gData = n.data as GuardrailNodeData;
-              const valid = isGuardrailMinValueValid(gData.minValue);
-              return (
-                <div
-                  key={n.id}
-                  className={`rounded-lg border px-3 py-2 text-xs ${
-                    valid
-                      ? "border-border bg-background/60"
-                      : "border-destructive/40 bg-destructive/5"
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-medium">Guardrail</span>
-                    {!valid && (
-                      <span className="inline-flex items-center gap-1 text-[10px] text-destructive">
-                        <ShieldOff className="h-3 w-3" /> not enforced
-                      </span>
-                    )}
+
+          <div className="mt-3 space-y-2">
+            <EnforceRow icon={KeyRound} tone="sky" title="Keyless & unsigned">
+              Rill returns an <strong>unsigned PTB</strong>. Only your local signer signs and submits
+              — the backend never holds keys.
+            </EnforceRow>
+            <EnforceRow icon={ShieldCheck} tone="mint" title="Wallet capabilities">
+              Spend caps and the swap slippage floor are wallet-level, enforced by the Rill compiler
+              and the on-chain agent_wallet. Tune them in <strong>Capabilities</strong>.
+            </EnforceRow>
+            <EnforceRow icon={AlertTriangle} tone="amber" title="No wallet bound in this dry-run">
+              This preview isn't tied to an on-chain agent_wallet yet, so budget/rate caps aren't
+              proven here — they're enforced by the signer and wallet at execution time.
+            </EnforceRow>
+          </div>
+
+          {guardrailNodes.length > 0 && (
+            <div className="mt-3 space-y-1.5">
+              <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                Legacy guardrails
+              </div>
+              {guardrailNodes.map((n) => {
+                const gData = n.data as GuardrailNodeData;
+                const valid = isGuardrailMinValueValid(gData.minValue);
+                return (
+                  <div
+                    key={n.id}
+                    className={`rounded-lg border px-3 py-2 text-xs ${
+                      valid ? "border-border bg-background/60" : "border-destructive/40 bg-destructive/5"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium">Guardrail</span>
+                      {!valid && (
+                        <span className="inline-flex items-center gap-1 text-[10px] text-destructive">
+                          <ShieldOff className="h-3 w-3" /> not enforced
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-1 font-mono text-[11px] text-muted-foreground">
+                      min {gData.minValue?.trim() ? gData.minValue : "(unset)"} ·{" "}
+                      {coinSymbol(gData.coinType)}
+                    </div>
                   </div>
-                  <div className="mt-1 font-mono text-[11px] text-muted-foreground">
-                    min {gData.minValue?.trim() ? gData.minValue : "(unset)"} ·{" "}
-                    {coinSymbol(gData.coinType)}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-          <div className="mt-4 rounded-xl bg-sky/30 text-sky-foreground p-3 text-[11px]">
-            Rill returns an <strong>unsigned PTB</strong> — keyless backend. Thiny signs and
-            submits; agent_wallet enforces budget on-chain.
-          </div>
-          <div className="mt-2 rounded-xl bg-amber-400/10 border border-amber-400/30 text-amber-800 dark:text-amber-300 p-3 text-[11px]">
-            This flow runs without an agent-wallet budget binding — the builder can't attach an{" "}
-            <code>agentWallet</code> id yet, so execution isn't capped by an on-chain spend policy
-            beyond what's wired above.
-          </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       </div>
     </DialogShell>
+  );
+}
+
+const ENFORCE_TONE: Record<"sky" | "mint" | "amber", string> = {
+  sky: "bg-sky/30 text-sky-foreground",
+  mint: "bg-mint/50 text-mint-foreground",
+  amber: "bg-amber-400/20 text-amber-700 dark:text-amber-300",
+};
+
+/** One scannable "what's enforced" row: a tinted icon chip + a titled explanation. Replaces the
+ *  old stack of full-width colored callout boxes that read as cluttered. */
+function EnforceRow({
+  icon: Icon,
+  tone,
+  title,
+  children,
+}: {
+  icon: LucideIcon;
+  tone: "sky" | "mint" | "amber";
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex gap-2.5 rounded-xl border border-border/60 bg-background/40 p-3">
+      <span
+        className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-lg ${ENFORCE_TONE[tone]}`}
+      >
+        <Icon className="h-3.5 w-3.5" />
+      </span>
+      <div className="min-w-0 text-[11px] leading-relaxed">
+        <div className="font-medium text-foreground">{title}</div>
+        <p className="text-muted-foreground">{children}</p>
+      </div>
+    </div>
   );
 }

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import gsap from "gsap";
 import { toast } from "sonner";
-import { Check, Loader2 } from "lucide-react";
+import { Check, Loader2, Server, FileText, Sparkles } from "lucide-react";
 import type { Edge, Node } from "reactflow";
 import { DialogShell } from "@/components/flow/dialog-shell";
 import { FlowWarningsBanner } from "@/components/flow/flow-warnings";
@@ -210,10 +210,45 @@ export function ExportDialog({
 
         {!publishing && !published && (
           <motion.div variants={stagger} initial="hidden" animate="show" className="space-y-4">
-            <motion.p variants={fadeUp} className="text-sm">
-              <span className="text-muted-foreground">Flow: </span>
-              {flowSummary || "No supported actions on this canvas yet."}
-            </motion.p>
+            <motion.div variants={fadeUp}>
+              <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                This flow
+              </div>
+              <p className="mt-1 text-sm font-medium text-foreground">
+                {flowSummary || "No supported actions on this canvas yet."}
+              </p>
+            </motion.div>
+
+            <motion.div
+              variants={fadeUp}
+              className="space-y-2.5 rounded-xl border border-border/60 bg-muted/30 p-3.5"
+            >
+              <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+                <Sparkles className="h-3 w-3" /> Publishing creates
+              </div>
+              <div className="flex gap-2.5">
+                <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-mint/50 text-mint-foreground">
+                  <Server className="h-3.5 w-3.5" />
+                </span>
+                <div className="text-[11px] leading-relaxed">
+                  <div className="font-medium text-foreground">MCP server</div>
+                  <p className="text-muted-foreground">
+                    A live endpoint agents call — every build is bounded by your wallet capabilities.
+                  </p>
+                </div>
+              </div>
+              <div className="flex gap-2.5">
+                <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-sky/40 text-sky-foreground">
+                  <FileText className="h-3.5 w-3.5" />
+                </span>
+                <div className="text-[11px] leading-relaxed">
+                  <div className="font-medium text-foreground">SKILL.md + agent instructions</div>
+                  <p className="text-muted-foreground">
+                    Paste-ready docs any agent reads to wire up the same MCP URL.
+                  </p>
+                </div>
+              </div>
+            </motion.div>
 
             {staleRecord && (
               <motion.div
