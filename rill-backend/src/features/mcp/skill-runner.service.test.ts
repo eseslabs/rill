@@ -220,7 +220,7 @@ test('rejects an empty flow — neither a DeepBook order nor a supported generic
         coinType: '0x2::sui::SUI',
       },
     },
-  )).rejects.toThrow('build_action requires exactly one supported action node');
+  )).rejects.toThrow('build_action supports either exactly one supported action node');
 });
 
 test('rejects action builds with multiple DeepBook limit orders', async () => {
@@ -494,7 +494,7 @@ test('generic Cetus swap build refuses a failed simulation the same way DeepBook
   }
 });
 
-test('rejects a combo Cetus-swap + Haedal-stake flow (generic path handles exactly one action node)', async () => {
+test('rejects an UNCONNECTED Cetus-swap + Haedal-stake pair (two action nodes with no chaining edge)', async () => {
   await expect(new SkillRunnerService().runFlow(
     {
       nodes: [
@@ -514,5 +514,228 @@ test('rejects a combo Cetus-swap + Haedal-stake flow (generic path handles exact
         coinType: '0x2::sui::SUI',
       },
     },
-  )).rejects.toThrow('build_action requires exactly one supported action node');
+  )).rejects.toThrow('build_action supports either exactly one supported action node');
+});
+
+test('rejects a flow with two Cetus swaps and no Haedal stake (not a recognized shape)', async () => {
+  await expect(new SkillRunnerService().runFlow(
+    {
+      nodes: [
+        { id: 'swap-1', type: 'cetus_swap', config: { amount_in: '1000000000', min_amount_out: '1' } },
+        { id: 'swap-2', type: 'cetus_swap', config: { amount_in: '1000000000', min_amount_out: '1' } },
+      ],
+      edges: [],
+    },
+    {},
+    {
+      actionId: 'skill_two_swaps',
+      sender: objectId(1),
+      agentWallet: {
+        packageId: objectId(2),
+        walletId: objectId(3),
+        capId: objectId(4),
+        coinType: '0x2::sui::SUI',
+      },
+    },
+  )).rejects.toThrow('build_action supports either exactly one supported action node');
+});
+
+// --- Combo: Cetus swap -> Haedal stake chain --------------------------------------------------
+// The compiler already compiles this coin chain (cetus.adapter.ts's `feedsHaedal` wiring — the
+// same path /simulate exercises); `runFlow` only needed to build a multi-entry `steps` envelope
+// from it.
+
+test('builds a two-step ExecutionEnvelope for a Cetus-swap -> Haedal-stake chain (combo build_action restore)', async () => {
+  const walletPackageId = objectId(1);
+  const walletId = objectId(2);
+  const agentCapId = objectId(3);
+  const sender = objectId(6);
+  const poolId = objectId(40);
+  const cetusIntegratePkg = objectId(41);
+  const cetusGlobalConfig = objectId(42);
+  const cetusClmmPkg = objectId(43);
+  const fakeUsdc = `${objectId(44)}::usdc::USDC`;
+  const suiSystemStateId = objectId(45);
+  const stakingObjectId = objectId(46);
+  const stakeTargetPkg = objectId(47);
+  const validator = objectId(48);
+  const SUI = '0x2::sui::SUI';
+
+  const simulate = simulatorService.simulateTransaction;
+  const getObject = suiClient.getObject;
+  const listCoins = suiClient.listCoins;
+  simulatorService.simulateTransaction = async () => ({
+    ok: true,
+    verification: 'verified',
+    gasEstimate: 9,
+    balanceChanges: [],
+    objectChanges: [],
+  });
+  // Fake Cetus pool: coinTypeA = FAKE_USDC, coinTypeB = SUI — a USDC-in swap outputs SUI, the ONLY
+  // shape cetus.adapter.ts allows feeding into a Haedal stake.
+  suiClient.getObject = (async () => ({
+    object: { type: `${cetusClmmPkg}::pool::Pool<${fakeUsdc}, ${SUI}>` },
+  })) as unknown as typeof suiClient.getObject;
+  // Honest note (coordinator): the dry-run sender must actually hold the coin being swapped in — a
+  // devInspect can't mint balances. Mocked here so THIS test exercises the success path; the sibling
+  // test below leaves the sender empty to exercise the honest refusal.
+  suiClient.listCoins = (async () => ({
+    objects: [{ objectId: objectId(200), balance: '1000000000000' }],
+    hasNextPage: false,
+    cursor: null,
+  })) as unknown as typeof suiClient.listCoins;
+
+  try {
+    const built = await new SkillRunnerService().runFlow(
+      {
+        nodes: [
+          {
+            id: 'swap',
+            type: 'cetus_swap',
+            config: {
+              integratePackageId: cetusIntegratePkg,
+              globalConfigId: cetusGlobalConfig,
+              pool: poolId,
+              inputCoinType: fakeUsdc,
+              amount_in: '5000000',
+              min_amount_out: '1000000000',
+              minSqrtPrice: '4295048016',
+              maxSqrtPrice: '79226673515401279992447579055',
+            },
+          },
+          {
+            id: 'stake',
+            type: 'haedal_stake',
+            config: {
+              stakeTarget: `${stakeTargetPkg}::interface::request_stake`,
+              suiSystemStateId,
+              stakingObjectId,
+              amount: '1000000000',
+              validator,
+              minStakeMist: '1000000000',
+            },
+          },
+        ],
+        edges: [
+          { source: 'swap', sourceHandle: 'coin_out', target: 'stake', targetHandle: 'sui_coin' },
+        ],
+      },
+      {},
+      {
+        actionId: 'skill_combo',
+        sender,
+        agentWallet: {
+          packageId: walletPackageId,
+          walletId,
+          capId: agentCapId,
+          coinType: SUI,
+          versionId: objectId(9),
+          capabilityManifest: DEFAULT_MANIFEST,
+        },
+      },
+    );
+
+    if ('refused' in built) throw new Error(`expected an ExecutionEnvelope, got a refusal: ${built.reason}`);
+    const envelope: ExecutionEnvelope = built;
+
+    // Schema-valid per envelope.schema.ts's broadened (DeepBook-OR-steps) shape.
+    expect(assertExecutionEnvelope(envelope)).toEqual(envelope);
+    expect(envelope).not.toHaveProperty('balanceManagerId');
+    expect(envelope).not.toHaveProperty('tradeCapId');
+    expect(envelope).not.toHaveProperty('resolvedParams');
+    expect(envelope.actionId).toBe('skill_combo');
+    expect(envelope.actionDigest).toBe(await digestUnsignedPtb(envelope.unsignedPtb));
+
+    // One step PER action node, swap first (flow/execution order) then stake.
+    expect(envelope.steps).toHaveLength(2);
+    expect(envelope.steps?.[0]).toEqual({
+      nodeType: 'cetus_swap',
+      poolId,
+      minOutMist: '1000000000',
+      // Funded from the sender's own USDC (sourceCoinFromSender), not the agent wallet — root SUI
+      // funding is 0 whenever a swap's input isn't SUI.
+      spendAmountMist: '0',
+    });
+    expect(envelope.steps?.[1]).toEqual({
+      nodeType: 'haedal_stake',
+      validator,
+      // Fed by the swap step's own output coin, not a fresh wallet draw — honestly declared 0 (see
+      // skill-runner.service.ts's buildStep doc comment for the signer-side follow-up this leaves).
+      spendAmountMist: '0',
+    });
+
+    expect(envelope.allowedTargets.some((target) => target.endsWith('::router::swap'))).toBe(true);
+    expect(envelope.allowedTargets.some((target) => target.endsWith('::interface::request_stake'))).toBe(true);
+    expect(envelope.requiredGuards.some((target) => target.endsWith('::guard::assert_min_value'))).toBe(true);
+  } finally {
+    simulatorService.simulateTransaction = simulate;
+    suiClient.getObject = getObject;
+    suiClient.listCoins = listCoins;
+  }
+});
+
+test('a Cetus-swap -> Haedal-stake chain refuses honestly when the sim sender holds none of the swapped-in coin — never faked', async () => {
+  const getObject = suiClient.getObject;
+  const listCoins = suiClient.listCoins;
+  const fakeUsdc = `${objectId(60)}::usdc::USDC`;
+  suiClient.getObject = (async () => ({
+    object: { type: `${objectId(61)}::pool::Pool<${fakeUsdc}, 0x2::sui::SUI>` },
+  })) as unknown as typeof suiClient.getObject;
+  // The sim sender holds NONE of the coin being swapped in — a devInspect can't mint balances, so
+  // this must fail loudly rather than pretend the swap succeeded.
+  suiClient.listCoins = (async () => ({ objects: [], hasNextPage: false, cursor: null })) as unknown as typeof suiClient.listCoins;
+
+  try {
+    await expect(new SkillRunnerService().runFlow(
+      {
+        nodes: [
+          {
+            id: 'swap',
+            type: 'cetus_swap',
+            config: {
+              integratePackageId: objectId(62),
+              globalConfigId: objectId(63),
+              pool: objectId(64),
+              inputCoinType: fakeUsdc,
+              amount_in: '5000000',
+              min_amount_out: '1000000000',
+              minSqrtPrice: '4295048016',
+              maxSqrtPrice: '79226673515401279992447579055',
+            },
+          },
+          {
+            id: 'stake',
+            type: 'haedal_stake',
+            config: {
+              stakeTarget: `${objectId(65)}::interface::request_stake`,
+              suiSystemStateId: objectId(66),
+              stakingObjectId: objectId(67),
+              amount: '1000000000',
+              validator: objectId(68),
+              minStakeMist: '1000000000',
+            },
+          },
+        ],
+        edges: [
+          { source: 'swap', sourceHandle: 'coin_out', target: 'stake', targetHandle: 'sui_coin' },
+        ],
+      },
+      {},
+      {
+        actionId: 'skill_combo',
+        sender: objectId(6),
+        agentWallet: {
+          packageId: objectId(1),
+          walletId: objectId(2),
+          capId: objectId(3),
+          coinType: '0x2::sui::SUI',
+          versionId: objectId(9),
+          capabilityManifest: DEFAULT_MANIFEST,
+        },
+      },
+    )).rejects.toThrow("can't dry-run this swap");
+  } finally {
+    suiClient.getObject = getObject;
+    suiClient.listCoins = listCoins;
+  }
 });

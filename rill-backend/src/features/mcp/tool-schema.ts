@@ -50,28 +50,27 @@ export function isHeroActionFlow(flow: FlowGraph): boolean {
   return orderNodes.length === 1 && unsupportedNodes.length === 0 && !invalidEdge;
 }
 
-export type ActionKind = 'cetus_swap' | 'haedal_stake' | 'deepbook_limit_order';
+export type ActionKind = 'cetus_swap' | 'haedal_stake' | 'cetus_swap_to_haedal_stake' | 'deepbook_limit_order';
 
 /**
  * Which action a flow's `build_action` runtime params (and, in `mcp.service.ts`, `describe_action`
- * metadata) should be shaped for. Only an UNAMBIGUOUS single-action flow (one `cetus_swap` and no
- * `haedal_stake`, or vice versa) gets its own action-specific shape — every other combination
- * (DeepBook, a chained swap→stake, an empty/unknown flow, or no flow at all) keeps the long-standing
- * DeepBook shape, matching what `buildRuntimeParamsSchema()`'s no-argument call already returned
- * before this function learned about flows at all (the static `actionTools[2]` catalog entry in
- * `mcp.service.ts` still calls it with no flow, and must keep seeing the same shape it always has).
- * This mirrors `skill-runner.service.ts`'s `runFlow` dispatch (exactly one supported action node —
- * a single `cetus_swap` or `haedal_stake` — takes the generic path; everything else, including a
- * combo flow, falls back to/through the DeepBook shape here for describe/schema purposes even
- * though `runFlow` itself would reject a combo flow at build time).
+ * metadata) should be shaped for. A flow with exactly one `cetus_swap` and no `haedal_stake` (or
+ * vice versa) gets its own action-specific shape; a flow with BOTH gets the combo shape
+ * (`cetus_swap_to_haedal_stake` — mirrors `skill-runner.service.ts`'s `runFlow` dispatch, which
+ * accepts exactly this shape as a real swap→stake coin chain). Every other combination (DeepBook,
+ * an empty/unknown flow, or no flow at all) keeps the long-standing DeepBook shape, matching what
+ * `buildRuntimeParamsSchema()`'s no-argument call already returned before this function learned
+ * about flows at all (the static `actionTools[2]` catalog entry in `mcp.service.ts` still calls it
+ * with no flow, and must keep seeing the same shape it always has).
  */
 export function actionKindOf(flow?: FlowGraph): ActionKind {
   if (!flow) return 'deepbook_limit_order';
   const types = new Set(flow.nodes.map((n) => n.type));
   const hasSwap = types.has('cetus_swap');
   const hasStake = types.has('haedal_stake');
-  if (hasSwap && !hasStake) return 'cetus_swap';
-  if (hasStake && !hasSwap) return 'haedal_stake';
+  if (hasSwap && hasStake) return 'cetus_swap_to_haedal_stake';
+  if (hasSwap) return 'cetus_swap';
+  if (hasStake) return 'haedal_stake';
   return 'deepbook_limit_order';
 }
 
@@ -152,10 +151,15 @@ function buildHaedalStakeRuntimeParamsSchema(): RuntimeParamsSchema {
  * DeepBook — the compiler always supported Cetus swap / Haedal stake, only the MCP-facing schema
  * had fallen behind). `flow` is optional so every existing no-flow call site (the static
  * `actionTools[2]` catalog entry) keeps getting the DeepBook shape it always has.
+ *
+ * A swap→stake combo (`cetus_swap_to_haedal_stake`) takes the SAME shape as a standalone swap
+ * (`amount_in`/`min_amount_out`/optional `pool`) — the stake leg consumes the swap's SUI output
+ * directly (`skill-runner.service.ts`'s `runGenericAction`), so it has no separate caller-supplied
+ * amount of its own to expose here.
  */
 export function buildRuntimeParamsSchema(flow?: FlowGraph): RuntimeParamsSchema {
   const action = actionKindOf(flow);
-  if (action === 'cetus_swap') return buildCetusSwapRuntimeParamsSchema();
+  if (action === 'cetus_swap' || action === 'cetus_swap_to_haedal_stake') return buildCetusSwapRuntimeParamsSchema();
   if (action === 'haedal_stake') return buildHaedalStakeRuntimeParamsSchema();
   return buildDeepbookRuntimeParamsSchema();
 }
@@ -211,7 +215,11 @@ export function buildActionInputSchema(actionId?: string, flow?: FlowGraph) {
 export function buildToolDefs(flow: FlowGraph, actionId: string) {
   return {
     name: 'build_action' as const,
-    description: HERO_ACTION_DESCRIPTION,
+    // Flow-aware: a published Cetus swap skill's `build_action` tool now reads "Build one
+    // wallet-bound Cetus swap…", not the hardcoded DeepBook hero string (`heroActionOf` is the
+    // SAME flow-aware label already used for the skill's own `name`/`description` at publish time
+    // — see `api.routes.ts`'s `/publish` route and `skills.store.ts`).
+    description: heroActionOf(flow).description,
     inputSchema: buildActionInputSchema(actionId, flow),
   };
 }

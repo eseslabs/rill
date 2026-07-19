@@ -259,6 +259,77 @@ test('describe_action returns stake-appropriate params and targets for a Haedal 
   expect(JSON.stringify(body.requiredPublicObjects)).not.toContain('TradeCap');
 });
 
+const comboFlow = {
+  nodes: [{ id: 'swap', type: 'cetus_swap' }, { id: 'stake', type: 'haedal_stake' }],
+  edges: [{ source: 'swap', sourceHandle: 'coin_out', target: 'stake', targetHandle: 'sui_coin' }],
+};
+const comboSkill = {
+  id: 'skill_combo',
+  name: 'Cetus swap → Haedal stake',
+  description: 'Build one wallet-bound Cetus swap chained into a Haedal stake for strict local execution.',
+  flow: comboFlow,
+  toolDefs: buildToolDefs(comboFlow, 'skill_combo'),
+  createdAt: '2026-07-19T00:00:00.000Z',
+} satisfies PublishedSkill;
+
+test('describe_action returns the combo name + swap-entry params + both protocols\' targets for a Cetus-swap -> Haedal-stake skill — never DeepBook fields', async () => {
+  const response = await handleMcpJsonRpc('skill_combo', {
+    jsonrpc: '2.0',
+    id: 22,
+    method: 'tools/call',
+    params: { name: 'describe_action', arguments: { actionId: comboSkill.id } },
+  }, {
+    getSkill: () => comboSkill,
+    runFlow: async () => { throw new Error('not called'); },
+  });
+  const result = response?.result as { content: [{ text: string }]; isError: boolean };
+  const body = JSON.parse(result.content[0].text) as Record<string, unknown>;
+  const buildSchema = comboSkill.toolDefs.inputSchema as ReturnType<typeof buildToolDefs>['inputSchema'];
+
+  expect(result.isError).toBe(false);
+  expect(body.name).toBe('Cetus swap → Haedal stake');
+  // Runtime params = the ENTRY swap's params only — the stake leg has no separate amount of its own.
+  expect(body.runtimeParameters).toEqual(buildSchema.properties.params);
+  expect(Object.keys((body.runtimeParameters as { properties: object }).properties)).toEqual([
+    'amount_in', 'min_amount_out', 'pool',
+  ]);
+  // Targets/objects from BOTH protocols.
+  expect(body.cetusPackageId).toBeTruthy();
+  expect(body.haedalPackageId).toBeTruthy();
+  expect(body.requiredTargets).toEqual(expect.arrayContaining([
+    expect.stringContaining('::router::swap'),
+    expect.stringContaining('::interface::request_stake'),
+  ]));
+  expect(body.requiredPublicObjects).toEqual(expect.arrayContaining([
+    { role: 'CetusPool', source: "params.pool, defaulting to the published skill's pool" },
+  ]));
+  expect(JSON.stringify(body.requiredPublicObjects)).toContain('SuiSystemState');
+  expect(JSON.stringify(body.requiredPublicObjects)).toContain('HaedalStakingObject');
+  // Never DeepBook-shaped for a combo skill either.
+  expect(body).not.toHaveProperty('deepbookPackageId');
+  expect(body).not.toHaveProperty('defaultPoolKey');
+  expect(JSON.stringify(body.requiredPublicObjects)).not.toContain('BalanceManager');
+  expect(JSON.stringify(body.requiredPublicObjects)).not.toContain('TradeCap');
+});
+
+test('tools/list for a combo skill is fully flow-aware — build_action reads "Cetus swap" not "DeepBook"', async () => {
+  const response = await handleMcpJsonRpc('skill_combo', {
+    jsonrpc: '2.0',
+    id: 23,
+    method: 'tools/list',
+  }, {
+    getSkill: () => comboSkill,
+    runFlow: async () => { throw new Error('not called'); },
+  });
+  const tools = (response?.result as { tools: { name: string; description: string }[] }).tools;
+  const buildAction = tools.find((tool) => tool.name === 'build_action')!;
+  const describeAction = tools.find((tool) => tool.name === 'describe_action')!;
+
+  expect(buildAction.description).toContain('Cetus swap');
+  expect(buildAction.description).not.toContain('DeepBook');
+  expect(describeAction.description).not.toContain('DeepBook');
+});
+
 test('build_action uses the per-call public AgentWallet binding', async () => {
   let received: unknown[] = [];
   const params = {
@@ -728,9 +799,28 @@ test('POST /mcp/:skillId rejects an empty batch with -32600', async () => {
   }
 });
 
-// --- Origin allowlist, exact match only (R14) -----------------------------------------------
+// --- No Origin gate: /mcp is a public, keyless, read-only builder (R14 revisited) -------------
+// list_actions/describe_action/build_action take no auth and mutate nothing, so restricting Origin
+// protects nothing here — it only broke real remote MCP clients (Claude Code, Codex, VS Code), which
+// send a browser/app Origin (`https://claude.ai`, `vscode-file://…`, `null`) this server has no way
+// to allowlist ahead of time. Every Origin — recognized, foreign, lookalike, or absent — is allowed.
 
-test('POST /mcp/:skillId rejects a foreign Origin with 403', async () => {
+test('POST /mcp/:skillId allows a real remote-client Origin (e.g. Claude Code / claude.ai)', async () => {
+  const get = skillsStore.get;
+  skillsStore.get = () => skill;
+  try {
+    const response = await apiRouter.request(`/mcp/${skill.id}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Origin: 'https://claude.ai' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
+    });
+    expect(response.status).toBe(200);
+  } finally {
+    skillsStore.get = get;
+  }
+});
+
+test('POST /mcp/:skillId allows an unrecognized/foreign Origin (this endpoint exposes nothing signable)', async () => {
   const get = skillsStore.get;
   skillsStore.get = () => skill;
   try {
@@ -739,22 +829,7 @@ test('POST /mcp/:skillId rejects a foreign Origin with 403', async () => {
       headers: { 'content-type': 'application/json', Origin: 'https://evil.example.com' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
     });
-    expect(response.status).toBe(403);
-  } finally {
-    skillsStore.get = get;
-  }
-});
-
-test('POST /mcp/:skillId rejects a lookalike origin (substring "localhost", not an exact host) with 403', async () => {
-  const get = skillsStore.get;
-  skillsStore.get = () => skill;
-  try {
-    const response = await apiRouter.request(`/mcp/${skill.id}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', Origin: 'http://notlocalhost.evil.com' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
-    });
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(200);
   } finally {
     skillsStore.get = get;
   }

@@ -23,7 +23,10 @@ export const actionTools = [
   },
   {
     name: 'describe_action',
-    description: 'Describe the DeepBook action parameters, wallet binding, targets, and strict simulation rule.',
+    // Generic — this tool describes whatever action the published skill actually is (DeepBook,
+    // Cetus swap, Haedal stake, or a swap→stake combo); it must not claim "DeepBook" for a skill
+    // that isn't one.
+    description: 'Describe the action\'s parameters, wallet binding, targets, and strict simulation rule.',
     inputSchema: {
       type: 'object',
       properties: { actionId: { type: 'string' } },
@@ -169,36 +172,67 @@ function describeActionSetupSchema() {
   };
 }
 
+/** `agent_wallet::request_spend`/`confirm_spend` — the one funding chokepoint every non-DeepBook
+ *  action shares, regardless of how many action nodes the flow has. */
+function agentWalletTargets(walletPackageId: string): string[] {
+  return [
+    `${walletPackageId}::agent_wallet::request_spend`,
+    `${walletPackageId}::agent_wallet::confirm_spend`,
+  ];
+}
+
+/** `AgentWallet`/`AgentCap` — the two required objects every non-DeepBook action shares. */
+const COMMON_REQUIRED_OBJECTS = [
+  { role: 'AgentWallet', source: 'agentWallet.walletId' },
+  { role: 'AgentCap', source: 'agentWallet.capId' },
+] as const;
+
+const CLOCK_REQUIRED_OBJECT = { role: 'Clock', objectId: SUI_CLOCK_ID } as const;
+
+/** The Cetus `router::swap` target, plus its mandatory on-chain slippage guard when one is
+ *  configured — shared between the standalone-swap and swap→stake-combo `describe_action` shapes. */
+function cetusSwapTarget(): string | undefined {
+  return `${CETUS.integratePackageId}::router::swap`;
+}
+function cetusGuardTarget(): string | undefined {
+  return config.guardPackageId ? `${config.guardPackageId}::guard::assert_min_value` : undefined;
+}
+function cetusRequiredPublicObjects() {
+  return [{ role: 'CetusPool', source: "params.pool, defaulting to the published skill's pool" }];
+}
+
+/** The Haedal `interface::request_stake` target + its two fixed protocol objects — shared between
+ *  the standalone-stake and swap→stake-combo `describe_action` shapes. */
+function haedalRequiredPublicObjects() {
+  return [
+    { role: 'SuiSystemState', objectId: HAEDAL.suiSystemStateId },
+    { role: 'HaedalStakingObject', objectId: HAEDAL.stakingObjectId },
+  ];
+}
+
 /**
  * Honest, action-appropriate `describe_action` metadata (targets, required public objects, and any
  * action-specific defaults) — derived from `skill.flow` via `actionKindOf` (`tool-schema.ts`, the
  * SAME dispatch `skill-runner.service.ts`'s `runFlow` and `buildRuntimeParamsSchema` use), so a
  * Cetus swap skill is never described with DeepBook fields (BalanceManager/TradeCap/poolKey) and a
  * Haedal stake skill never claims a DeepBook pool. DeepBook's branch is byte-identical to what this
- * endpoint always returned.
+ * endpoint always returned; the standalone swap/stake branches build the exact same objects as
+ * before (via the small helpers above) — only the NEW combo branch is additive.
  */
 function describeActionMetadata(skill: PublishedSkill, walletPackageId: string) {
   const kind = actionKindOf(skill.flow);
 
   if (kind === 'cetus_swap') {
-    const guardTarget = config.guardPackageId
-      ? `${config.guardPackageId}::guard::assert_min_value`
-      : undefined;
+    const guardTarget = cetusGuardTarget();
     return {
       cetusPackageId: CETUS.integratePackageId,
       defaultPoolId: CETUS.defaultPoolId,
       requiredTargets: [
-        `${walletPackageId}::agent_wallet::request_spend`,
-        `${walletPackageId}::agent_wallet::confirm_spend`,
-        `${CETUS.integratePackageId}::router::swap`,
+        ...agentWalletTargets(walletPackageId),
+        cetusSwapTarget(),
         ...(guardTarget ? [guardTarget] : []),
       ],
-      requiredPublicObjects: [
-        { role: 'AgentWallet', source: 'agentWallet.walletId' },
-        { role: 'AgentCap', source: 'agentWallet.capId' },
-        { role: 'CetusPool', source: "params.pool, defaulting to the published skill's pool" },
-        { role: 'Clock', objectId: SUI_CLOCK_ID },
-      ],
+      requiredPublicObjects: [...COMMON_REQUIRED_OBJECTS, ...cetusRequiredPublicObjects(), CLOCK_REQUIRED_OBJECT],
       requiredGuards: guardTarget ? [guardTarget] : [],
     };
   }
@@ -206,19 +240,31 @@ function describeActionMetadata(skill: PublishedSkill, walletPackageId: string) 
   if (kind === 'haedal_stake') {
     return {
       haedalPackageId: HAEDAL.packageId,
+      requiredTargets: [...agentWalletTargets(walletPackageId), HAEDAL.stakeTarget],
+      requiredPublicObjects: [...COMMON_REQUIRED_OBJECTS, ...haedalRequiredPublicObjects(), CLOCK_REQUIRED_OBJECT],
+      requiredGuards: [],
+    };
+  }
+
+  if (kind === 'cetus_swap_to_haedal_stake') {
+    const guardTarget = cetusGuardTarget();
+    return {
+      cetusPackageId: CETUS.integratePackageId,
+      defaultPoolId: CETUS.defaultPoolId,
+      haedalPackageId: HAEDAL.packageId,
       requiredTargets: [
-        `${walletPackageId}::agent_wallet::request_spend`,
-        `${walletPackageId}::agent_wallet::confirm_spend`,
+        ...agentWalletTargets(walletPackageId),
+        cetusSwapTarget(),
+        ...(guardTarget ? [guardTarget] : []),
         HAEDAL.stakeTarget,
       ],
       requiredPublicObjects: [
-        { role: 'AgentWallet', source: 'agentWallet.walletId' },
-        { role: 'AgentCap', source: 'agentWallet.capId' },
-        { role: 'SuiSystemState', objectId: HAEDAL.suiSystemStateId },
-        { role: 'HaedalStakingObject', objectId: HAEDAL.stakingObjectId },
-        { role: 'Clock', objectId: SUI_CLOCK_ID },
+        ...COMMON_REQUIRED_OBJECTS,
+        ...cetusRequiredPublicObjects(),
+        ...haedalRequiredPublicObjects(),
+        CLOCK_REQUIRED_OBJECT,
       ],
-      requiredGuards: [],
+      requiredGuards: guardTarget ? [guardTarget] : [],
     };
   }
 
@@ -236,19 +282,17 @@ function describeActionMetadata(skill: PublishedSkill, walletPackageId: string) 
     // legacy spend(). (Any per-manifest-rule `prove` calls aren't listed here: this discovery
     // response can't know the caller's capability manifest ahead of time.)
     requiredTargets: [
-      `${walletPackageId}::agent_wallet::request_spend`,
-      `${walletPackageId}::agent_wallet::confirm_spend`,
+      ...agentWalletTargets(walletPackageId),
       `${deepbookPackageId}::balance_manager::deposit`,
       `${deepbookPackageId}::balance_manager::generate_proof_as_trader`,
       `${deepbookPackageId}::pool::place_limit_order`,
     ],
     requiredPublicObjects: [
-      { role: 'AgentWallet', source: 'agentWallet.walletId' },
-      { role: 'AgentCap', source: 'agentWallet.capId' },
+      ...COMMON_REQUIRED_OBJECTS,
       { role: 'BalanceManager', source: 'params.balanceManagerId' },
       { role: 'TradeCap', source: 'params.tradeCapId' },
       { role: 'DeepBookPool', source: 'params.poolKey resolved on the selected network' },
-      { role: 'Clock', objectId: SUI_CLOCK_ID },
+      CLOCK_REQUIRED_OBJECT,
     ],
     requiredGuards: [],
   };

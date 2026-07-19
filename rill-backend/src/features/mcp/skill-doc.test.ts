@@ -86,27 +86,35 @@ test('a Haedal stake skill is described as a stake throughout — never "DeepBoo
   expect(doc).toContain('Build one Haedal stake — pick one:');
 });
 
-test('a chained Cetus-swap -> Haedal-stake flow ("swap then stake") renders correctly', () => {
+test('a chained Cetus-swap -> Haedal-stake flow ("swap then stake") renders the swap-entry params, flow-aware, never DeepBook', () => {
+  const comboFlow = {
+    nodes: [
+      { id: 'swap', type: 'cetus_swap' },
+      { id: 'stake', type: 'haedal_stake' },
+    ],
+    edges: [{ source: 'swap', sourceHandle: 'coin_out', target: 'stake', targetHandle: 'sui_coin' }],
+  };
   const skill = {
     id: 'skill_combo_doc',
     name: 'Cetus swap → Haedal stake',
     description: 'Build one wallet-bound Cetus swap chained into a Haedal stake for strict local execution.',
-    flow: {
-      nodes: [
-        { id: 'swap', type: 'cetus_swap' },
-        { id: 'stake', type: 'haedal_stake' },
-      ],
-      edges: [{ source: 'swap', sourceHandle: 'coin_out', target: 'stake', targetHandle: 'sui_coin' }],
-    },
-    toolDefs: buildToolDefs({
-      nodes: [{ id: 'swap', type: 'cetus_swap' }, { id: 'stake', type: 'haedal_stake' }],
-      edges: [],
-    }, 'skill_combo_doc'),
+    flow: comboFlow,
+    toolDefs: buildToolDefs(comboFlow, 'skill_combo_doc'),
     createdAt: '2026-07-18T00:00:00.000Z',
   } satisfies PublishedSkill;
   const doc = buildSkillDoc(skill);
 
+  expect(doc).not.toContain('DeepBook');
   expect(doc).toContain('Cetus swap → Haedal stake');
   expect(doc).toContain('## Parameters');
   expect(doc).toContain('## Signing');
+  // Parameters = the ENTRY swap's params — the stake leg consumes the swap's SUI output directly,
+  // so it has no separate amount of its own to document.
+  expect(doc).toContain('- `amount_in`');
+  expect(doc).toContain('- `min_amount_out`');
+  expect(doc).not.toContain('- `poolKey`');
+  expect(doc).not.toContain('- `balanceManagerId`');
+  expect(doc).not.toContain('- `amount` (');
+  expect(doc).toContain('9. Query digest, the Cetus swap → Haedal stake outcome, wallet Spent event, and remaining budget.');
+  expect(doc).toContain('Build one Cetus swap → Haedal stake — pick one:');
 });

@@ -79,30 +79,6 @@ function skillCapacityError() {
   };
 }
 
-/** Exact-match Origin allowlist for the MCP endpoint (R14) — a browser-originated cross-site
- *  request must come from an origin Rill actually serves, matched by exact parsed-hostname equality
- *  (localhost/127.0.0.1, any port) or full-origin string equality against `PUBLIC_BASE_URL` — never
- *  substring/prefix (a lookalike host like "notlocalhost.evil.com" must not slip through a naive
- *  `.includes('localhost')` check). Non-browser MCP clients (curl, Claude Code, OpenCode) typically
- *  send no `Origin` header at all, so validation only fires when the header is present.
- */
-const MCP_ALLOWED_ORIGIN_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
-
-function isAllowedMcpOrigin(origin: string): boolean {
-  let parsed: URL;
-  try {
-    parsed = new URL(origin);
-  } catch {
-    return false;
-  }
-  if (MCP_ALLOWED_ORIGIN_HOSTS.has(parsed.hostname)) return true;
-  try {
-    return parsed.origin === new URL(config.publicBaseUrl).origin;
-  } catch {
-    return false;
-  }
-}
-
 /**
  * R13: an anonymous /compile or /simulate request binds the operator's configured `config.agentWallet`
  * ONLY when the caller explicitly opts in with `useServerWallet: true` — never by default. Silently
@@ -379,13 +355,16 @@ apiRouter.get('/audit/:blobId', async (c) => {
  * (`claude mcp add --transport http`), and OpenCode (remote MCP). POST carries JSON-RPC; a GET with
  * an event-stream Accept is the client probing for a server push stream (we don't push → 405, which
  * the MCP SDK handles), while a browser GET is redirected to the human-readable SKILL.md.
+ *
+ * No Origin check (R14 revisited): this endpoint is a PUBLIC, KEYLESS, read-only builder —
+ * `list_actions`/`describe_action`/`build_action` take no auth, touch no cookie/session state, and
+ * mutate nothing (`/publish` and `/execute` are separate routes with their own gates). An Origin
+ * allowlist is a DNS-rebinding guard for a LOCAL server trusting the browser's same-origin policy;
+ * it protects nothing here and instead broke every real remote MCP client, which send a browser/app
+ * Origin this server doesn't recognize (`https://claude.ai`, `vscode-file://…`, `null`) — a bare
+ * `curl` with no Origin header always passed, while `claude mcp add --transport http` never could.
  */
 apiRouter.get('/mcp/:skillId', (c) => {
-  const origin = c.req.header('Origin');
-  if (origin && !isAllowedMcpOrigin(origin)) {
-    return c.json({ success: false, error: 'Origin not allowed.' }, 403);
-  }
-
   const skillId = c.req.param('skillId');
   if (!skillsStore.get(skillId)) return c.text('Skill not found', 404);
   if ((c.req.header('Accept') || '').includes('text/event-stream')) {
@@ -395,13 +374,6 @@ apiRouter.get('/mcp/:skillId', (c) => {
 });
 
 apiRouter.post('/mcp/:skillId', async (c) => {
-  // R14: validated by exact origin match (never substring/prefix) — see `isAllowedMcpOrigin`. Only
-  // enforced when the header is present; non-browser MCP clients typically send none at all.
-  const origin = c.req.header('Origin');
-  if (origin && !isAllowedMcpOrigin(origin)) {
-    return c.json({ success: false, error: 'Origin not allowed.' }, 403);
-  }
-
   const skillId = c.req.param('skillId');
   let body: unknown;
   try {

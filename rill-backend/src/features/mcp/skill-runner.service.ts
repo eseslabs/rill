@@ -158,14 +158,18 @@ export class SkillRunnerService {
 
   /**
    * The generic (non-DeepBook) build path, restoring what regressed when the keyless refactor
-   * narrowed `runFlow` to DeepBook-only: a flow with exactly one supported action node — a single
-   * `cetus_swap` or a single `haedal_stake` — compiles and simulates through the SAME
-   * `compilerService.compileFlow` entry point the DeepBook path uses (the compiler already fully
-   * supports both node types; only `runFlow` had narrowed), then returns an ExecutionEnvelope built
-   * around a one-entry `steps` manifest instead of the DeepBook-only `balanceManagerId`/`tradeCapId`/
-   * `resolvedParams` trio (see `envelope.schema.ts`'s `.superRefine`, which now accepts either
-   * shape). A flow with neither a `deepbook_limit_order` node nor exactly one supported generic
-   * action node is rejected before any compile/simulate work happens.
+   * narrowed `runFlow` to DeepBook-only. Supports two shapes, both compiled and simulated through
+   * the SAME `compilerService.compileFlow` entry point the DeepBook path uses (the compiler already
+   * fully supports both node types, and their chaining, via `cetus.adapter.ts`'s `feedsHaedal`
+   * wiring — the same coin-chain `/simulate` already exercises; only `runFlow` had narrowed):
+   *  - a single supported action node (one `cetus_swap` XOR one `haedal_stake`) — a one-entry
+   *    `steps` manifest, unchanged from before this combo extension;
+   *  - a Cetus-swap-into-Haedal-stake CHAIN (one `cetus_swap` node whose `coin_out` is wired into
+   *    one `haedal_stake` node's `sui_coin`) — a two-entry `steps` manifest, swap step first.
+   * Either way the envelope carries no DeepBook fields (see `envelope.schema.ts`'s `.superRefine`,
+   * which accepts the DeepBook trio OR a non-empty `steps` manifest). Any other shape — 0 action
+   * nodes, >1 of the same type, an unconnected swap+stake pair, or >2 action nodes — is rejected
+   * before any compile/simulate work happens.
    */
   private async runGenericAction(
     flow: FlowGraph,
@@ -173,11 +177,29 @@ export class SkillRunnerService {
     options: RunFlowOptions,
   ): Promise<ExecutionEnvelope | ActionBuildRefusal> {
     const actionNodes = flow.nodes.filter((node) => isGenericActionNodeType(node.type));
-    if (actionNodes.length !== 1) {
+    const swapNodes = actionNodes.filter((node) => node.type === 'cetus_swap');
+    const stakeNodes = actionNodes.filter((node) => node.type === 'haedal_stake');
+
+    const isSingleAction = actionNodes.length === 1;
+    // A recognized swap→stake CHAIN, not merely "one of each": `haedal_stake` has no source handle
+    // at all (`protocols/handles.ts`'s NODE_HANDLES — a stake can never feed anything downstream),
+    // so the only wiring direction that can ever exist between them is swap -> stake. This edge
+    // check only confirms the NODES are connected; `compileFlow`'s own structural validation
+    // (`findFlowStructureIssues`, called inside `compileFlow`) independently re-checks the edge uses
+    // the exact `coin_out`/`sui_coin` handle names once we call it below.
+    const isSwapToStakeChain =
+      actionNodes.length === 2 &&
+      swapNodes.length === 1 &&
+      stakeNodes.length === 1 &&
+      flow.edges.some((edge) => edge.source === swapNodes[0].id && edge.target === stakeNodes[0].id);
+
+    if (!isSingleAction && !isSwapToStakeChain) {
       throw new ValidationError(
-        `build_action requires exactly one supported action node — a single deepbook_limit_order, `
-          + `cetus_swap, or haedal_stake node; found 0 deepbook_limit_order node(s) and `
-          + `${actionNodes.length} cetus_swap/haedal_stake node(s) among ${flow.nodes.length} total.`,
+        `build_action supports either exactly one supported action node (a single `
+          + `deepbook_limit_order, cetus_swap, or haedal_stake) or a Cetus-swap-into-Haedal-stake `
+          + `chain (one cetus_swap node wired into one haedal_stake node); found 0 `
+          + `deepbook_limit_order node(s), ${swapNodes.length} cetus_swap node(s), and `
+          + `${stakeNodes.length} haedal_stake node(s) among ${flow.nodes.length} total.`,
       );
     }
 
@@ -185,13 +207,27 @@ export class SkillRunnerService {
       sender: options.sender,
       agentWallet: options.agentWallet,
     }, params);
-    const actionNode = compiled.resolvedFlow.nodes.find((node) => isGenericActionNodeType(node.type))!;
+    const resolvedActionNodes = compiled.resolvedFlow.nodes.filter((node) => isGenericActionNodeType(node.type));
+    // Execution order (topological): for the single-action shape this is trivially the one node;
+    // for the chain shape it is ALWAYS swap-then-stake — never re-derived from array/declaration
+    // order — because (per the doc comment above) a `haedal_stake` node structurally cannot precede
+    // a `cetus_swap` node in any valid wiring this codebase accepts.
+    const orderedActionNodes = isSwapToStakeChain
+      ? [
+          resolvedActionNodes.find((node) => node.type === 'cetus_swap')!,
+          resolvedActionNodes.find((node) => node.type === 'haedal_stake')!,
+        ]
+      : resolvedActionNodes;
 
     const preview = previewService.buildPreview(compiled.resolvedFlow, compiled.warnings);
     const unsignedPtb = await serializeUnsignedPtb(compiled.transaction);
     const simulation = await simulatorService.simulateTransaction(compiled.transaction, options.sender);
 
     // Same unconditional envelope gate as the DeepBook path (R3/KTD-4) — see that method's comment.
+    // An honest note for the swap→stake chain specifically: a non-SUI-input swap (e.g. the
+    // USDC->SUI leg that feeds a stake) needs the simulation SENDER to actually hold that coin type
+    // — a dry run cannot mint balances (see `cetus.adapter.ts`'s `sourceCoinFromSender`). If it
+    // doesn't, simulation fails and this refusal is what the caller gets — never faked as success.
     if (!simulation.ok) {
       return {
         refused: true,
@@ -203,7 +239,7 @@ export class SkillRunnerService {
     }
 
     const inspection = inspectTransaction(compiled.transaction);
-    const step = this.buildStep(actionNode, compiled.budgetSpendMist);
+    const steps = this.buildSteps(orderedActionNodes, compiled.budgetSpendMist);
 
     return {
       version: '1',
@@ -223,27 +259,51 @@ export class SkillRunnerService {
       preview,
       simulation,
       expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
-      steps: [step],
+      steps,
     };
   }
 
   /**
-   * Derives the one `EnvelopeStep` entry for `runGenericAction` from the resolved node's own config
-   * (the same config the matching adapter — `cetus.adapter.ts`/`haedal.adapter.ts` — just built the
-   * PTB from) plus the compiler's own computed `budgetSpendMist` (the exact amount released by
-   * `request_spend`/`confirm_spend` for this compile — see `compiler.service.ts`'s
-   * `computeRootSuiFunding`), rather than re-deriving the funded amount independently: with exactly
-   * one action node and no other coin-consuming node in scope, `budgetSpendMist` IS this step's
-   * whole spend, and is guaranteed consistent with what the signer's `inspectGeneric` reads back off
-   * the PTB's own `request_spend` argument.
+   * Builds one `EnvelopeStep` per node in `nodes` (already in execution order — see
+   * `runGenericAction`). Only the FIRST node draws root funding straight from the agent_wallet
+   * spend: `compiler.service.ts`'s `computeRootSuiFunding` sums `rootSuiFunding` per node, and both
+   * adapters return `0n` whenever the node has an incoming coin edge (`cetus.adapter.ts`/
+   * `haedal.adapter.ts`) — which is exactly the case for a chain's downstream node (its coin comes
+   * from the upstream step's OWN output, not a fresh wallet split). So for the single-action shape
+   * (one node) this is unchanged: that node gets the whole `budgetSpendMist`. For the swap→stake
+   * chain, the swap (root-funded) gets `budgetSpendMist`; the stake (fed by the swap's output, zero
+   * additional wallet draw) honestly declares `spendAmountMist: '0'` — see `buildStep`'s doc comment
+   * for the caveat this leaves for signer-side validation.
+   */
+  private buildSteps(nodes: FlowNode[], budgetSpendMist: bigint): EnvelopeStep[] {
+    return nodes.map((node, index) => this.buildStep(node, index === 0 ? budgetSpendMist : 0n));
+  }
+
+  /**
+   * Derives one `EnvelopeStep` from the resolved node's own config (the same config the matching
+   * adapter — `cetus.adapter.ts`/`haedal.adapter.ts` — just built the PTB from) plus
+   * `spendAmountMistValue` (see `buildSteps`'s doc comment for how that's chosen per node).
    *
    * `min_amount_out` (Cetus) has no fallback here, matching `cetus.adapter.ts`'s own R7 stance: a
    * swap that defers its slippage floor to a downstream guardrail node (rather than setting
-   * `min_amount_out` directly) has no single value to declare in a one-entry `steps` manifest, so
-   * that combination is rejected with a clear message instead of silently guessing.
+   * `min_amount_out` directly) has no single value to declare in this manifest, so that combination
+   * is rejected with a clear message instead of silently guessing.
+   *
+   * KNOWN GAP (combo chain only, not this task's scope to fix): `packages/rill-signer/src/steps/
+   * haedal.ts`'s `haedalStakeStepValidator` currently requires ITS OWN step's funding coin to be a
+   * fresh `SplitCoins` off the shared wallet-spend result (`ctx.spendIndex`) — the model the WS2
+   * generic signer design was built for is several INDEPENDENTLY wallet-funded steps composed into
+   * one PTB (see `steps/deepbook.ts`'s doc comment: "each fund their own leg"), not a downstream
+   * step consuming an UPSTREAM step's PTB output via `NestedResult`, which is what a real
+   * swap→stake coin chain compiles to. So today, a two-step envelope built by this method for a
+   * chain will fail local `execute_rill_action` at the Haedal step ("Haedal stake coin is not
+   * wallet-funded") even though the backend's build/simulate is honest and correct on-chain. Fixing
+   * that is signer-side work, out of scope here — `spendAmountMist: '0'` on the downstream step is
+   * chosen so the SUM of `steps[].spendAmountMist` still equals the PTB's one real wallet draw,
+   * ready for whichever future signer-side fix teaches `inspectGeneric` to follow a coin chain.
    */
-  private buildStep(node: FlowNode, budgetSpendMist: bigint): EnvelopeStep {
-    const spendAmountMist = budgetSpendMist.toString();
+  private buildStep(node: FlowNode, spendAmountMistValue: bigint): EnvelopeStep {
+    const spendAmountMist = spendAmountMistValue.toString();
 
     if (node.type === 'cetus_swap') {
       const { config: swapCfg } = resolveCetusSwapConfig(node);
