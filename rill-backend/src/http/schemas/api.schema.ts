@@ -1,5 +1,4 @@
 import { z } from 'zod';
-import { isHeroActionFlow } from '../../features/mcp/tool-schema';
 import { findFlowStructureIssues } from '../../features/protocols/handles';
 import { CapabilityManifestSchema } from '../../../../packages/rill-sdk/src/capability-manifest';
 
@@ -102,16 +101,14 @@ export const SimulateSchema = z.object({
   useServerWallet,
 }).strict();
 
+// Publish accepts any structurally-valid flow the compiler can build (Cetus swap, Haedal stake,
+// DeepBook limit order — single or chained), matching /compile and /simulate. `build_action` runs
+// the real `skill.flow` through the compiler, so every published flow yields a working endpoint;
+// the DeepBook-only refine was over-restrictive. FlowSchema still enforces structural validity.
 export const PublishSchema = z.object({
   flow: FlowSchema,
   policyId: z.string().optional(),
-}).strict().refine(
-  ({ flow }) => isHeroActionFlow(flow),
-  {
-    message: 'Publish supports exactly one deepbook_limit_order node with no edges.',
-    path: ['flow'],
-  },
-);
+}).strict();
 
 export const ExecuteSchema = z.object({
   skillId: z.string().min(1),

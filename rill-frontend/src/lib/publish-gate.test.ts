@@ -42,17 +42,29 @@ describe("computePublishGate", () => {
     expect(computePublishGate(nodes, edges)).toEqual({ publishable: true, reason: null });
   });
 
-  it("a Cetus/Haedal-only flow is not publishable, with the capability reason", () => {
-    const nodes = [cetusSwapNode()];
-    const result = computePublishGate(nodes, []);
-    expect(result.publishable).toBe(false);
-    expect(result.reason).toBe(CAPABILITY_COPY.publishScope);
+  it("a single Cetus swap flow is publishable (compiles & exports like any supported action)", () => {
+    const result = computePublishGate([cetusSwapNode()], []);
+    expect(result).toEqual({ publishable: true, reason: null });
+  });
+
+  it("a Cetus swap → Haedal stake chain is publishable", () => {
+    const swap = cetusSwapNode("n1");
+    const stake = actionNode("n2", "haedal", "Stake SUI", "Haedal");
+    const edges: Edge[] = [{ id: "e1", source: "n1", target: "n2" }];
+    expect(computePublishGate([swap, stake], edges)).toEqual({ publishable: true, reason: null });
   });
 
   it("an empty flow is not publishable", () => {
     const result = computePublishGate([], []);
     expect(result.publishable).toBe(false);
-    expect(result.reason).toBe(CAPABILITY_COPY.publishScope);
+    expect(result.reason).toBe(CAPABILITY_COPY.publishEmpty);
+  });
+
+  it("a flow with an un-compilable action is not publishable", () => {
+    const unsupported = actionNode("n1", "scallop", "Lend", "Scallop");
+    const result = computePublishGate([unsupported], []);
+    expect(result.publishable).toBe(false);
+    expect(result.reason).toMatch(/don't compile yet/i);
   });
 
   it("blocks on an unset guardrail minValue even alongside an otherwise-publishable flow", () => {
@@ -71,12 +83,9 @@ describe("computePublishGate", () => {
 
   it("Part B: an action node is never blocked for a missing/invalid amount — amount is agent-supplied at runtime, not canvas-editable", () => {
     // "abc" would have failed the old amount gate; the action-node amount input no longer exists,
-    // so this config key is now inert and computePublishGate must not look at it.
-    const nodes = [cetusSwapNode("n1", "abc")];
-    const result = computePublishGate(nodes, []);
-    expect(result.publishable).toBe(false);
-    // Still blocked, but for the pre-existing capability-scope reason (a lone Cetus swap can't
-    // publish yet — only DeepBook can), never an amount-shaped reason.
-    expect(result.reason).toBe(CAPABILITY_COPY.publishScope);
+    // so this config key is now inert and computePublishGate must not look at it. A lone Cetus swap
+    // is publishable now, and an inert amount value must not change that.
+    const result = computePublishGate([cetusSwapNode("n1", "abc")], []);
+    expect(result).toEqual({ publishable: true, reason: null });
   });
 });

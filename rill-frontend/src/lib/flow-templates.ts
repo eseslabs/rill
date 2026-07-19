@@ -230,7 +230,7 @@ export const FLOW_TEMPLATES: FlowTemplate[] = [
     id: "guarded-swap",
     name: "Guarded swap",
     description:
-      "A Cetus swap with an owner-set minimum output — the per-swap slippage floor lives on the swap node itself, no separate guardrail needed.",
+      "A Cetus swap bounded by a wallet-level slippage floor (min swap output) plus an asset scope — set once in Capabilities, enforced on every swap.",
     icon: ShieldCheck,
     steps: ["cetus"],
     manifest: manifestOf(

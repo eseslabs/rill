@@ -13,3 +13,4 @@ rill-backend/data/
 
 # Demo run policies and evidence; public IDs only, never signer material
 .rill/
+.claude/worktrees/

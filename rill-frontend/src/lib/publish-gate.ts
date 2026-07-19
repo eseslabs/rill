@@ -11,17 +11,20 @@ import { hasCycle } from "@/lib/wire-inference";
  * omitted DeepBook (which does simulate).
  */
 export const SIMULATE_SUPPORTED_LABEL = "Cetus swap, Haedal stake, or DeepBook limit order";
-export const PUBLISH_SUPPORTED_LABEL = "exactly one DeepBook limit order";
+export const PUBLISH_SUPPORTED_LABEL = "Cetus swap, Haedal stake, or DeepBook limit order";
 
 export const CAPABILITY_COPY = {
   simulateEmpty: `Add a ${SIMULATE_SUPPORTED_LABEL} node to simulate.`,
   simulateSkipped: (skipped: string[]) =>
     `Only ${SIMULATE_SUPPORTED_LABEL} actions simulate today. Skipped: ${skipped.join(", ")}`,
-  publishScope: `Publish supports ${PUBLISH_SUPPORTED_LABEL} today — Cetus swap and Haedal stake simulate but can't publish yet.`,
+  publishEmpty: `Add a ${PUBLISH_SUPPORTED_LABEL} node to compile & export.`,
+  publishUnsupported: (labels: string[]) =>
+    `These actions don't compile yet, so the flow can't be exported: ${labels.join(", ")}. `
+    + `Remove them or swap in a supported action.`,
 } as const;
 
-function isDeepbookLimitOrder(data: ActionNodeData): boolean {
-  return data.protocolId === "deepbook" && data.action.toLowerCase().includes("limit");
+function actionLabel(data: ActionNodeData): string {
+  return `${data.protocol} ${data.action}`.trim();
 }
 
 /** A guardrail with an unset or non-positive minValue enforces nothing — R1: no
@@ -65,15 +68,27 @@ export function computePublishGate(nodes: Node[], edges: Edge[]): PublishGateRes
   if (guardrailReason) return { publishable: false, reason: guardrailReason };
 
   if (hasCycle(edges)) {
-    return { publishable: false, reason: "This flow has a cycle — remove it before publishing." };
+    return { publishable: false, reason: "This flow has a cycle — remove it before compiling." };
   }
 
+  // Anything the compiler can build, you can compile & export — the same set that simulates
+  // (Cetus swap, Haedal stake, DeepBook limit order), single node or chained. The DeepBook-only
+  // publish gate was over-conservative: the backend `/publish` compiles the whole flow, so a swap
+  // or stake exports to a working MCP endpoint just like a DeepBook order. Only genuinely
+  // un-compilable canvases (empty, or containing an action the backend can't build) are blocked.
   const actionNodes = nodes.filter((n) => n.type === "action");
-  const deepbookNodes = actionNodes.filter((n) => isDeepbookLimitOrder(n.data as ActionNodeData));
-  const allSupported = actionNodes.every((n) => isBackendSupported(n.data as ActionNodeData));
+  if (actionNodes.length === 0) {
+    return { publishable: false, reason: CAPABILITY_COPY.publishEmpty };
+  }
 
-  if (actionNodes.length !== 1 || deepbookNodes.length !== 1 || !allSupported) {
-    return { publishable: false, reason: CAPABILITY_COPY.publishScope };
+  const unsupported = actionNodes.filter((n) => !isBackendSupported(n.data as ActionNodeData));
+  if (unsupported.length > 0) {
+    return {
+      publishable: false,
+      reason: CAPABILITY_COPY.publishUnsupported(
+        unsupported.map((n) => actionLabel(n.data as ActionNodeData)),
+      ),
+    };
   }
 
   return { publishable: true, reason: null };

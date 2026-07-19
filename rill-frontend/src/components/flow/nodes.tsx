@@ -1,7 +1,17 @@
 import { memo, useCallback } from "react";
 import { Handle, Position, type NodeProps, useReactFlow } from "reactflow";
 import { motion } from "framer-motion";
-import { Shield, Layers, FileCode2, MessageSquareText, Plug } from "lucide-react";
+import {
+  Shield,
+  ShieldCheck,
+  Layers,
+  FileCode2,
+  MessageSquareText,
+  Plug,
+  Lock,
+  Eye,
+  Globe,
+} from "lucide-react";
 import { RillMark } from "@/components/rill-mark";
 import type { Port } from "@/lib/rill-types";
 import { FlowInLabels, FlowOutLabels, NodePort } from "@/components/flow/aligned-handle";
@@ -9,14 +19,15 @@ import { ProtocolLogo } from "@/components/flow/protocol-logo";
 import { WIRE_IN, WIRE_OUT } from "@/lib/wire-inference";
 import { isGuardrailMinValueValid } from "@/lib/publish-gate";
 import {
-  DEFAULT_MIN_SWAP_OUTPUT,
   defaultActionConfig,
   otherSwapToken,
   type ActionConfig,
   type SwapTokenSymbol,
 } from "@/lib/action-config";
-import { TokenBadge, TokenSelect } from "@/components/flow/token-select";
+import { TokenSelect } from "@/components/flow/token-select";
 import { useOpenCapabilities } from "@/lib/open-capabilities-context";
+import { useManifest } from "@/lib/manifest-context";
+import { manifestCaps } from "@/lib/capabilities";
 
 export type ActionNodeData = {
   protocol: string;
@@ -169,28 +180,13 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
                 }
               />
             </label>
-            <label className="block">
-              <span className="flex items-center justify-between text-[10px] text-muted-foreground uppercase tracking-wide">
-                <span>Min swap output</span>
-                <TokenBadge symbol={(cfg.tokenOut ?? "USDC") as SwapTokenSymbol} />
-              </span>
-              <input
-                type="number"
-                min="0"
-                step="any"
-                placeholder={DEFAULT_MIN_SWAP_OUTPUT}
-                className={fieldCls}
-                value={cfg.min_amount_out ?? ""}
-                onChange={(e) => patchConfig({ min_amount_out: e.target.value })}
-              />
-            </label>
-            <AgentRuntimeNote onOpenCapabilities={openCapabilities} />
+            <AgentAmountNote onOpenCapabilities={openCapabilities} />
           </div>
         )}
 
         {isHaedalStake && (
           <div className="mt-3">
-            <AgentRuntimeNote onOpenCapabilities={openCapabilities} />
+            <AgentAmountNote onOpenCapabilities={openCapabilities} />
           </div>
         )}
 
@@ -283,28 +279,119 @@ function ActionNodeImpl({ id, data, selected }: NodeProps<ActionNodeData>) {
 }
 
 /**
- * Part A: on-chain agent_wallet caps (budget/per_tx/rate_limit/time_window/scope) are
- * WALLET-LEVEL — they bound the whole agent, not one action — so repeating them on every action
- * node (the old "Bounded by" panel) read as per-node when they aren't. This replaces it with a
- * single honest line plus a link straight to the dialog that actually owns them; `onOpenCapabilities`
- * comes from `lib/open-capabilities-context.ts` since ReactFlow gives custom nodes no other way to
- * reach a callback defined in `routes/builder.tsx`.
+ * Wallet caps are GLOBAL (one set bounds the whole agent, not one action), so they DON'T belong on
+ * every action node — repeating them there both misread as per-transaction AND blew the node width
+ * out (a time_window value alone is ~90 chars). The action node just states the honest runtime fact
+ * and links to the one place that owns the caps; the caps themselves live in the standalone
+ * `CapabilitiesNode` at the head of the flow.
  */
-function AgentRuntimeNote({ onOpenCapabilities }: { onOpenCapabilities: () => void }) {
+function AgentAmountNote({ onOpenCapabilities }: { onOpenCapabilities: () => void }) {
   return (
     <p className="text-[10px] leading-relaxed text-muted-foreground">
-      Agent sets the amount at runtime — bounded by your wallet{" "}
+      Amount set by the agent at runtime — capped by the wallet{" "}
       <button
         type="button"
         onClick={onOpenCapabilities}
         className="nodrag cursor-pointer font-medium text-foreground underline decoration-dotted underline-offset-2 hover:text-primary"
       >
         Capabilities
-      </button>
-      .
+      </button>{" "}
+      card.
     </p>
   );
 }
+
+/** A long cap value (a time_window is a full ISO range) would stretch a chip off the card — clamp
+ *  the display and keep the full value in the tooltip. Short values (budgets, per-tx caps) are
+ *  unaffected. */
+function capChipText(value: string): string {
+  return value.length > 28 ? `${value.slice(0, 27)}…` : value;
+}
+
+/**
+ * The ONE place the global wallet caps live on the canvas — a standalone card at the head of the
+ * flow (Builder pins it left of the Trigger, `computeAutoLayout`), NOT a panel repeated on every
+ * action node. Reads the shared `ManifestContext` (`useManifest`) and renders each declared cap as
+ * a chip (green dot = proved on-chain, amber = enforced pre-flight, the SDK `toDeclaration` split),
+ * long values clamped. It carries no wire handles — caps aren't a flow step, they bound the whole
+ * flow — and clicking anywhere routes to the Capabilities dialog that owns them.
+ */
+function CapabilitiesNodeImpl() {
+  const caps = manifestCaps(useManifest());
+  const openCapabilities = useOpenCapabilities();
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.15 }}
+      className="relative w-[248px] overflow-visible rounded-2xl border border-border/70 bg-card shadow-[var(--shadow-soft)]"
+    >
+      <div className="flex items-center gap-2 rounded-t-2xl bg-mint px-3 py-2 text-mint-foreground">
+        <span className="inline-flex h-6 w-6 items-center justify-center rounded-md bg-background/20">
+          <ShieldCheck className="h-3.5 w-3.5" strokeWidth={2.25} />
+        </span>
+        <span className="text-[11px] font-semibold uppercase tracking-wider">Capabilities</span>
+        <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-background/25 px-1.5 py-0.5 text-[9px] font-medium">
+          <Globe className="h-2.5 w-2.5" /> wallet · global
+        </span>
+      </div>
+
+      <NodePort id={WIRE_IN} type="target" side="left">
+        <FlowInLabels />
+      </NodePort>
+
+      <div className="px-3 py-3">
+        <div className="text-sm font-semibold text-foreground">Agent limits</div>
+        <p className="mt-0.5 text-xs leading-snug text-muted-foreground">
+          One set of caps bounds every action in the flow — not per-transaction.
+        </p>
+        {caps.length === 0 ? (
+          <button
+            type="button"
+            onClick={openCapabilities}
+            className="nodrag mt-2.5 w-full cursor-pointer rounded-lg border border-dashed border-border px-2.5 py-2 text-[11px] text-muted-foreground hover:border-primary/50 hover:text-primary"
+          >
+            + Set spend caps, rate limits &amp; scopes
+          </button>
+        ) : (
+          <div className="mt-2.5 flex flex-col gap-1.5">
+            {caps.map((cap, i) => {
+              const onChain = cap.enforcement === "on-chain";
+              const Icon = onChain ? Lock : Eye;
+              return (
+                <span
+                  key={`${cap.label}-${i}`}
+                  title={`${cap.label}: ${cap.value} (${onChain ? "proved on-chain" : "enforced pre-flight"})`}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-border bg-background px-2 py-0.5 text-[10px] font-medium"
+                >
+                  <Icon
+                    className={`h-3 w-3 shrink-0 ${onChain ? "text-mint-foreground" : "text-amber-500"}`}
+                  />
+                  <span className="shrink-0">{cap.label}</span>
+                  <span className="truncate font-mono text-muted-foreground">
+                    {capChipText(cap.value)}
+                  </span>
+                </span>
+              );
+            })}
+          </div>
+        )}
+        <button
+          type="button"
+          onClick={openCapabilities}
+          className="nodrag mt-2.5 cursor-pointer text-[10px] font-medium text-primary hover:underline"
+        >
+          Edit capabilities →
+        </button>
+      </div>
+
+      <NodePort id={WIRE_OUT} type="source" side="right">
+        <FlowOutLabels />
+      </NodePort>
+    </motion.div>
+  );
+}
+export const CapabilitiesNode = memo(CapabilitiesNodeImpl);
 
 function PortLabelRow({ port, align }: { port: Port; align: "left" | "right" }) {
   return (

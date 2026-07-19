@@ -8,7 +8,7 @@ import { DialogShell } from "@/components/flow/dialog-shell";
 import { FlowWarningsBanner } from "@/components/flow/flow-warnings";
 import type { ActionNodeData } from "@/components/flow/nodes";
 import { buildFlowGraph } from "@/lib/flow-mapper";
-import { computePublishGate, CAPABILITY_COPY } from "@/lib/publish-gate";
+import { computePublishGate } from "@/lib/publish-gate";
 import { hashFlowGraph } from "@/lib/graph-hash";
 import { rillApi, type PublishResult } from "@/lib/rill-api";
 import { useFlowRequest } from "@/lib/use-flow-request";
@@ -110,7 +110,7 @@ export function ExportDialog({
 
   const handlePublish = () => {
     if (!gate.publishable) {
-      toast.error(gate.reason ?? CAPABILITY_COPY.publishScope);
+      toast.error(gate.reason ?? "This flow can't be compiled & exported yet.");
       return;
     }
     publishedForHashRef.current = hash;

@@ -15,7 +15,10 @@ const LAYOUT_BASE_X = 40;
 // DeepBook limit order ~449px) — mirrors flow-templates.ts's own STEP_X and the same reasoning:
 // that alone guarantees two nodes in adjacent columns never overlap horizontally, regardless of y.
 const LAYOUT_STEP_X = 480;
-const LAYOUT_BASE_Y = 80;
+// Vertical center-line every column balances around, so a single-node column (Trigger, Output, one
+// action) sits at the same height and the whole flow reads as one straight, centered row instead of
+// top-ragged columns.
+const LAYOUT_MID_Y = 300;
 // Comfortably taller than the tallest action-node card renders (measured: DeepBook limit order
 // ~419px) — two nodes CAN share a column here (e.g. unwired siblings both fed by Trigger), so
 // this needs to clear the tallest card's height, not just look tidy.
@@ -27,6 +30,10 @@ export function computeAutoLayout(
   nodes: Node[],
   edges: Edge[],
 ): Map<string, { x: number; y: number }> {
+  const positions = new Map<string, { x: number; y: number }>();
+
+  // Capabilities is an inline flow node (Trigger → Capabilities → actions → Output) with real wires,
+  // so it lays out by depth like any other node — no special-casing.
   const ids = nodes.map((n) => n.id);
   const idSet = new Set(ids);
   const outgoing = new Map<string, string[]>(ids.map((id) => [id, []]));
@@ -62,14 +69,17 @@ export function computeAutoLayout(
     depth.set(id, preds.length > 0 ? Math.max(...preds.map((p) => depth.get(p)!)) + 1 : 0);
   }
 
-  // Pin Trigger to the first column and Output to strictly the last — both are structurally
-  // guaranteed to be a pure source/sink respectively, but pinning explicitly also covers an
-  // unwired starter canvas (no edges at all yet) or a floating Output that the generic DP above
-  // would otherwise leave stacked in column 0 alongside Trigger.
+  // Trigger owns column 0 alone; Output is pinned strictly last. Any OTHER node the DP left at
+  // depth 0 (a freshly-dropped, not-yet-wired action) is bumped to column 1 so it never stacks on
+  // top of the Trigger — the old layout let unwired actions share the Trigger's column, which read
+  // as a collision.
+  for (const node of nodes) {
+    if (node.type === "trigger") depth.set(node.id, 0);
+    else if (node.type !== "output" && (depth.get(node.id) ?? 0) === 0) depth.set(node.id, 1);
+  }
   const nonOutputDepths = nodes.filter((n) => n.type !== "output").map((n) => depth.get(n.id) ?? 0);
   const nonOutputMax = nonOutputDepths.length > 0 ? Math.max(...nonOutputDepths) : 0;
   for (const node of nodes) {
-    if (node.type === "trigger") depth.set(node.id, 0);
     if (node.type === "output")
       depth.set(node.id, Math.max(depth.get(node.id) ?? 0, nonOutputMax + 1));
   }
@@ -82,14 +92,16 @@ export function computeAutoLayout(
     else columns.set(d, [id]);
   }
 
-  const positions = new Map<string, { x: number; y: number }>();
+  // Center each column on LAYOUT_MID_Y: a column of N cards spans (N-1)*STEP_Y, so its first card
+  // starts half that span above the mid-line and they fill downward — single-card columns land
+  // exactly on the line, keeping the mainline flow dead straight.
   for (const [d, colIds] of columns) {
+    const span = (colIds.length - 1) * LAYOUT_STEP_Y;
+    const startY = LAYOUT_MID_Y - span / 2;
     colIds.forEach((id, i) => {
-      positions.set(id, {
-        x: LAYOUT_BASE_X + d * LAYOUT_STEP_X,
-        y: LAYOUT_BASE_Y + i * LAYOUT_STEP_Y,
-      });
+      positions.set(id, { x: LAYOUT_BASE_X + d * LAYOUT_STEP_X, y: startY + i * LAYOUT_STEP_Y });
     });
   }
+
   return positions;
 }

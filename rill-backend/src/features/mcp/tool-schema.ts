@@ -3,6 +3,35 @@ import type { FlowGraph } from '../compiler/compiler.service';
 export const HERO_ACTION_NAME = 'DeepBook limit order';
 export const HERO_ACTION_DESCRIPTION = 'Build one wallet-bound DeepBook limit order for strict local execution.';
 
+/**
+ * Human-facing name/description for a published skill, derived from the flow's action nodes — so a
+ * published Cetus swap is called "Cetus swap", not the old hardcoded "DeepBook limit order". The
+ * MCP `build_action` compiles the actual `skill.flow` regardless of type (same path `/simulate`
+ * proves works for all three), so publishing any supported flow yields a working endpoint; this just
+ * labels it honestly. DeepBook stays the canonical single-order hero.
+ */
+export function heroActionOf(flow: FlowGraph): { name: string; description: string } {
+  const types = new Set(flow.nodes.map((n) => n.type));
+  const hasSwap = types.has('cetus_swap');
+  const hasStake = types.has('haedal_stake');
+  if (hasSwap && hasStake) {
+    return {
+      name: 'Cetus swap → Haedal stake',
+      description: 'Build one wallet-bound Cetus swap chained into a Haedal stake for strict local execution.',
+    };
+  }
+  if (hasSwap) {
+    return { name: 'Cetus swap', description: 'Build one wallet-bound Cetus swap for strict local execution.' };
+  }
+  if (hasStake) {
+    return { name: 'Haedal stake', description: 'Build one wallet-bound Haedal stake for strict local execution.' };
+  }
+  if (types.has('deepbook_limit_order')) {
+    return { name: HERO_ACTION_NAME, description: HERO_ACTION_DESCRIPTION };
+  }
+  return { name: 'Rill flow', description: 'Build one wallet-bound Rill action for strict local execution.' };
+}
+
 export function isHeroActionFlow(flow: FlowGraph): boolean {
   const allowedWrappers = new Set(['ptb', 'guardrail']);
   const orderNodes = flow.nodes.filter((n) => n.type === 'deepbook_limit_order');

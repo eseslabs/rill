@@ -195,15 +195,15 @@ export function SimulateDialog({
             Enforced at execution
           </div>
           <p className="mt-1 text-xs text-muted-foreground">
-            Read-only — what actually runs, not a toggle. A swap's own{" "}
-            <strong>Min swap output</strong> field (on the node) is its real floor now; a guardrail
-            below is a legacy node from an older draft — there's no way to add a new one.
+            Read-only — what actually runs, not a toggle. Spend caps and the swap slippage floor are
+            wallet-level, set in <strong>Capabilities</strong>; a guardrail below is a legacy node
+            from an older draft — there's no way to add a new one.
           </p>
           <div className="mt-3 space-y-1.5">
             {guardrailNodes.length === 0 && (
               <p className="rounded-lg border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
-                No legacy guardrail nodes on this flow — each swap's own Min swap output field is
-                its floor.
+                No legacy guardrail nodes on this flow — the swap slippage floor is a wallet-level
+                cap in Capabilities.
               </p>
             )}
             {guardrailNodes.map((n) => {

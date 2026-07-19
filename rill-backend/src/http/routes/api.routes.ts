@@ -1,4 +1,4 @@
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import {
   toDeclaration,
@@ -18,11 +18,7 @@ import { serializeUnsignedPtb } from '../../features/compiler/ptb.util';
 import { simulatorService } from '../../features/compiler/simulator.service';
 import { skillsStore } from '../../features/mcp/skills.store';
 import { skillRunnerService } from '../../features/mcp/skill-runner.service';
-import {
-  buildToolDefs,
-  HERO_ACTION_DESCRIPTION,
-  HERO_ACTION_NAME,
-} from '../../features/mcp/tool-schema';
+import { buildToolDefs, heroActionOf } from '../../features/mcp/tool-schema';
 import { buildSkillDoc } from '../../features/mcp/skill-doc';
 import { renderAgentInstructions } from '../../features/mcp/agent-instructions';
 import { handleMcpJsonRpc } from '../../features/mcp/mcp.service';
@@ -40,6 +36,16 @@ import {
 } from '../schemas/api.schema';
 
 export const apiRouter = new Hono();
+
+/** zValidator error hook that flattens a Zod failure into ONE readable string under `error` — the
+ *  default zValidator returns the raw ZodError object, which the frontend's `throw new Error(json.error)`
+ *  turned into a useless "[object Object]". Mirrors the hook `/capabilities/preview` already uses. */
+function zodErrorToMessage(result: { success: boolean; error?: { issues: { message: string }[] } }, c: Context) {
+  if (!result.success) {
+    const message = result.error?.issues.map((issue) => issue.message).join('; ') || 'Invalid request body.';
+    return c.json({ success: false, error: message, type: 'ValidationError' }, 422);
+  }
+}
 
 /** Publish/compile/simulate flow-size cap (R13) — a pathological flow (hundreds of nodes) turns one
  *  request into unbounded compiler/adapter work (RPC calls, PTB commands); reject up front instead
@@ -239,7 +245,7 @@ apiRouter.post('/simulate', zValidator('json', SimulateSchema), async (c) => {
   });
 });
 
-apiRouter.post('/publish', zValidator('json', PublishSchema), async (c) => {
+apiRouter.post('/publish', zValidator('json', PublishSchema, zodErrorToMessage), async (c) => {
   const { flow, policyId } = c.req.valid('json');
 
   if (flow.nodes.length > MAX_FLOW_NODES) {
@@ -250,9 +256,10 @@ apiRouter.post('/publish', zValidator('json', PublishSchema), async (c) => {
   }
 
   const warnings = [
-    'Published metadata only; build_action requires run-specific wallet, BalanceManager, TradeCap, sender, and runtime order params.',
+    'Published metadata only; build_action requires a run-specific wallet, sender, and runtime params.',
   ];
 
+  const { name, description } = heroActionOf(flow);
   const skillId = `skill_${crypto.randomUUID().replace(/-/g, '').slice(0, 10)}`;
   const toolDefs = buildToolDefs(flow, skillId);
   const mcpUrl = `${config.publicBaseUrl}/api/mcp/${skillId}`;
@@ -260,8 +267,8 @@ apiRouter.post('/publish', zValidator('json', PublishSchema), async (c) => {
 
   skillsStore.save({
     id: skillId,
-    name: HERO_ACTION_NAME,
-    description: HERO_ACTION_DESCRIPTION,
+    name,
+    description,
     flow,
     toolDefs,
     policyId,
@@ -272,8 +279,8 @@ apiRouter.post('/publish', zValidator('json', PublishSchema), async (c) => {
     success: true,
     data: {
       skillId,
-      name: HERO_ACTION_NAME,
-      description: HERO_ACTION_DESCRIPTION,
+      name,
+      description,
       mcpUrl,
       skillUrl,
       toolDefs,

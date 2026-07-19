@@ -20,22 +20,14 @@ function WireHandle({ id, type, side }: WireHandleProps) {
   );
 }
 
+// Just the port identity — the "← upstream" / "downstream" hint text was noise the card didn't
+// need (the top-of-canvas "Wire out → in" pill already explains direction), so it's dropped.
 export function FlowInLabels() {
-  return (
-    <>
-      <span className="font-mono text-muted-foreground">flow in</span>
-      <span className="ml-auto text-muted-foreground">← upstream</span>
-    </>
-  );
+  return <span className="font-mono text-muted-foreground">flow in</span>;
 }
 
-export function FlowOutLabels({ lead = "downstream" }: { lead?: string }) {
-  return (
-    <>
-      <span className="text-muted-foreground">{lead}</span>
-      <span className="ml-auto font-mono text-muted-foreground">flow out</span>
-    </>
-  );
+export function FlowOutLabels() {
+  return <span className="ml-auto font-mono text-muted-foreground">flow out</span>;
 }
 
 export function NodePort({

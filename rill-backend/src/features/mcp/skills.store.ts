@@ -2,12 +2,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname } from 'node:path';
 import type { FlowGraph } from '../compiler/compiler.service';
 import { config } from '../../core/config';
-import {
-  buildToolDefs,
-  HERO_ACTION_DESCRIPTION,
-  HERO_ACTION_NAME,
-  isHeroActionFlow,
-} from './tool-schema';
+import { buildToolDefs, heroActionOf } from './tool-schema';
 
 export interface PublishedSkill {
   id: string;
@@ -38,11 +33,14 @@ class SkillsStore {
       if (!existsSync(this.path)) return;
       const raw = JSON.parse(readFileSync(this.path, 'utf8')) as PublishedSkill[];
       for (const skill of raw) {
-        if (!isHeroActionFlow(skill.flow)) continue;
+        // Rehydrate every published skill regardless of action type. Prefer the stored
+        // name/description; fall back to the flow-derived hero label for older records that
+        // predate flow-aware naming (they were all saved as the DeepBook hero).
+        const hero = heroActionOf(skill.flow);
         this.skills.set(skill.id, {
           ...skill,
-          name: HERO_ACTION_NAME,
-          description: HERO_ACTION_DESCRIPTION,
+          name: skill.name ?? hero.name,
+          description: skill.description ?? hero.description,
           toolDefs: buildToolDefs(skill.flow, skill.id),
         });
       }

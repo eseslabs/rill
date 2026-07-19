@@ -49,8 +49,21 @@ async function sourceCoinFromSender(
   } while (cursor);
 
   if (ids.length === 0 || total < amount) {
+    const symbol = coinType.split('::').pop() || coinType;
+    // A dry-run runs against a placeholder/zero sender (no wallet bound yet) that owns nothing — so a
+    // swap whose INPUT is a non-SUI coin (e.g. USDC→SUI, as any swap feeding a Haedal stake must be)
+    // has no coin to source. This isn't a compile bug: a simulation can't mint balances. Say exactly
+    // that and point at the two paths that DO dry-run cleanly, instead of a raw hex dump.
+    if (total === 0n) {
+      throw new ValidationError(
+        `Node ${nodeId}: can't dry-run this swap — it spends ${symbol}, but the simulation sender `
+          + `holds none (a dry-run can't create token balances). Two flows that simulate cleanly: a `
+          + `SUI→${symbol === 'SUI' ? 'USDC' : 'SUI'} swap (funded from gas), or bind an agent wallet `
+          + `that already holds the ${symbol}.`,
+      );
+    }
     throw new ValidationError(
-      `Node ${nodeId}: insufficient ${coinType} balance for ${sender} (have ${total}, need ${amount}).`,
+      `Node ${nodeId}: insufficient ${symbol} balance for ${sender} (have ${total}, need ${amount}).`,
     );
   }
   const [primary, ...rest] = ids;

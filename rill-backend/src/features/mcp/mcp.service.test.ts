@@ -378,7 +378,7 @@ test('publishing stores metadata without compiling runtime objects', async () =>
 
     expect(response.status).toBe(200);
     expect(body.data.warnings).toEqual([
-      'Published metadata only; build_action requires run-specific wallet, BalanceManager, TradeCap, sender, and runtime order params.',
+      'Published metadata only; build_action requires a run-specific wallet, sender, and runtime params.',
     ]);
     expect(published?.flow).toEqual(skill.flow);
     if (!published) throw new Error('expected published metadata');
@@ -392,37 +392,32 @@ test('publishing stores metadata without compiling runtime objects', async () =>
   }
 });
 
-test('publishing rejects anything except one edge-free DeepBook hero node', async () => {
+test('publishing accepts any supported flow — swap, stake, or DeepBook — with a flow-aware name', async () => {
   const save = skillsStore.save;
-  let saved = false;
-  skillsStore.save = () => { saved = true; };
+  const savedNames: string[] = [];
+  skillsStore.save = (value) => { savedNames.push(value.name); };
 
   try {
-    const invalidFlows = [
-      { nodes: [], edges: [] },
-      { nodes: [{ id: 'swap', type: 'cetus_swap' }], edges: [] },
+    const cases = [
+      { flow: { nodes: [{ id: 'swap', type: 'cetus_swap' }], edges: [] }, name: 'Cetus swap' },
+      { flow: { nodes: [{ id: 'stake', type: 'haedal_stake' }], edges: [] }, name: 'Haedal stake' },
       {
-        nodes: [
-          { id: 'order-1', type: 'deepbook_limit_order' },
-          { id: 'order-2', type: 'deepbook_limit_order' },
-        ],
-        edges: [],
-      },
-      {
-        nodes: [{ id: 'order', type: 'deepbook_limit_order' }],
-        edges: [{ source: 'order', sourceHandle: 'out', target: 'order', targetHandle: 'in' }],
+        flow: { nodes: [{ id: 'order', type: 'deepbook_limit_order' }], edges: [] },
+        name: 'DeepBook limit order',
       },
     ];
 
-    for (const flow of invalidFlows) {
+    for (const { flow, name } of cases) {
       const response = await apiRouter.request('/publish', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ flow }),
       });
-      expect(response.status).toBe(400);
+      const body = await response.json() as { success: boolean; data: { name: string } };
+      expect(response.status).toBe(200);
+      expect(body.data.name).toBe(name);
     }
-    expect(saved).toBe(false);
+    expect(savedNames).toEqual(['Cetus swap', 'Haedal stake', 'DeepBook limit order']);
   } finally {
     skillsStore.save = save;
   }

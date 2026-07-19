@@ -36,6 +36,7 @@ import {
   ActionNode,
   TriggerNode,
   OutputNode,
+  CapabilitiesNode,
   PtbNode,
   GuardrailNode,
   type ActionNodeData,
@@ -76,6 +77,7 @@ const nodeTypes = {
   action: ActionNode,
   trigger: TriggerNode,
   output: OutputNode,
+  capabilities: CapabilitiesNode,
   ptb: PtbNode,
   guardrail: GuardrailNode,
 };
@@ -85,21 +87,51 @@ const edgeTypes = {
   deletable: DeletableEdge,
 };
 
-const initialNodes: Node[] = [
-  {
-    id: "trigger",
-    type: "trigger",
-    position: { x: 40, y: 200 },
-    data: { label: "Agent prompt", sub: "Describe the goal" },
-  },
-  {
-    id: "output",
-    type: "output",
-    position: { x: 920, y: 200 },
-    data: { label: "MCP Server", sub: "Auto-generated" },
-  },
+const TRIGGER_NODE: Node = {
+  id: "trigger",
+  type: "trigger",
+  position: { x: 40, y: 200 },
+  data: { label: "Agent prompt", sub: "Describe the goal" },
+};
+// The global wallet caps live in ONE inline card the flow runs THROUGH — Trigger → Capabilities →
+// actions → Output — so the canvas reads as "every action passes the capability gate." It carries
+// real flow-in/flow-out handles like any node, but is mandatory scaffolding (can't be deleted), and
+// its edges are canvas-only annotations the compiler ignores (same as Trigger/Output edges).
+const CAPABILITIES_NODE: Node = {
+  id: "capabilities",
+  type: "capabilities",
+  position: { x: 360, y: 200 },
+  data: {},
+  deletable: false,
+};
+const OUTPUT_NODE: Node = {
+  id: "output",
+  type: "output",
+  position: { x: 720, y: 200 },
+  data: { label: "MCP Server", sub: "Auto-generated" },
+};
+const initialNodes: Node[] = [TRIGGER_NODE, CAPABILITIES_NODE, OUTPUT_NODE];
+
+/** A dashed canvas-sequence edge (Trigger→Capabilities, Capabilities→Output, …) in the exact shape
+ *  `onConnect` builds for a hand-drawn flow wire. */
+function flowEdge(id: string, source: string, target: string): Edge {
+  return {
+    id,
+    source,
+    target,
+    sourceHandle: WIRE_OUT,
+    targetHandle: WIRE_IN,
+    type: "deletable",
+    animated: true,
+    className: "flow-edge",
+    data: { wireKind: "flow" },
+  };
+}
+// Starter canvas is already a connected chain THROUGH the caps gate — no floating nodes to wire.
+const initialEdges: Edge[] = [
+  flowEdge("e_trigger_capabilities", "trigger", "capabilities"),
+  flowEdge("e_capabilities_output", "capabilities", "output"),
 ];
-const initialEdges: Edge[] = [];
 
 const easeOut = [0.22, 1, 0.36, 1] as const;
 
@@ -133,7 +165,7 @@ function Builder() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(320);
   const idRef = useRef(1);
-  const { screenToFlowPosition } = useReactFlow();
+  const { screenToFlowPosition, fitView } = useReactFlow();
 
   // "Latest ref" pattern (see lib/use-flow-request.ts) — kept current on every
   // render so the beforeunload listener below can read live canvas state
@@ -161,7 +193,12 @@ function Builder() {
   useEffect(() => {
     const result = loadDraftFromStorage();
     if (result.status === "restored") {
-      setNodes(result.draft.nodes);
+      // A draft saved before the standalone Capabilities card existed won't contain it — inject the
+      // mandatory card at the head so restoring an older draft never drops the global-caps affordance.
+      const restored = result.draft.nodes.some((n) => n.type === "capabilities")
+        ? result.draft.nodes
+        : [CAPABILITIES_NODE, ...result.draft.nodes];
+      setNodes(restored);
       setEdges(result.draft.edges);
       setManifest(result.draft.manifest);
       idRef.current = maxNodeId(result.draft.nodes) + 1;
@@ -188,9 +225,11 @@ function Builder() {
   // state via nodesRef/edgesRef rather than re-subscribing on every edit.
   useEffect(() => {
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-      const hasContent =
-        nodesRef.current.some((n) => n.type !== "trigger" && n.type !== "output") ||
-        edgesRef.current.length > 0;
+      // Only real action/guardrail work counts — the Trigger→Capabilities→Output scaffold (nodes and
+      // their edges) is always present, so it must not trigger the unsaved-work prompt.
+      const hasContent = nodesRef.current.some(
+        (n) => n.type !== "trigger" && n.type !== "output" && n.type !== "capabilities",
+      );
       if (!hasContent) return;
       e.preventDefault();
       e.returnValue = "";
@@ -414,32 +453,39 @@ function Builder() {
     (templateId: string) => {
       const template = FLOW_TEMPLATES.find((t) => t.id === templateId);
       if (!template) return;
-      const hasContent =
-        nodesRef.current.some((n) => n.type !== "trigger" && n.type !== "output") ||
-        edgesRef.current.length > 0;
+      // Capabilities/Trigger/Output are all mandatory scaffolding, so they don't count as "content"
+      // when deciding whether a template would clobber real work.
+      const isScaffold = (n: Node) =>
+        n.type === "trigger" || n.type === "output" || n.type === "capabilities";
+      // Only real action/guardrail work counts as content — the starter canvas is already a wired
+      // Trigger→Capabilities→Output chain, so scaffold edges must NOT trigger the replace confirm.
+      const hasContent = nodesRef.current.some((n) => !isScaffold(n));
       if (hasContent && !window.confirm("Replace the current flow with this template?")) return;
       const built = template.build(makeId);
-      // Trigger + Output are MANDATORY scaffolding on every flow — a template swaps the action
-      // nodes/edges but must never wipe them. Keep the current trigger/output (preserving any
-      // position the user moved them to), falling back to the defaults if either was removed.
-      const trigger = nodesRef.current.find((n) => n.type === "trigger") ?? initialNodes[0];
-      const output = nodesRef.current.find((n) => n.type === "output") ?? initialNodes[1];
-      // Auto-wire the FULL flow: Trigger → entry node(s), exit node(s) → Output, so a template
-      // drops a complete, connected canvas — never floating nodes the user has to wire by hand.
-      // Entry = a template node with no incoming template edge; exit = one with no outgoing edge
-      // (a single-node template is both). `connectEdge` derives the wire kind exactly like a
-      // hand-drawn wire, so these read as normal flow edges.
+      // Capabilities + Trigger + Output are MANDATORY scaffolding on every flow — a template swaps
+      // the action nodes/edges but must never wipe them. Keep the current ones (preserving any
+      // position the user moved them to), falling back to the defaults if one was removed.
+      const capabilities =
+        nodesRef.current.find((n) => n.type === "capabilities") ?? CAPABILITIES_NODE;
+      const trigger = nodesRef.current.find((n) => n.type === "trigger") ?? TRIGGER_NODE;
+      const output = nodesRef.current.find((n) => n.type === "output") ?? OUTPUT_NODE;
+      // Auto-wire the FULL flow THROUGH the caps gate: Trigger → Capabilities → entry node(s), and
+      // exit node(s) → Output, so a template drops a complete, connected canvas — never floating
+      // nodes the user has to wire by hand. Entry = a template node with no incoming template edge;
+      // exit = one with no outgoing edge (a single-node template is both). `connectEdge` derives the
+      // wire kind exactly like a hand-drawn wire, so these read as normal flow edges.
       const targeted = new Set(built.edges.map((e) => e.target));
       const sourced = new Set(built.edges.map((e) => e.source));
       const scaffoldEdges = [
+        connectEdge(makeId(), trigger, capabilities),
         ...built.nodes
           .filter((n) => !targeted.has(n.id))
-          .map((n) => connectEdge(makeId(), trigger, n)),
+          .map((n) => connectEdge(makeId(), capabilities, n)),
         ...built.nodes
           .filter((n) => !sourced.has(n.id))
           .map((n) => connectEdge(makeId(), n, output)),
       ];
-      setNodes([trigger, output, ...built.nodes]);
+      setNodes([trigger, capabilities, output, ...built.nodes]);
       setEdges([...built.edges, ...scaffoldEdges]);
       setManifest(template.manifest ?? emptyManifest());
       idRef.current = maxNodeId(built.nodes) + 1;
@@ -497,7 +543,14 @@ function Builder() {
     setNodes((nds) =>
       nds.map((n) => (positions.has(n.id) ? { ...n, position: positions.get(n.id)! } : n)),
     );
-  }, [setNodes]);
+    // Re-lay-out only moves nodes — the viewport keeps its old pan/zoom, so an arranged flow can
+    // sit off-screen or half-cut (the "not centered / can't see everything" complaint). Fit the
+    // viewport to the new positions once React Flow has committed them (rAF → next paint) and cap
+    // the zoom so a 1- or 2-node flow frames at a sane size instead of blowing up to max zoom.
+    requestAnimationFrame(() =>
+      fitView({ padding: 0.2, duration: 400, maxZoom: 1, minZoom: 0.4 }),
+    );
+  }, [setNodes, fitView]);
 
   // Part C: hand-rolled drag-resize (not react-resizable-panels — that library sizes panels by
   // percentage of the group, and the ask here is a literal 260-480px clamp) — a mousedown on the
@@ -788,6 +841,9 @@ function Builder() {
                   nodeTypes={nodeTypes as any}
                   edgeTypes={edgeTypes as any}
                   fitView
+                  fitViewOptions={{ padding: 0.2, maxZoom: 1, minZoom: 0.4 }}
+                  minZoom={0.3}
+                  maxZoom={1.5}
                   className="h-full w-full"
                   proOptions={{ hideAttribution: true }}
                   defaultEdgeOptions={{ type: "deletable", animated: true }}

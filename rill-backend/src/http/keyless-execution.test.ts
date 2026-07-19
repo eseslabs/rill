@@ -346,19 +346,15 @@ test('publish rejects unknown fields and documents a strict request body', async
       }),
     });
 
-    expect(response.status).toBe(400);
+    // Unknown fields are still rejected by `.strict()`, now surfaced as a 422 with a readable
+    // message (the zodErrorToMessage hook) instead of the default 400 + "[object Object]".
+    expect(response.status).toBe(422);
     expect(saved).toBe(false);
     expect(requestSchema('/publish').additionalProperties).toBe(false);
     const flow = requestSchema('/publish').properties.flow as ObjectSchema;
-    const nodes = flow.properties.nodes as ObjectSchema;
-    const edges = flow.properties.edges as ObjectSchema;
-    expect(nodes.minItems).toBe(1);
-    expect(nodes.maxItems).toBe(1);
-    expect(nodes.items?.properties.type).toEqual({
-      type: 'string',
-      enum: ['deepbook_limit_order'],
-    });
-    expect(edges.maxItems).toBe(0);
+    // Publish is no longer DeepBook-only — the flow shape is the general compile/simulate shape.
+    expect(flow.properties.nodes).toBeDefined();
+    expect(flow.properties.edges).toBeDefined();
   } finally {
     skillsStore.save = save;
   }
@@ -468,15 +464,17 @@ test('publish rejects a 21-node flow with 422 when it would otherwise pass the h
   expect(body.type).toBe('FlowTooLarge');
 });
 
-// A flow with NO order node at all is rejected at 400 by the stricter, pre-existing hero-action
-// refine — the node-count cap never gets a chance to run (and doesn't need to).
-test('publish rejects an oversized non-hero-action flow at 400 (hero-action check runs first)', async () => {
+// Publish is no longer DeepBook-only, so an oversized flow is now caught by the node-count cap
+// (R13) regardless of action type — a 21-node flow returns 422 FlowTooLarge.
+test('publish rejects an oversized flow at 422 (node-count cap)', async () => {
   const response = await apiRouter.request('/publish', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ flow: buildOversizedFlow(21) }),
   });
-  expect(response.status).toBe(400);
+  const body = await response.json() as { success: boolean; type: string };
+  expect(response.status).toBe(422);
+  expect(body.type).toBe('FlowTooLarge');
 });
 
 // --- Server-wallet fallback opt-in (R13) --------------------------------------------------

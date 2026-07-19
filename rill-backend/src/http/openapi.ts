@@ -55,27 +55,9 @@ const flowSchema = {
   },
 } as const;
 
-const publishFlowSchema = {
-  ...flowSchema,
-  properties: {
-    nodes: {
-      ...flowSchema.properties.nodes,
-      minItems: 1,
-      maxItems: 1,
-      items: {
-        ...flowSchema.properties.nodes.items,
-        properties: {
-          ...flowSchema.properties.nodes.items.properties,
-          type: { type: 'string', enum: ['deepbook_limit_order'] },
-        },
-      },
-    },
-    edges: {
-      ...flowSchema.properties.edges,
-      maxItems: 0,
-    },
-  },
-} as const;
+// Publish accepts any structurally-valid flow the compiler can build (single or chained Cetus
+// swap / Haedal stake / DeepBook limit order) — the same shape /compile and /simulate take.
+const publishFlowSchema = flowSchema;
 
 const agentWalletSchema = {
   type: 'object',
