@@ -14,6 +14,7 @@ import { Route as PitchRouteImport } from './routes/pitch'
 import { Route as DocsRouteImport } from './routes/docs'
 import { Route as BuilderRouteImport } from './routes/builder'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as PitchPrintRouteImport } from './routes/pitch_.print'
 
 const ProtocolsRoute = ProtocolsRouteImport.update({
   id: '/protocols',
@@ -40,6 +41,11 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const PitchPrintRoute = PitchPrintRouteImport.update({
+  id: '/pitch_/print',
+  path: '/pitch/print',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -47,6 +53,7 @@ export interface FileRoutesByFullPath {
   '/docs': typeof DocsRoute
   '/pitch': typeof PitchRoute
   '/protocols': typeof ProtocolsRoute
+  '/pitch/print': typeof PitchPrintRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -54,6 +61,7 @@ export interface FileRoutesByTo {
   '/docs': typeof DocsRoute
   '/pitch': typeof PitchRoute
   '/protocols': typeof ProtocolsRoute
+  '/pitch/print': typeof PitchPrintRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -62,13 +70,27 @@ export interface FileRoutesById {
   '/docs': typeof DocsRoute
   '/pitch': typeof PitchRoute
   '/protocols': typeof ProtocolsRoute
+  '/pitch_/print': typeof PitchPrintRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/builder' | '/docs' | '/pitch' | '/protocols'
+  fullPaths:
+    | '/'
+    | '/builder'
+    | '/docs'
+    | '/pitch'
+    | '/protocols'
+    | '/pitch/print'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/builder' | '/docs' | '/pitch' | '/protocols'
-  id: '__root__' | '/' | '/builder' | '/docs' | '/pitch' | '/protocols'
+  to: '/' | '/builder' | '/docs' | '/pitch' | '/protocols' | '/pitch/print'
+  id:
+    | '__root__'
+    | '/'
+    | '/builder'
+    | '/docs'
+    | '/pitch'
+    | '/protocols'
+    | '/pitch_/print'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -77,6 +99,7 @@ export interface RootRouteChildren {
   DocsRoute: typeof DocsRoute
   PitchRoute: typeof PitchRoute
   ProtocolsRoute: typeof ProtocolsRoute
+  PitchPrintRoute: typeof PitchPrintRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -116,6 +139,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/pitch_/print': {
+      id: '/pitch_/print'
+      path: '/pitch/print'
+      fullPath: '/pitch/print'
+      preLoaderRoute: typeof PitchPrintRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -125,6 +155,7 @@ const rootRouteChildren: RootRouteChildren = {
   DocsRoute: DocsRoute,
   PitchRoute: PitchRoute,
   ProtocolsRoute: ProtocolsRoute,
+  PitchPrintRoute: PitchPrintRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
