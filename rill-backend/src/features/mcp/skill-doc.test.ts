@@ -25,12 +25,11 @@ test('documents the bounded remote and local MCP handoff', () => {
   expect(doc).toContain('local `create_run_set`');
   expect(doc).toContain('local `request_faucet`');
   expect(doc).toContain('Local `execute_rill_action`');
-  expect(doc).toContain('export RILL_WALLET_MCP_ENTRY=');
-  expect(doc).toContain('export RILL_SIGNER_POLICY_PATH=');
-  expect(doc).not.toContain('export RILL_SIGNER_POLICY_PATH="$PWD/');
-  expect(doc).toContain('--transport stdio rill-wallet -- bun run "$RILL_WALLET_MCP_ENTRY"');
+  // rill-wallet is a hosted standalone binary — no repo clone, no bun/node install.
+  expect(doc).toContain('releases/latest/download/rill-wallet-darwin-arm64');
+  expect(doc).not.toContain('bun run "$RILL_WALLET_MCP_ENTRY"');
+  expect(doc).toContain('--transport stdio rill-wallet -- "$PWD/rill-wallet"');
   expect(doc).toContain('--env "SUI_NETWORK=$SUI_NETWORK"');
-  expect(doc).toContain('--env "RILL_SIGNER_POLICY_PATH=$RILL_SIGNER_POLICY_PATH"');
   expect(doc).toContain('Launch Claude from the shell where `RILL_SUI_PRIVATE_KEY` is already set');
   expect(doc).not.toContain('--env "RILL_SUI_PRIVATE_KEY=');
   expect(doc).not.toContain('sui_execute_ptb');

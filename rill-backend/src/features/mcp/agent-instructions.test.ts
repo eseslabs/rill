@@ -51,9 +51,10 @@ test('renders both mcp-add commands and the 4-step tool order', () => {
 
   // Both `claude mcp add` commands, env-safe form (public network + policy-path only).
   expect(doc).toContain('claude mcp add --transport http rill-actions "$RILL_REMOTE_MCP_URL"');
-  expect(doc).toContain('--transport stdio rill-wallet -- bun run "$RILL_WALLET_MCP_ENTRY"');
+  // rill-wallet is a hosted standalone binary — no repo clone, no bun/node install.
+  expect(doc).toContain('releases/latest/download/rill-wallet-darwin-arm64');
+  expect(doc).toContain('--transport stdio rill-wallet -- "$PWD/rill-wallet"');
   expect(doc).toContain('export RILL_REMOTE_MCP_URL=');
-  expect(doc).toContain('export RILL_SIGNER_POLICY_PATH=');
 
   // The correct 4-step tool sequence, in order.
   const listIdx = doc.indexOf('`list_actions`');
