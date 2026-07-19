@@ -150,6 +150,10 @@ test('DeepBook runtime values drive preview and compiled PTB instead of stored c
         walletId: objectId(7),
         capId: objectId(8),
         coinType: '0x2::sui::SUI',
+        // There is ONE agent_wallet package now — every bound wallet requires a capabilityManifest
+        // + versionId (no legacy manifest-less spend() fallback).
+        versionId: objectId(9),
+        capabilityManifest: { walletCoinType: '0x2::sui::SUI', rules: [{ kind: 'budget', totalMist: '5000000000' }] },
       },
     },
     {

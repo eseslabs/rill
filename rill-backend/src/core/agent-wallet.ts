@@ -1,7 +1,8 @@
 import type { CapabilityManifest } from '../../../packages/rill-sdk/src/capability-manifest';
 import { ValidationError } from './errors';
 
-/** On-chain agent wallet binding — optional; when set, PTBs fund via spend() not tx.gas. */
+/** On-chain agent wallet binding — optional; when set, PTBs fund via the manifest-gated
+ *  request_spend/confirm_spend sequence instead of tx.gas. */
 
 export interface AgentWalletBinding {
   packageId: string;
@@ -10,16 +11,19 @@ export interface AgentWalletBinding {
   /** Full Move type, e.g. 0x2::sui::SUI */
   coinType: string;
   /**
-   * U5/R8 backward-compat gate: when set, the compiler emits the redesigned agent_wallet package's
-   * Rule + Hot Potato sequence (`request_spend` -> one `prove` per manifest rule -> `confirm_spend`)
-   * instead of the legacy single `agent_wallet::spend()` call. Absent (the default) keeps the
-   * CURRENT `spend()` behavior byte-identical — the redesigned package (U1) is not yet deployed, so
-   * flows against the live v2 package must keep compiling exactly as they do today.
+   * There is now ONE agent_wallet package (the redesigned Rule + Hot Potato design) — every bound
+   * wallet compiles the `request_spend` -> one `prove` per manifest rule -> `confirm_spend`
+   * sequence, never a legacy single `agent_wallet::spend()` call (that package/call no longer
+   * exists). `capabilityManifest`/`versionId` are typed optional here only because this interface
+   * also describes the transient, not-yet-normalized shape a caller may hand in; `normalizeAgentWallet`
+   * below is the ONE place that enforces both are actually present before a binding is used —
+   * a wallet bound without a manifest is rejected there (and, defense-in-depth, by the compiler's
+   * `buildManifestGatedSpend`) with a `ValidationError`, never a silent legacy fallback.
    */
   capabilityManifest?: CapabilityManifest;
   /**
-   * Shared `agent_wallet::version::Version` object id — required when `capabilityManifest` is set.
-   * Gates `create_wallet`/`request_spend`/`confirm_spend`/every rule's `prove` (U1).
+   * Shared `agent_wallet::version::Version` object id — required whenever a wallet is bound. Gates
+   * `create_wallet`/`request_spend`/`confirm_spend`/every rule's `prove`.
    */
   versionId?: string;
 }
@@ -58,65 +62,53 @@ export interface AgentWalletInput {
 
 /**
  * Normalizes any transport's raw agentWallet input into a resolved `AgentWalletBinding` — the ONE
- * place both coexisting agent_wallet packages get resolved (F7, review finding F7's fix):
+ * place a binding gets resolved against the (single) redesigned agent_wallet package.
  *
- *   - No `capabilityManifest` on the input -> today's live v2 binding, byte-identical to before F7:
- *     `packageId`/`walletId`/`capId` pass through exactly as given (no env fallback — a caller that
- *     never mentions a manifest must keep naming its own package explicitly, exactly as it always
- *     has), `coinType` defaults to SUI. `compiler.service.ts` reads this as "no manifest" and keeps
- *     emitting the single legacy `agent_wallet::spend()` call.
- *
- *   - A `capabilityManifest` IS present -> the redesigned Rule + Hot Potato binding
- *     `compiler.service.ts`'s `buildManifestGatedSpend` needs: `packageId` falls back to
- *     `AGENT_WALLET_PACKAGE_ID_REDESIGNED` and `versionId` falls back to `AGENT_WALLET_VERSION_ID`
- *     when the caller doesn't supply its own (the expected common case — a caller knows its
- *     capability manifest, not the redesigned package's deployed address). Either left unresolved
- *     (env unset AND caller silent) throws `ValidationError` (422) HERE, before any PTB command is
- *     ever built — a manifest-gated spend can never be attempted half-configured.
- *
- * Both branches keep coexisting: which one a given request takes depends solely on whether ITS OWN
- * `capabilityManifest` field is present, never on a global server setting.
+ * A wallet binding always requires a `capabilityManifest` (KTD-6: there is no honest "no
+ * restrictions" default, and there is no more legacy manifest-less `spend()` fallback to fall back
+ * to) plus the shared `agent_wallet::version::Version` object id `versionId` gates. `packageId`
+ * falls back to `AGENT_WALLET_PACKAGE_ID` and `versionId` falls back to `AGENT_WALLET_VERSION_ID`
+ * when the caller doesn't supply its own (the expected common case — a caller knows its capability
+ * manifest, not the deployed package/version addresses). A missing manifest, or an unresolved
+ * package/version (env unset AND caller silent), throws `ValidationError` (422) HERE, before any PTB
+ * command is ever built — a spend can never be attempted half-configured, and a wallet can never be
+ * bound without an owner-declared manifest.
  */
 export function normalizeAgentWallet(input: AgentWalletInput): AgentWalletBinding {
   const coinType = input.coinType ?? SUI_COIN_TYPE;
 
-  if (input.capabilityManifest) {
-    const packageId = input.packageId ?? process.env.AGENT_WALLET_PACKAGE_ID_REDESIGNED;
-    const versionId = input.versionId ?? process.env.AGENT_WALLET_VERSION_ID;
-
-    if (!packageId) {
-      throw new ValidationError(
-        'agentWallet.capabilityManifest requires the redesigned agent_wallet package id: supply '
-          + 'agentWallet.packageId explicitly, or configure AGENT_WALLET_PACKAGE_ID_REDESIGNED on '
-          + 'the server — a manifest-gated spend cannot be built without it.',
-      );
-    }
-    if (!versionId) {
-      throw new ValidationError(
-        'agentWallet.capabilityManifest requires the shared agent_wallet Version object id: supply '
-          + 'agentWallet.versionId explicitly, or configure AGENT_WALLET_VERSION_ID on the server — '
-          + 'a manifest-gated spend cannot be built without it.',
-      );
-    }
-
-    return {
-      packageId,
-      walletId: input.walletId,
-      capId: input.capId,
-      coinType,
-      capabilityManifest: input.capabilityManifest,
-      versionId,
-    };
+  if (!input.capabilityManifest) {
+    throw new ValidationError(
+      'agentWallet is bound without a capabilityManifest: every agent wallet binding must declare '
+        + 'the owner-approved rules it is allowed to spend under — there is no legacy manifest-less '
+        + 'spend() fallback. Supply agentWallet.capabilityManifest (e.g. at least a "budget" rule).',
+    );
   }
 
-  if (!input.packageId) {
-    throw new ValidationError('agentWallet.packageId is required.');
+  const packageId = input.packageId ?? process.env.AGENT_WALLET_PACKAGE_ID;
+  const versionId = input.versionId ?? process.env.AGENT_WALLET_VERSION_ID;
+
+  if (!packageId) {
+    throw new ValidationError(
+      'agentWallet.capabilityManifest requires the agent_wallet package id: supply '
+        + 'agentWallet.packageId explicitly, or configure AGENT_WALLET_PACKAGE_ID on the server — '
+        + 'a manifest-gated spend cannot be built without it.',
+    );
+  }
+  if (!versionId) {
+    throw new ValidationError(
+      'agentWallet.capabilityManifest requires the shared agent_wallet Version object id: supply '
+        + 'agentWallet.versionId explicitly, or configure AGENT_WALLET_VERSION_ID on the server — '
+        + 'a manifest-gated spend cannot be built without it.',
+    );
   }
 
   return {
-    packageId: input.packageId,
+    packageId,
     walletId: input.walletId,
     capId: input.capId,
     coinType,
+    capabilityManifest: input.capabilityManifest,
+    versionId,
   };
 }

@@ -65,3 +65,10 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=rill-backend
           cache-to: type=gha,mode=max,scope=rill-backend
+
+      # After the new image is in GHCR, ping Dokploy to pull + redeploy. The webhook URL carries a
+      # deploy token, so it lives in the DOKPLOY_DEPLOY_WEBHOOK repo secret — never hardcoded here.
+      # Same gate as the push above: only a real main build triggers a deploy (not PRs).
+      - name: Trigger Dokploy deploy
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        run: curl -fsS -X POST "${{ secrets.DOKPLOY_DEPLOY_WEBHOOK }}"

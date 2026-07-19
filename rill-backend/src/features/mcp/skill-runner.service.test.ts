@@ -2,11 +2,19 @@ import { expect, test } from 'bun:test';
 import { mainnetPools, testnetPools } from '@mysten/deepbook-v3';
 import { digestUnsignedPtb } from '../../../../packages/rill-sdk/src/execution-envelope';
 import type { ExecutionEnvelope } from '../../../../packages/rill-sdk/src/types';
+import type { CapabilityManifest } from '../../../../packages/rill-sdk/src/capability-manifest';
 import { config, suiClient } from '../../core/config';
 import { simulatorService } from '../compiler/simulator.service';
 import { SkillRunnerService } from './skill-runner.service';
 
 const objectId = (n: number) => `0x${n.toString(16).padStart(64, '0')}`;
+
+// There is ONE agent_wallet package now — every bound wallet requires a capabilityManifest +
+// versionId (no legacy manifest-less spend() fallback).
+const DEFAULT_MANIFEST: CapabilityManifest = {
+  walletCoinType: '0x2::sui::SUI',
+  rules: [{ kind: 'budget', totalMist: '5000000000' }],
+};
 
 test('builds the minimal DeepBook ExecutionEnvelope without signing', async () => {
   const poolKey = config.network === 'testnet' ? 'SUI_DBUSDC' : 'SUI_USDC';
@@ -64,6 +72,8 @@ test('builds the minimal DeepBook ExecutionEnvelope without signing', async () =
           walletId,
           capId: agentCapId,
           coinType: '0x2::sui::SUI',
+          versionId: objectId(9),
+          capabilityManifest: DEFAULT_MANIFEST,
         },
       },
     );
@@ -173,6 +183,8 @@ test('refuses to return an ExecutionEnvelope when strict simulation fails — no
           walletId: objectId(2),
           capId: objectId(3),
           coinType: '0x2::sui::SUI',
+          versionId: objectId(9),
+          capabilityManifest: DEFAULT_MANIFEST,
         },
       },
     );

@@ -131,8 +131,7 @@ function producedCoinSlots(command: PtbCommand): number {
   const target = `${command.MoveCall.package}::${command.MoveCall.module}::${command.MoveCall.function}`;
   if (target.endsWith('::router::swap')) return 2; // Cetus router::swap always returns (CoinA, CoinB)
   if (target.endsWith('::coin::zero')) return 1;
-  if (target.endsWith('::agent_wallet::spend')) return 1;
-  if (target.endsWith('::agent_wallet::confirm_spend')) return 1; // U5: releases Coin<T>, same as spend()
+  if (target.endsWith('::agent_wallet::confirm_spend')) return 1; // releases the funding Coin<T>
   return 0; // assert_min_value, request_stake, DeepBook calls, request_spend (a hot potato, not a
   // coin — not swept), type_name::get (a TypeName, not a coin), etc. — nothing coin-referenceable.
 }
@@ -206,7 +205,7 @@ test('terminal Action -> Guardrail compiles to a self-consuming PTB', async () =
     edges: [{ source: 's1', sourceHandle: 'coin_out', target: 'g1', targetHandle: 'in' }],
   };
 
-  const result = await compilerService.compileFlow(flow, { sender, agentWallet });
+  const result = await compilerService.compileFlow(flow, { sender, agentWallet: fundedAgentWallet });
   const targets = moveCallTargets(result.transaction);
 
   // The guardrail's assert must be present — the coin passed through it, not dropped.
@@ -316,7 +315,7 @@ test('guardrail with absent minValue yields a "no protection enforced" warning (
     edges: [],
   };
 
-  const result = await compilerService.compileFlow(flow, { sender, agentWallet });
+  const result = await compilerService.compileFlow(flow, { sender, agentWallet: fundedAgentWallet });
 
   expect(result.warnings).toContain(
     'Guardrail g1 has no minimum value configured — no protection is enforced.',
@@ -369,18 +368,19 @@ test('unknown targetHandle "coin" -> ValidationError (422) and never risks a dou
   };
 
   expect(FlowSchema.safeParse(malformed).success).toBe(false);
-  await expect(compilerService.compileFlow(malformed, { sender, agentWallet }))
+  await expect(compilerService.compileFlow(malformed, { sender, agentWallet: fundedAgentWallet }))
     .rejects.toThrow(/not a valid input handle/);
-  // The rejection happens before any transaction is built at all — structurally, no spend() (or any
-  // other command) can ever be emitted for a flow that fails this validation.
+  // The rejection happens before any transaction is built at all — structurally, no request_spend
+  // (or any other command) can ever be emitted for a flow that fails this validation.
 
   // Regression pin, decoupled from the malformed edge above: there is only ever one
-  // `agent_wallet::spend` call site in the whole compiler (sized to the summed root funding) — this
-  // pins its count and amount so a future regression that duplicates or inflates funding is caught.
+  // `agent_wallet::request_spend` call site in the whole compiler (sized to the summed root funding)
+  // — this pins its count and amount so a future regression that duplicates or inflates funding is
+  // caught.
   const healthy = { nodes: [cetusSwapNode('s1')], edges: [] };
-  const result = await compilerService.compileFlow(healthy, { sender, agentWallet });
+  const result = await compilerService.compileFlow(healthy, { sender, agentWallet: fundedAgentWallet });
   const targets = moveCallTargets(result.transaction);
-  expect(targets.filter((t) => t === `${agentWallet.packageId}::agent_wallet::spend`)).toHaveLength(1);
+  expect(targets.filter((t) => t === `${agentWallet.packageId}::agent_wallet::request_spend`)).toHaveLength(1);
   expect(result.budgetSpendMist).toBe(1_000_000_000n);
 });
 
@@ -450,20 +450,18 @@ test('a cycle in the flow -> ValidationError (422) via the topological sort', as
   expect((thrown as InstanceType<typeof ValidationError>).status).toBe(422);
 });
 
-// --- U5: manifest-gated spend (Rule + Hot Potato) -----------------------------
+// --- Manifest-gated spend (Rule + Hot Potato) — the ONLY agent-wallet funding path -------------
 //
-// When `agentWallet.capabilityManifest` is set, the compiler emits the redesigned agent_wallet
-// package's `request_spend -> prove x N -> confirm_spend` sequence instead of the legacy single
-// `agent_wallet::spend()` call. The redesigned package (U1) is a fresh, not-yet-deployed deploy —
-// these tests assert the PTB *structure* (targets, order, argument wiring), not live execution.
+// Every bound agent wallet compiles the redesigned agent_wallet package's `request_spend -> prove
+// x N -> confirm_spend` sequence — there is no more legacy single `agent_wallet::spend()` call or
+// package to fall back to (a wallet bound without a manifest is a `ValidationError`, see the "no
+// manifest" test below). These tests assert the PTB *structure* (targets, order, argument wiring).
 
 const AGENT_WALLET_VERSION_ID = objectId(20);
 const RECIPIENT = objectId(21);
 
-/** `agentWallet` (no manifest) plus the field the redesigned sequence needs, so a test only has to
- *  add `capabilityManifest` to opt into the new path. `request_spend` no longer takes a
- *  `target_package`/`recipient` (see `compiler.service.ts`'s C2 pre-flight doc comments) — those are
- *  cross-checked pre-flight against `protocol_scope`/`recipient_allowlist` instead, not passed here. */
+/** `agentWallet` (no manifest) plus the field the redesigned sequence needs — every actual compile
+ *  in this file adds its own `capabilityManifest` on top (a bound wallet always requires one). */
 const manifestWallet = {
   ...agentWallet,
   versionId: AGENT_WALLET_VERSION_ID,
@@ -479,8 +477,18 @@ function manifest(rules: CapabilityRule[]): CapabilityManifest {
   return { walletCoinType: SUI, rules };
 }
 
+/** The default "just give me a working funded agent wallet" fixture — a single permissive budget
+ *  rule, for tests that need root SUI funding to succeed but don't care about the manifest's exact
+ *  rule set. */
+const fundedAgentWallet = {
+  ...manifestWallet,
+  capabilityManifest: manifest([{ kind: 'budget', totalMist: '5000000000' }]),
+};
+
 const REQUEST_SPEND_TARGET = `${agentWallet.packageId}::agent_wallet::request_spend`;
 const CONFIRM_SPEND_TARGET = `${agentWallet.packageId}::agent_wallet::confirm_spend`;
+/** Regression pin only — asserts the retired call NEVER reappears in a compiled PTB; this package
+ *  has no `agent_wallet::spend` function anymore. */
 const LEGACY_SPEND_TARGET = `${agentWallet.packageId}::agent_wallet::spend`;
 
 test('a manifest with 3 rules compiles request_spend + 3 proves (in order) + confirm_spend', async () => {
@@ -710,30 +718,27 @@ test('a manifest present but missing versionId -> ValidationError (422)', async 
   ).rejects.toThrow(ValidationError);
 });
 
-test('a flow WITHOUT a manifest compiles the CURRENT spend() path — byte-identical regression', async () => {
+test('an agent wallet bound WITHOUT a manifest -> ValidationError, never a legacy spend() fallback', async () => {
   const flow = { nodes: [cetusSwapNode('s1')], edges: [] };
 
-  const resultLegacy = await compilerService.compileFlow(flow, { sender, agentWallet });
-  const resultExplicitUndefined = await compilerService.compileFlow(flow, {
+  // Bare `agentWallet` (no capabilityManifest) and an explicit `capabilityManifest: undefined` both
+  // fail the exact same way — there is no manifest-less package/call left to fall back to.
+  await expect(compilerService.compileFlow(flow, { sender, agentWallet }))
+    .rejects.toThrow(ValidationError);
+  await expect(compilerService.compileFlow(flow, {
     sender,
     agentWallet: { ...manifestWallet, capabilityManifest: undefined },
-  });
+  })).rejects.toThrow(ValidationError);
 
-  for (const result of [resultLegacy, resultExplicitUndefined]) {
-    const targets = moveCallTargets(result.transaction);
-    expect(targets).toContain(LEGACY_SPEND_TARGET);
-    expect(targets).not.toContain(REQUEST_SPEND_TARGET);
-    expect(targets).not.toContain(CONFIRM_SPEND_TARGET);
-    expect(targets.some((t) => t.endsWith('::prove'))).toBe(false);
+  // Fails BEFORE any command is emitted (R1: never emit an unguarded spend) — never the retired
+  // legacy `agent_wallet::spend` call, and never a half-built request_spend/confirm_spend pair.
+  let thrown: unknown;
+  try {
+    await compilerService.compileFlow(flow, { sender, agentWallet });
+  } catch (err) {
+    thrown = err;
   }
-
-  // Same flow/sender/wallet-identity compiled through the untouched legacy branch: byte-identical
-  // commands/inputs — this is the U5 backward-compat gate's core proof (R8: the deployed v2 package's
-  // path never changes shape).
-  expect(resultExplicitUndefined.transaction.getData().commands).toEqual(resultLegacy.transaction.getData().commands);
-  expect(resultExplicitUndefined.transaction.getData().inputs).toEqual(resultLegacy.transaction.getData().inputs);
-
-  assertEveryProducedCoinConsumedExactlyOnce(resultLegacy.transaction);
+  expect(thrown).toBeInstanceOf(ValidationError);
 });
 
 // --- Review C2: manifest pre-flight cross-check (real enforcement, not decorative) -------------

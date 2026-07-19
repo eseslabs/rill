@@ -92,15 +92,14 @@ function requireNonEmptyString(value: unknown, message: string): string {
 }
 
 /**
- * F7: allow-listed field parsing PLUS resolution — `assertOnlyFields`/`requireNonEmptyString` below
- * only shape-check what the caller sent; `normalizeAgentWallet` (`core/agent-wallet.ts`, the SAME
- * function the HTTP `/compile`/`/simulate`/`/execute` routes use) is what actually decides which of
- * the two coexisting agent_wallet packages this call resolves to — v2 `spend()` when no
- * `capabilityManifest` was sent, the redesigned request_spend/confirm_spend package (falling back to
- * `AGENT_WALLET_PACKAGE_ID_REDESIGNED`/`AGENT_WALLET_VERSION_ID` when the caller omits its own
- * packageId/versionId) when one was. `packageId` is therefore no longer required to be present up
- * front here — a manifest-gated MCP caller may omit it and let the server-configured redesigned
- * package resolve automatically, exactly like the HTTP path.
+ * Allow-listed field parsing PLUS resolution — `assertOnlyFields`/`requireNonEmptyString` below only
+ * shape-check what the caller sent; `normalizeAgentWallet` (`core/agent-wallet.ts`, the SAME function
+ * the HTTP `/compile`/`/simulate`/`/execute` routes use) is what actually resolves this call's binding
+ * against the ONE agent_wallet package and enforces its `capabilityManifest`/`versionId` are present
+ * — falling back to `AGENT_WALLET_PACKAGE_ID`/`AGENT_WALLET_VERSION_ID` when the caller omits its own
+ * packageId/versionId. `packageId` is therefore no longer required to be present up front here — a
+ * caller may omit it and let the server-configured package resolve automatically, exactly like the
+ * HTTP path. A `capabilityManifest`-less binding is rejected there with a `ValidationError`.
  */
 function readAgentWallet(value: unknown): AgentWalletBinding {
   if (!isRecord(value)) {
@@ -319,8 +318,13 @@ export async function handleMcpJsonRpc(
           deepbookPackageId,
           defaultPoolKey,
           defaultPoolId,
+          // There is ONE agent_wallet package now (the manifest-gated Rule + Hot Potato design) — a
+          // compiled build_action PTB always calls request_spend/confirm_spend, never the retired
+          // legacy spend(). (Any per-manifest-rule `prove` calls aren't listed here: this discovery
+          // response can't know the caller's capability manifest ahead of time.)
           requiredTargets: [
-            `${walletPackageId}::agent_wallet::spend`,
+            `${walletPackageId}::agent_wallet::request_spend`,
+            `${walletPackageId}::agent_wallet::confirm_spend`,
             `${deepbookPackageId}::balance_manager::deposit`,
             `${deepbookPackageId}::balance_manager::generate_proof_as_trader`,
             `${deepbookPackageId}::pool::place_limit_order`,

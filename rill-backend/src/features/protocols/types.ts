@@ -23,7 +23,8 @@ export interface FlowGraph {
 
 export interface CompileOptions {
   sender?: string;
-  /** When set, root SUI funding uses agent_wallet::spend() instead of tx.gas. */
+  /** When set, root SUI funding uses the manifest-gated agent_wallet request_spend/confirm_spend
+   *  sequence instead of tx.gas. */
   agentWallet?: AgentWalletBinding;
 }
 
