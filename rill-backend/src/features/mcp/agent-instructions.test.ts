@@ -49,12 +49,15 @@ function assertNoPrivateKeyMaterial(doc: string): void {
 test('renders both mcp-add commands and the 4-step tool order', () => {
   const doc = renderAgentInstructions(skill);
 
-  // Both `claude mcp add` commands, env-safe form (public network + policy-path only).
-  expect(doc).toContain('claude mcp add --transport http rill-actions "$RILL_REMOTE_MCP_URL"');
+  // Claude Code mcp-add commands (URL inlined, not via env var).
+  expect(doc).toContain('claude mcp add --transport http rill-actions');
   // rill-wallet is a hosted standalone binary — no repo clone, no bun/node install.
   expect(doc).toContain('releases/latest/download/rill-wallet-darwin-arm64');
   expect(doc).toContain('--transport stdio rill-wallet -- "$PWD/rill-wallet"');
-  expect(doc).toContain('export RILL_REMOTE_MCP_URL=');
+  // OpenCode support: opencode.json mcp block with both servers.
+  expect(doc).toContain('"$schema": "https://opencode.ai/config.json"');
+  expect(doc).toContain('"rill-actions": { "type": "remote"');
+  expect(doc).toContain('"rill-wallet": { "type": "local"');
 
   // The correct 4-step tool sequence, in order.
   const listIdx = doc.indexOf('`list_actions`');
@@ -72,16 +75,15 @@ test('renders both mcp-add commands and the 4-step tool order', () => {
 test('documents one-time local signer setup: auto-generated keypair, address, and funding — honest against the current signer', () => {
   const doc = renderAgentInstructions(skill);
 
-  // Auto-keypair behavior, verified against packages/rill-signer/src/keystore.ts /core.ts — not
-  // the old SKILL.md's manual-env-var-only story.
-  expect(doc).toContain('.rill/keys/agent-<network>.key');
-  expect(doc).toContain('no manual key setup is required to get started');
+  // Auto-keypair behavior — no manual key export; the agent self-onboards the wallet.
+  expect(doc).toContain('generates and persists its own keypair on first use');
   expect(doc).toContain('`signer_status`');
   expect(doc).toContain('`request_faucet`');
+  expect(doc).toContain('`create_run_set`');
 
-  // Ordered before the tool sequence section, and before every tool-sequence-section occurrence.
-  const setupIdx = doc.indexOf('## 2. Local signer setup');
-  const sequenceIdx = doc.indexOf('## 3. Tool sequence');
+  // Onboarding section ordered before the tool sequence.
+  const setupIdx = doc.indexOf('## 2. Agent: onboard the wallet');
+  const sequenceIdx = doc.indexOf('## 3. Agent: tool sequence');
   expect(setupIdx).toBeGreaterThan(-1);
   expect(sequenceIdx).toBeGreaterThan(setupIdx);
 

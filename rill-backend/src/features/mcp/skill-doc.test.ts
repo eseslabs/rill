@@ -30,7 +30,9 @@ test('documents the bounded remote and local MCP handoff', () => {
   expect(doc).not.toContain('bun run "$RILL_WALLET_MCP_ENTRY"');
   expect(doc).toContain('--transport stdio rill-wallet -- "$PWD/rill-wallet"');
   expect(doc).toContain('--env "SUI_NETWORK=$SUI_NETWORK"');
-  expect(doc).toContain('Launch Claude from the shell where `RILL_SUI_PRIVATE_KEY` is already set');
+  expect(doc).toContain('Launch Claude/OpenCode from the shell where `RILL_SUI_PRIVATE_KEY` is already set');
+  // OpenCode setup config present alongside Claude Code.
+  expect(doc).toContain('"$schema": "https://opencode.ai/config.json"');
   expect(doc).not.toContain('--env "RILL_SUI_PRIVATE_KEY=');
   expect(doc).not.toContain('sui_execute_ptb');
   expect(doc).toContain('## Onboarding');

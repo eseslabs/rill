@@ -28,6 +28,12 @@ const EXECUTE_TOOL_NAME = 'execute_rill_action';
  *  `request_faucet`), same zero-coupling literal convention as `EXECUTE_TOOL_NAME` above. */
 const SIGNER_STATUS_TOOL_NAME = 'signer_status';
 const REQUEST_FAUCET_TOOL_NAME = 'request_faucet';
+const CREATE_RUN_SET_TOOL_NAME = 'create_run_set';
+
+/** Release asset base for the standalone `rill-wallet` binary — a user installs the signer from
+ *  here with one curl, no repo clone / bun / node. */
+const RILL_WALLET_RELEASE_BASE =
+  'https://github.com/eseslabs/rill/releases/latest/download';
 
 /** No-wallet honest state (KTD-6) — reused verbatim so every rendering surface says the same thing. */
 export const NO_MANIFEST_DECLARATION =
@@ -37,34 +43,44 @@ function mcpUrlFor(skill: PublishedSkill): string {
   return `${config.publicBaseUrl}/api/mcp/${skill.id}`;
 }
 
-/** The two `claude mcp add` commands — the exact env-safe form from the README's "Use it with any
- *  agent" section: public network + policy-path values only travel through MCP config; the signer
- *  key is set only in the shell that launches the agent and is never written to config, arguments,
- *  or transcripts. */
-function renderMcpAddCommands(skill: PublishedSkill): string[] {
+/** Install the standalone signer binary + connect BOTH MCP servers, for Claude Code AND OpenCode —
+ *  the agent runs these itself; the user runs nothing but the one restart. No key export (the signer
+ *  auto-generates its own keypair on first use), no repo clone (hosted binary), no
+ *  RILL_SIGNER_POLICY_PATH (create_run_set bootstraps the run-set). */
+function renderConnectServers(skill: PublishedSkill): string[] {
+  const url = mcpUrlFor(skill);
+  const net = config.network;
   return [
-    'Set the local signer key only in the shell or secret manager that launches the agent. Never put',
-    'it in MCP JSON, command arguments, transcripts, or the repository.',
+    '**a. Install the local signer** (one standalone binary — no repo clone, no bun/node). Pick the OS:',
     '',
     '```bash',
-    `export RILL_REMOTE_MCP_URL="${mcpUrlFor(skill)}"`,
-    'claude mcp add --transport http rill-actions "$RILL_REMOTE_MCP_URL"',
+    `curl -fsSL ${RILL_WALLET_RELEASE_BASE}/rill-wallet-darwin-arm64 -o rill-wallet && chmod +x rill-wallet`,
+    '#   Intel Mac: rill-wallet-darwin-x64   ·   Linux: rill-wallet-linux-x64',
     '```',
+    '',
+    'No key to export — the signer generates and persists its own keypair on first use.',
+    '',
+    '**b. Connect both MCP servers.** Claude Code:',
     '',
     '```bash',
-    `export SUI_NETWORK="${config.network}"`,
-    '# Standalone signer binary — no repo clone, no bun/node install. Pick your platform:',
-    '#   Apple Silicon: rill-wallet-darwin-arm64 · Intel Mac: rill-wallet-darwin-x64 · Linux: rill-wallet-linux-x64',
-    'curl -fsSL https://github.com/eseslabs/rill/releases/latest/download/rill-wallet-darwin-arm64 -o rill-wallet && chmod +x rill-wallet',
-    '',
-    'claude mcp add --env "SUI_NETWORK=$SUI_NETWORK" --transport stdio rill-wallet -- "$PWD/rill-wallet"',
+    `claude mcp add --transport http rill-actions "${url}"`,
+    `claude mcp add --env "SUI_NETWORK=${net}" --transport stdio rill-wallet -- "$PWD/rill-wallet"`,
     '```',
     '',
-    'No run-set yet? The signer creates one on first use via `create_run_set` (below) — no',
-    '`RILL_SIGNER_POLICY_PATH` needed. To reuse an existing policy, set that env var to its path.',
+    'OpenCode — add to `opencode.json` in the project root:',
     '',
-    'Launch the agent from the shell where `RILL_SUI_PRIVATE_KEY` is already set so the local signer',
-    'inherits it without the value ever being written to MCP configuration.',
+    '```json',
+    '{',
+    '  "$schema": "https://opencode.ai/config.json",',
+    '  "mcp": {',
+    `    "rill-actions": { "type": "remote", "url": "${url}", "enabled": true },`,
+    `    "rill-wallet": { "type": "local", "command": ["./rill-wallet"], "environment": { "SUI_NETWORK": "${net}" }, "enabled": true }`,
+    '  }',
+    '}',
+    '```',
+    '',
+    '**c. Fully restart the agent** (quit + relaunch in this directory) so the new MCP tools load —',
+    'MCP servers are read once at startup, never mid-session.',
   ];
 }
 
@@ -88,18 +104,18 @@ function toolSequence(skill: PublishedSkill): readonly [string, string, string, 
  * get started. Named tools (`signer_status`, `request_faucet`) are real entries in
  * `packages/rill-signer/src/mcp.ts`'s `walletTools`, not invented.
  */
-function renderSignerSetup(): string[] {
+function renderOnboard(): string[] {
   return [
-    'The local `rill-wallet` signer holds its own key — Rill Cloud never does. If neither the',
-    '`RILL_SUI_PRIVATE_KEY` nor the `SUI_PRIVATE_KEY` environment variable is set when it starts, it',
-    'generates and persists a keypair on first use (`.rill/keys/agent-<network>.key`, file mode',
-    '0600) — no manual key setup is required to get started.',
+    'Once the tools are loaded, the agent onboards the wallet on its own — the user only funds an',
+    'address it hands back:',
     '',
-    `1. Call local \`${SIGNER_STATUS_TOOL_NAME}\` to read the signer's address, network, and SUI balance.`,
-    '2. Use that address as `sender` on every build call in the tool sequence below.',
-    `3. Fund it before building/executing anything: on testnet, call local \`${REQUEST_FAUCET_TOOL_NAME}\`;`,
-    '   on mainnet, send SUI to the address yourself. Gas alone is enough to build/simulate — the',
-    '   agent-wallet budget (section 4 below) is what actually funds a spend.',
+    `1. \`${SIGNER_STATUS_TOOL_NAME}\` (local \`rill-wallet\`) — read the signer address, network, and`,
+    '   SUI balance. Use that address as `sender` on every build call.',
+    `2. \`${REQUEST_FAUCET_TOOL_NAME}\` (local, testnet) to fund gas — or tell the user in plain words:`,
+    '   "Send some testnet SUI to `<address>`." (Mainnet: the user funds it.)',
+    `3. \`${CREATE_RUN_SET_TOOL_NAME}\` (local) — confirm with the user, then create the bounded on-chain`,
+    '   agent wallet + run-set. This wallet\'s budget is what actually bounds every spend.',
+    '4. Report the address back and confirm it is funded and ready — then the user just prompts.',
   ];
 }
 
@@ -164,28 +180,32 @@ function renderExamplePrompt(manifest: CapabilityManifest | undefined): string[]
  */
 export function renderAgentInstructions(skill: PublishedSkill, manifest?: CapabilityManifest): string {
   return [
-    `# Agent Instructions — ${skill.name}`,
+    `# Set up & run — ${skill.name}`,
     '',
-    `Ready-to-paste onboarding for any MCP-capable agent (Claude Code, OpenClaw, Hermes, …) to use `
-      + `this Rill skill: **${skill.name}** (\`${skill.id}\`), network **${config.network}**.`,
+    `**Paste this whole file to your coding agent (Claude Code or OpenCode) and tell it to follow it.** `
+      + `The agent installs the signer, connects the MCP servers, creates your bounded wallet, and hands `
+      + `you an address to fund — then you just prompt. Nothing to hand-wire.`,
     '',
-    '## 1. Connect the MCP servers',
+    `Skill: **${skill.name}** (\`${skill.id}\`), network **${config.network}**. Rill Cloud never signs — `
+      + `it only builds; the local \`rill-wallet\` you install below holds the key and submits.`,
     '',
-    ...renderMcpAddCommands(skill),
+    '## 1. Agent: install & connect',
     '',
-    '## 2. Local signer setup (one-time)',
+    ...renderConnectServers(skill),
     '',
-    ...renderSignerSetup(),
+    '## 2. Agent: onboard the wallet (after the restart)',
     '',
-    '## 3. Tool sequence',
+    ...renderOnboard(),
+    '',
+    '## 3. Agent: tool sequence for each request',
     '',
     ...renderToolSequence(skill),
     '',
-    '## 4. Active guardrails',
+    '## 4. Guardrails the wallet enforces on-chain',
     '',
     ...renderGuardrails(manifest),
     '',
-    '## 5. Example agent prompt',
+    '## 5. Then you just prompt',
     '',
     ...renderExamplePrompt(manifest),
     '',
